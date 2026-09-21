@@ -135,6 +135,25 @@ fn state_of(fleet_dir: &Path, key: &SessionKey) -> Option<OrchestratorState> {
     load_orchestrator_state(fleet_dir, key)
 }
 
+/// Remove a session directory the monitor is still writing into. A file
+/// created between the walk and the rmdir makes the removal fail with
+/// ENOTEMPTY, so retry until the directory is actually gone — that state is
+/// what the assertions below are about.
+fn remove_dir_under_a_live_monitor(dir: &Path) {
+    let deadline = Instant::now() + WAIT;
+    while dir.exists() {
+        if std::fs::remove_dir_all(dir).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "could not remove {}",
+            dir.display()
+        );
+        std::thread::sleep(POLL);
+    }
+}
+
 fn monitor_pid(fleet_dir: &Path, session: &OrchestratorSession) -> i32 {
     state_of(fleet_dir, &session.key())
         .and_then(|state| state.pid)
@@ -368,7 +387,7 @@ async fn two_live_sessions_are_isolated_and_one_dir_removal_stops_only_its_own_m
     // -- Fix B: removing session A's directory stops exactly A's monitor --
     let a_key = fix.a.key();
     let a_dir = FleetPaths::new(fleet_dir).orchestrator_dir(&a_key);
-    std::fs::remove_dir_all(&a_dir).unwrap();
+    remove_dir_under_a_live_monitor(&a_dir);
     let exit_a = wait_for_child_exit(
         "a-monitor-exit",
         WAIT,
@@ -415,7 +434,7 @@ async fn two_live_sessions_are_isolated_and_one_dir_removal_stops_only_its_own_m
     // Cleanup: delete B's directory and both monitors are gone for good.
     let b_key = fix.b.key();
     let b_dir = FleetPaths::new(fleet_dir).orchestrator_dir(&b_key);
-    std::fs::remove_dir_all(&b_dir).unwrap();
+    remove_dir_under_a_live_monitor(&b_dir);
     let exit_b = wait_for_child_exit(
         "b-monitor-exit",
         WAIT,

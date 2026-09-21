@@ -30,7 +30,7 @@ Single crate `parl`, lib + bin. The library is the contract, and the binary only
 | `src/route.rs` | choosing a worker's model, thinking level and worktree from its brief with TypeSafe's System One (Jev). Off by default; a judgment that cannot be had is no judgment, never an error. |
 | `src/ops/` | the shared operation layer both the CLI and the MCP tools call: `spawn.rs`, `query.rs` (status/output/logs/report/wait/attach), `steer.rs` (send/followup/answer/stop), `integrate.rs` (diff/merge/cleanup). The CLI-shaped signatures live beside `_core` variants that take a `Party` source, so the console and MCP can attribute actions honestly. |
 | `src/mcp/` | the stdio MCP server (`server.rs`), one tool per op, built on `rmcp`. Server name stays `fleet` so tools stay `mcp__fleet__*`. |
-| `src/tui/` | the console: app state and update loop (`app.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
+| `src/tui/` | the console: state and update loop (`app/mod.rs`, with the overlay handlers in `app/overlays.rs` and the composer's commands in `app/commands.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
 | `pi/`, `prompts/` | TypeScript on purpose, embedded with `include_str!` and materialised into `.parl/pi/` at worker boot: `pi/extensions/fleet-worker.ts`, `pi/skills/fleet-worker-report/SKILL.md`, `prompts/orchestrator.md`. |
 
 ## The orchestrator contract
@@ -150,6 +150,7 @@ One conversation, and overlays over it. There is no second view and no modal spl
 - **An overlay that is a list reads single letters as commands** (`map_overlay_key`), and one that is a text field reads them as text (`map_key`). `Console::handle_key` picks per overlay, including the permission overlay, which switches while a deny reason or a custom answer is being written — a reason starting with "just" must not lose its letters to list navigation. `n` and `y` are never remapped, because that is how a confirm prompt hears no.
 - **A permission prompt raises itself**, once per request id: it blocks the orchestrator, so waiting to be found is wrong, and re-raising one that was dismissed would trap the console.
 - **Folding.** Reasoning and tool output older than `RECENT_BLOCKS` fold to one summary row each; `/verbose` (`ctrl-o`) unfolds. The model's prose, the human's prompts, fleet events and errors are never folded.
+- **`app/` is one module in three files**, not three modules: `overlays.rs` and `commands.rs` are children of `app`, so `Console`'s state stays private to the console and only what the parent calls back into is `pub(super)`. A sibling module would have needed the fields public.
 
 ## Streaming and trimming
 
