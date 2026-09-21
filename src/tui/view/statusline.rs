@@ -6,14 +6,12 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use crate::fleet::run::derive_view;
 use crate::tui::app::Console;
-use crate::tui::keys::Mode;
 use crate::tui::model::SessionTarget;
 use crate::tui::theme::Palette;
 use crate::tui::view::Feeds;
@@ -115,24 +113,34 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console, feeds: &Feeds<'_>,
         );
     }
 
-    // the mode chip rides on the right: NORMAL rests, INSERT glows
-    let chip = match console.mode() {
-        Mode::Normal => Span::styled(" NORMAL ".to_string(), pal.dim()),
-        Mode::Insert => Span::styled(
-            " INSERT ".to_string(),
-            pal.accent().add_modifier(Modifier::REVERSED),
-        ),
-    };
+    // the chords ride on the right, so the way out of here is always on
+    // screen; the facts on the left win the row when it is tight
+    let chip = Span::styled(" ctrl+f fleet · ctrl+k commands ".to_string(), pal.dim());
+    let width = area.width as usize;
     let used: usize = spans.iter().map(|s| s.content.width()).sum();
     let chip_width = chip.content.width();
-    let width = area.width as usize;
-    let gap = width.saturating_sub(used + chip_width).max(1);
-    if spans.len() < (width.saturating_sub(chip_width + 1)) {
-        spans.push(Span::raw(" ".repeat(gap)));
+    if used + chip_width < width {
+        spans.push(Span::raw(" ".repeat(width - used - chip_width)));
         spans.push(chip);
     } else {
-        // too wide for the row: the facts matter more than the chip
-        spans.truncate(width);
+        truncate_spans(&mut spans, width);
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Drop whole spans off the end until the line fits `width` *columns* —
+/// counting spans against a width in columns let a handful of wide facts
+/// overflow the row.
+fn truncate_spans(spans: &mut Vec<Span<'static>>, width: usize) {
+    let mut used = 0;
+    let mut keep = 0;
+    for span in spans.iter() {
+        let w = span.content.width();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        keep += 1;
+    }
+    spans.truncate(keep);
 }

@@ -1,81 +1,24 @@
-//! Modal key map: normal-mode bindings vs the composer's insert mode, so a
-//! message that starts with "q" does not quit the app — in insert mode only
-//! the composer's own keys are bound. The help overlay is built from the same
-//! tables, so the bindings and the help cannot drift.
+//! The key map: one [`KeyEvent`] in, one [`KeyAction`] out. Pure — the app
+//! decides what an action means where it lands.
 //!
-//! The map is pure: it turns one [`KeyEvent`] into one [`KeyAction`] and the
-//! app decides what the action does in the current view.
+//! There is no modal split any more. The composer always has focus, so every
+//! printable key is text and nothing a message might start with is bound.
+//! The handful of things that are not text are `ctrl` chords, and everything
+//! that acts on a *session* lives in the fleet overlay, where single letters
+//! are unambiguous because nothing there is being typed.
+//!
+//! The help overlay is built from the same tables as the bindings, so the two
+//! cannot drift.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
 use std::fmt::Write as _;
 
-/// Which key mode the console is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Mode {
-    /// Single-letter keys are free because the composer does not have focus.
-    #[default]
-    Normal,
-    /// The composer has focus and types freely.
-    Insert,
-}
-
-/// What a keypress means in the current mode. The app interprets it; the map
-/// only translates.
+/// What a keypress means. The app interprets it; the map only translates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyAction {
-    // -- navigation (normal mode, both views) --
-    /// `j`/`k`/arrows: move the selection by one row.
-    Move(i32),
-    /// `g`/Home: the first row, or the top of the transcript.
-    First,
-    /// `G`/End: the last row, or the bottom of the transcript.
-    Last,
-    /// Enter: open the selected session (dashboard only).
-    Open,
-    /// Esc: back to the dashboard (session view only).
-    Back,
-    /// Tab / Shift-Tab: next / previous session.
-    NextSession,
-    PrevSession,
-    /// `1`–`9`: jump to the nth session.
-    JumpTo(usize),
-    /// `/`: search the open session's transcript.
-    Search,
-    /// `:` or Ctrl-K: the command palette.
-    OpenPalette,
-    /// `?`: the help overlay.
-    Help,
-    /// `b`: the selected session's full brief (scrollable popup).
-    Brief,
-    /// `q`: close the console; workers keep running.
-    Quit,
-    /// `Q`: stop the orchestrator and every worker (asks first).
-    Shutdown,
-    /// `i`: enter insert mode without typing the key.
-    EnterInsert,
-    // -- session actions on the selected session (normal mode) --
-    /// `a`: answer the pending question or dialog.
-    Answer,
-    /// `s`: stop the selected worker.
-    Stop,
-    /// `x`: remove the selected worker (asks first).
-    Remove,
-    /// `t`: cycle the thinking level of the selected session.
-    CycleThinking,
-    /// `m`: the palette, over models.
-    Models,
-    /// `p`: cycle the orchestrator's permission mode.
-    PermissionMode,
-    // -- transcript scrolling (session view) --
-    ScrollHalfDown,
-    ScrollHalfUp,
-    ScrollPageDown,
-    ScrollPageUp,
-    /// `n`/`N`: next / previous search match.
-    NextMatch,
-    PrevMatch,
-    // -- insert mode --
-    /// A printable character typed into the composer.
+    // -- the conversation ---------------------------------------------------
+    /// A printable character. In the composer it is text; an overlay reads it
+    /// as its own command, because nothing is being typed there.
     InsertChar(char),
     InsertBackspace,
     InsertDelete,
@@ -85,21 +28,46 @@ pub enum KeyAction {
     InsertEnd,
     /// Enter: send the composer's line.
     Send,
-    /// Alt-Enter (or Ctrl-J): a newline, not a send.
+    /// Shift-enter (or alt-enter, or ctrl-j): a newline, not a send.
     Newline,
     /// Tab: accept the highlighted completion.
     AcceptCompletion,
     /// Up/Down: through completions, or recall history when none are open.
     CompletionPrev,
     CompletionNext,
-    /// Esc: back to normal mode.
-    LeaveInsert,
-    /// Ctrl-K: the palette, from the composer.
-    PaletteInInsert,
-    /// Bound to nothing.
-    /// Hand the mouse to the terminal so its own selection works, or take
-    /// it back so the wheel scrolls again.
+    /// Esc: close what is open, else clear the composer, else stop the turn.
+    Escape,
+    /// `ctrl-f`: the fleet overlay — every session, and what can be done to
+    /// the one selected.
+    OpenFleet,
+    /// `ctrl-k`: the command palette.
+    OpenPalette,
+    /// `ctrl-r`: search the open session's transcript.
+    Search,
+    /// `ctrl-y`: hand the mouse to the terminal so its own selection works,
+    /// or take it back so the wheel scrolls again.
     ToggleMouse,
+    /// `ctrl-o`: show an older turn's reasoning and tool output in full, or
+    /// fold each back to a summary row.
+    ToggleVerbose,
+    // -- transcript scrolling -----------------------------------------------
+    ScrollHalfDown,
+    ScrollHalfUp,
+    ScrollPageDown,
+    ScrollPageUp,
+    /// The top / bottom of the transcript, or the first / last fleet row.
+    First,
+    Last,
+    // -- overlay navigation (single letters, read from `InsertChar`) --------
+    /// Move the selection by one row.
+    Move(i32),
+    /// Enter: take the selected row.
+    Open,
+    /// `1`–`9`: jump to the nth session.
+    JumpTo(usize),
+    /// The next search match; `ctrl-r` again once a search is running.
+    NextMatch,
+    /// Bound to nothing.
     Ignored,
 }
 
@@ -112,65 +80,21 @@ fn ctrl(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// Map a key press to an action. Printables in normal mode fall through to
-/// [`KeyAction::InsertChar`] — starting to type is never punished.
+/// Map a key press to an action.
 #[must_use]
-pub fn map_key(mode: Mode, key: KeyEvent) -> KeyAction {
+pub fn map_key(key: KeyEvent) -> KeyAction {
+    use KeyAction as A;
     if !is_press(&key) {
-        return KeyAction::Ignored;
+        return A::Ignored;
     }
-    match mode {
-        Mode::Normal => map_normal(key),
-        Mode::Insert => map_insert(key),
-    }
-}
-
-fn map_normal(key: KeyEvent) -> KeyAction {
-    use KeyAction as A;
     match key.code {
-        KeyCode::Char('j') | KeyCode::Down => A::Move(1),
-        // ctrl+k must be tested before the bare k that moves up
+        // chords first: a bare letter is always text
+        KeyCode::Char('f') if ctrl(&key) => A::OpenFleet,
         KeyCode::Char('k') if ctrl(&key) => A::OpenPalette,
-        KeyCode::Char('k') | KeyCode::Up => A::Move(-1),
-        KeyCode::Char('g') | KeyCode::Home => A::First,
-        KeyCode::Char('G') | KeyCode::End => A::Last,
-        KeyCode::Enter => A::Open,
-        KeyCode::Esc => A::Back,
-        KeyCode::Tab => A::NextSession,
-        KeyCode::BackTab => A::PrevSession,
-        KeyCode::Char(ch @ '1'..='9') => A::JumpTo(ch as usize - '1' as usize),
-        KeyCode::Char('/') => A::Search,
-        KeyCode::Char(':') => A::OpenPalette,
-        KeyCode::Char('?') => A::Help,
-        // ctrl+b must be tested before the bare b that opens the brief
-        KeyCode::Char('b') if ctrl(&key) => A::ScrollPageUp,
-        KeyCode::Char('b') => A::Brief,
-        KeyCode::Char('q') => A::Quit,
-        KeyCode::Char('Q') => A::Shutdown,
-        KeyCode::Char('i') => A::EnterInsert,
-        KeyCode::Char('a') => A::Answer,
-        KeyCode::Char('s') => A::Stop,
-        KeyCode::Char('x') => A::Remove,
-        KeyCode::Char('t') => A::CycleThinking,
-        KeyCode::Char('m') => A::Models,
-        KeyCode::Char('p') => A::PermissionMode,
-        KeyCode::Char('v') => A::ToggleMouse,
-        KeyCode::Char('n') => A::NextMatch,
-        KeyCode::Char('N') => A::PrevMatch,
-        KeyCode::Char('d') if ctrl(&key) => A::ScrollHalfDown,
-        KeyCode::Char('u') if ctrl(&key) => A::ScrollHalfUp,
-        KeyCode::Char('f') if ctrl(&key) => A::ScrollPageDown,
-        KeyCode::PageDown => A::ScrollPageDown,
-        KeyCode::PageUp => A::ScrollPageUp,
-        // Any other printable starts a message: normal mode keeps the char.
-        KeyCode::Char(ch) if !ctrl(&key) => A::InsertChar(ch),
-        _ => A::Ignored,
-    }
-}
-
-fn map_insert(key: KeyEvent) -> KeyAction {
-    use KeyAction as A;
-    match key.code {
+        KeyCode::Char('r') if ctrl(&key) => A::Search,
+        KeyCode::Char('y') if ctrl(&key) => A::ToggleMouse,
+        KeyCode::Char('o') if ctrl(&key) => A::ToggleVerbose,
+        KeyCode::Char('j') if ctrl(&key) => A::Newline,
         KeyCode::Char(ch) if !ctrl(&key) => A::InsertChar(ch),
         // shift-enter is the newline everyone reaches for, but a terminal
         // only reports it as its own key under the kitty protocol
@@ -183,26 +107,53 @@ fn map_insert(key: KeyEvent) -> KeyAction {
         {
             A::Newline
         }
-        KeyCode::Char('j') if ctrl(&key) => A::Newline,
         KeyCode::Enter => A::Send,
         KeyCode::Tab => A::AcceptCompletion,
         KeyCode::Backspace => A::InsertBackspace,
         KeyCode::Delete => A::InsertDelete,
         KeyCode::Left => A::InsertLeft,
         KeyCode::Right => A::InsertRight,
+        KeyCode::Home if ctrl(&key) => A::First,
+        KeyCode::End if ctrl(&key) => A::Last,
         KeyCode::Home => A::InsertHome,
         KeyCode::End => A::InsertEnd,
         KeyCode::Up => A::CompletionPrev,
         KeyCode::Down => A::CompletionNext,
-        KeyCode::Esc => A::LeaveInsert,
-        KeyCode::Char('k') if ctrl(&key) => A::PaletteInInsert,
+        KeyCode::PageDown => A::ScrollPageDown,
+        KeyCode::PageUp => A::ScrollPageUp,
+        KeyCode::Esc => A::Escape,
         _ => A::Ignored,
     }
 }
 
+/// The same event as an overlay reads it: single letters are commands there,
+/// because an overlay is a list, not a text field. Overlays that *are* text
+/// fields (the palette, the search box) use [`map_key`] instead.
+#[must_use]
+pub fn map_overlay_key(key: KeyEvent) -> KeyAction {
+    use KeyAction as A;
+    let base = map_key(key);
+    let A::InsertChar(ch) = base else {
+        return match base {
+            A::CompletionPrev => A::Move(-1),
+            A::CompletionNext => A::Move(1),
+            other => other,
+        };
+    };
+    match ch {
+        'j' => A::Move(1),
+        'k' => A::Move(-1),
+        'g' => A::First,
+        'G' => A::Last,
+        digit @ '1'..='9' => A::JumpTo(digit as usize - '1' as usize),
+        // every other letter is the overlay's own; it reads the character
+        _ => base,
+    }
+}
+
 /// Map a mouse event onto the action it means. The wheel scrolls wherever
-/// the transcript does: half a viewport per notch, in both modes; every
-/// other button stays unbound for now.
+/// the transcript does: half a viewport per notch; every other button stays
+/// unbound for now.
 #[must_use]
 pub fn map_mouse(mouse: MouseEvent) -> KeyAction {
     match mouse.kind {
@@ -229,46 +180,87 @@ pub struct HelpSection {
     pub rows: &'static [KeyHelp],
 }
 
-pub const NORMAL_KEYS: &[KeyHelp] = &[
+/// The conversation: the composer has focus, so every printable key is text.
+pub const COMPOSE_KEYS: &[KeyHelp] = &[
+    KeyHelp {
+        keys: "type + enter",
+        what: "message the orchestrator, or steer the selected worker",
+    },
+    KeyHelp {
+        keys: "shift-enter",
+        what: "newline (alt-enter or ctrl-j where the terminal cannot)",
+    },
+    KeyHelp {
+        keys: "/",
+        what: "console commands, and the agent's own",
+    },
+    KeyHelp {
+        keys: "@",
+        what: "workers and repository files",
+    },
+    KeyHelp {
+        keys: "tab",
+        what: "accept the highlighted suggestion",
+    },
+    KeyHelp {
+        keys: "up / down",
+        what: "move through suggestions, or recall what you sent",
+    },
+    KeyHelp {
+        keys: "esc",
+        what: "close what is open, else clear the line, else stop the turn",
+    },
+];
+
+/// The chords: everything in the conversation that is not text.
+pub const CHORD_KEYS: &[KeyHelp] = &[
+    KeyHelp {
+        keys: "ctrl-f",
+        what: "the fleet: every session, and what you can do to one",
+    },
+    KeyHelp {
+        keys: "ctrl-k",
+        what: "the command palette",
+    },
+    KeyHelp {
+        keys: "ctrl-r",
+        what: "search this session; again steps to the next match",
+    },
+    KeyHelp {
+        keys: "ctrl-y",
+        what: "release the mouse so you can select and copy; again takes it back",
+    },
+    KeyHelp {
+        keys: "ctrl-o",
+        what: "unfold an older turn's reasoning and tool output",
+    },
+    KeyHelp {
+        keys: "pgup / pgdn",
+        what: "scroll the transcript (the wheel does too)",
+    },
+    KeyHelp {
+        keys: "ctrl-home / ctrl-end",
+        what: "the top / the tail of the transcript",
+    },
+];
+
+/// The fleet overlay: a list, so single letters are free.
+pub const FLEET_KEYS: &[KeyHelp] = &[
     KeyHelp {
         keys: "j k / arrows",
         what: "move the selection",
     },
     KeyHelp {
         keys: "g / G",
-        what: "first / last row, or top / bottom of the transcript",
-    },
-    KeyHelp {
-        keys: "enter",
-        what: "open the selected session",
-    },
-    KeyHelp {
-        keys: "esc",
-        what: "back to the dashboard",
-    },
-    KeyHelp {
-        keys: "tab / shift-tab",
-        what: "next / previous session",
+        what: "first / last row",
     },
     KeyHelp {
         keys: "1-9",
         what: "jump to the nth session",
     },
     KeyHelp {
-        keys: "/",
-        what: "search this session",
-    },
-    KeyHelp {
-        keys: ": or ctrl-k",
-        what: "the command palette",
-    },
-    KeyHelp {
-        keys: "?",
-        what: "this help",
-    },
-    KeyHelp {
-        keys: "b",
-        what: "the selected session's full brief",
+        keys: "enter",
+        what: "open that session's conversation",
     },
     KeyHelp {
         keys: "a",
@@ -295,67 +287,16 @@ pub const NORMAL_KEYS: &[KeyHelp] = &[
         what: "permission mode (orchestrator only)",
     },
     KeyHelp {
-        keys: "ctrl-d / ctrl-u",
-        what: "scroll half a page down / up",
+        keys: "b",
+        what: "the selected session's full brief",
     },
     KeyHelp {
-        keys: "ctrl-f / ctrl-b",
-        what: "scroll a page down / up",
-    },
-    KeyHelp {
-        keys: "n / N",
-        what: "next / previous search match",
-    },
-    KeyHelp {
-        keys: "q",
-        what: "close the console; workers keep running",
-    },
-    KeyHelp {
-        keys: "Q",
-        what: "stop the orchestrator and every worker, then exit",
-    },
-    KeyHelp {
-        keys: "v",
-        what: "release the mouse so you can select and copy; again takes it back",
-    },
-    KeyHelp {
-        keys: "i",
-        what: "compose: enter insert mode (any other key types and enters too)",
-    },
-];
-
-pub const INSERT_KEYS: &[KeyHelp] = &[
-    KeyHelp {
-        keys: "type + enter",
-        what: "message the orchestrator, or steer the selected worker",
-    },
-    KeyHelp {
-        keys: "shift-enter",
-        what: "newline (alt-enter or ctrl-j where the terminal cannot)",
-    },
-    KeyHelp {
-        keys: "/",
-        what: "commands and skills",
-    },
-    KeyHelp {
-        keys: "@",
-        what: "workers and repository files",
-    },
-    KeyHelp {
-        keys: "tab",
-        what: "accept the highlighted suggestion",
-    },
-    KeyHelp {
-        keys: "up / down",
-        what: "move through suggestions, or recall what you sent",
+        keys: "?",
+        what: "this help",
     },
     KeyHelp {
         keys: "esc",
-        what: "back to normal mode",
-    },
-    KeyHelp {
-        keys: "ctrl-k",
-        what: "the command palette",
+        what: "back to the conversation",
     },
 ];
 
@@ -364,12 +305,16 @@ pub const INSERT_KEYS: &[KeyHelp] = &[
 pub fn help_sections() -> Vec<HelpSection> {
     vec![
         HelpSection {
-            title: "Normal",
-            rows: NORMAL_KEYS,
+            title: "Typing",
+            rows: COMPOSE_KEYS,
         },
         HelpSection {
-            title: "Insert",
-            rows: INSERT_KEYS,
+            title: "Chords",
+            rows: CHORD_KEYS,
+        },
+        HelpSection {
+            title: "Fleet (ctrl-f)",
+            rows: FLEET_KEYS,
         },
     ]
 }
@@ -438,7 +383,7 @@ pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
 mod tests {
     use super::*;
     use KeyAction as A;
-    use crossterm::event::MouseButton;
+    use crossterm::event::{MouseButton, MouseEventKind};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -449,223 +394,118 @@ mod tests {
     }
 
     #[test]
-    fn normal_mode_binds_the_navigation_keys() {
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('j'))), A::Move(1));
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Down)), A::Move(1));
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('k'))), A::Move(-1));
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Up)), A::Move(-1));
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('g'))), A::First);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('G'))), A::Last);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Enter)), A::Open);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Esc)), A::Back);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Tab)), A::NextSession);
-        assert_eq!(
-            map_key(
-                Mode::Normal,
-                KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
-            ),
-            A::PrevSession
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('5'))), A::JumpTo(4));
+    fn every_printable_key_is_text() {
+        // the whole point of dropping normal mode: no letter is stolen from a
+        // message, so starting to type is never punished
+        for ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:?@ !".chars() {
+            assert_eq!(
+                map_key(key(KeyCode::Char(ch))),
+                A::InsertChar(ch),
+                "{ch:?} must reach the composer"
+            );
+        }
     }
 
     #[test]
-    fn normal_mode_binds_every_session_action() {
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('/'))), A::Search);
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char(':'))),
-            A::OpenPalette
-        );
-        assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('k'))),
-            A::OpenPalette
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('?'))), A::Help);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('q'))), A::Quit);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('Q'))), A::Shutdown);
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('i'))),
-            A::EnterInsert
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('a'))), A::Answer);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('s'))), A::Stop);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('x'))), A::Remove);
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('t'))),
-            A::CycleThinking
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('m'))), A::Models);
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('p'))),
-            A::PermissionMode
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('n'))), A::NextMatch);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('N'))), A::PrevMatch);
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::Char('b'))), A::Brief);
+    fn the_chords_are_the_only_non_text_letters() {
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('f'))), A::OpenFleet);
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('k'))), A::OpenPalette);
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('r'))), A::Search);
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('y'))), A::ToggleMouse);
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('o'))), A::ToggleVerbose);
+        assert_eq!(map_key(ctrl_key(KeyCode::Char('j'))), A::Newline);
     }
 
     #[test]
-    fn normal_mode_binds_the_scrolling_keys() {
+    fn the_composer_keys_edit_and_send() {
+        assert_eq!(map_key(key(KeyCode::Enter)), A::Send);
         assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('d'))),
-            A::ScrollHalfDown
-        );
-        assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('u'))),
-            A::ScrollHalfUp
-        );
-        assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('f'))),
-            A::ScrollPageDown
-        );
-        assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('b'))),
-            A::ScrollPageUp
-        );
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::PageDown)),
-            A::ScrollPageDown
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::PageUp)), A::ScrollPageUp);
-    }
-
-    #[test]
-    fn unmapped_printables_start_a_message_keeping_the_key() {
-        // 'e' binds to nothing, so it becomes the first character of a message
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('e'))),
-            A::InsertChar('e')
-        );
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('W'))),
-            A::InsertChar('W')
-        );
-        // ctrl-modified printables are not text
-        assert_eq!(
-            map_key(Mode::Normal, ctrl_key(KeyCode::Char('e'))),
-            A::Ignored
-        );
-        assert_eq!(map_key(Mode::Normal, key(KeyCode::F(3))), A::Ignored);
-    }
-
-    #[test]
-    fn insert_mode_types_and_sends() {
-        assert_eq!(
-            map_key(Mode::Insert, key(KeyCode::Char('q'))),
-            A::InsertChar('q'),
-            "typing q must not quit"
-        );
-        assert_eq!(
-            map_key(Mode::Insert, key(KeyCode::Char('/'))),
-            A::InsertChar('/')
-        );
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Enter)), A::Send);
-        assert_eq!(
-            map_key(
-                Mode::Insert,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
-            ),
-            A::Newline,
-            "shift-enter is the newline the kitty protocol lets through"
-        );
-        assert_eq!(
-            map_key(
-                Mode::Insert,
-                KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
-            ),
+            map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             A::Newline
         );
         assert_eq!(
-            map_key(Mode::Insert, ctrl_key(KeyCode::Char('j'))),
+            map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
             A::Newline
         );
+        assert_eq!(map_key(key(KeyCode::Tab)), A::AcceptCompletion);
+        assert_eq!(map_key(key(KeyCode::Backspace)), A::InsertBackspace);
+        assert_eq!(map_key(key(KeyCode::Delete)), A::InsertDelete);
+        assert_eq!(map_key(key(KeyCode::Left)), A::InsertLeft);
+        assert_eq!(map_key(key(KeyCode::Right)), A::InsertRight);
+        assert_eq!(map_key(key(KeyCode::Home)), A::InsertHome);
+        assert_eq!(map_key(key(KeyCode::End)), A::InsertEnd);
+        assert_eq!(map_key(ctrl_key(KeyCode::Home)), A::First);
+        assert_eq!(map_key(ctrl_key(KeyCode::End)), A::Last);
+        assert_eq!(map_key(key(KeyCode::Up)), A::CompletionPrev);
+        assert_eq!(map_key(key(KeyCode::Down)), A::CompletionNext);
+        assert_eq!(map_key(key(KeyCode::PageUp)), A::ScrollPageUp);
+        assert_eq!(map_key(key(KeyCode::PageDown)), A::ScrollPageDown);
+        assert_eq!(map_key(key(KeyCode::Esc)), A::Escape);
+    }
+
+    #[test]
+    fn an_overlay_reads_single_letters_as_commands() {
+        assert_eq!(map_overlay_key(key(KeyCode::Char('j'))), A::Move(1));
+        assert_eq!(map_overlay_key(key(KeyCode::Char('k'))), A::Move(-1));
+        assert_eq!(map_overlay_key(key(KeyCode::Down)), A::Move(1));
+        assert_eq!(map_overlay_key(key(KeyCode::Up)), A::Move(-1));
+        assert_eq!(map_overlay_key(key(KeyCode::Char('g'))), A::First);
+        assert_eq!(map_overlay_key(key(KeyCode::Char('G'))), A::Last);
+        assert_eq!(map_overlay_key(key(KeyCode::Char('3'))), A::JumpTo(2));
+        // enter stays `Send`; only the fleet list reads it as "take this row"
+        assert_eq!(map_overlay_key(key(KeyCode::Enter)), A::Send);
+        assert_eq!(map_overlay_key(key(KeyCode::Esc)), A::Escape);
+        // anything the overlay does not navigate with stays a character —
+        // `n` above all, which is how a confirm prompt hears "no"
+        assert_eq!(map_overlay_key(key(KeyCode::Char('a'))), A::InsertChar('a'));
+        assert_eq!(map_overlay_key(key(KeyCode::Char('n'))), A::InsertChar('n'));
+        assert_eq!(map_overlay_key(key(KeyCode::Char('y'))), A::InsertChar('y'));
+        assert_eq!(map_overlay_key(key(KeyCode::Char('?'))), A::InsertChar('?'));
+        // the chords still work from inside one
         assert_eq!(
-            map_key(Mode::Insert, key(KeyCode::Tab)),
-            A::AcceptCompletion
-        );
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Up)), A::CompletionPrev);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Down)), A::CompletionNext);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Esc)), A::LeaveInsert);
-        assert_eq!(
-            map_key(Mode::Insert, ctrl_key(KeyCode::Char('k'))),
-            A::PaletteInInsert
-        );
-        assert_eq!(
-            map_key(Mode::Insert, key(KeyCode::Backspace)),
-            A::InsertBackspace
-        );
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Delete)), A::InsertDelete);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Left)), A::InsertLeft);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Right)), A::InsertRight);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::Home)), A::InsertHome);
-        assert_eq!(map_key(Mode::Insert, key(KeyCode::End)), A::InsertEnd);
-        // ctrl-modified printables other than the palette's are not text
-        assert_eq!(
-            map_key(Mode::Insert, ctrl_key(KeyCode::Char('a'))),
-            A::Ignored
+            map_overlay_key(ctrl_key(KeyCode::Char('k'))),
+            A::OpenPalette
         );
     }
 
     #[test]
-    fn mouse_wheel_scrolls_half_a_viewport_and_other_buttons_are_ignored() {
-        let mouse = |kind| MouseEvent {
+    fn a_key_release_is_not_a_press() {
+        let mut ev = key(KeyCode::Char('a'));
+        ev.kind = KeyEventKind::Release;
+        assert_eq!(map_key(ev), A::Ignored);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_other_buttons_do_nothing() {
+        let wheel = |kind| MouseEvent {
             kind,
             column: 0,
             row: 0,
             modifiers: KeyModifiers::NONE,
         };
-        assert_eq!(map_mouse(mouse(MouseEventKind::ScrollUp)), A::ScrollHalfUp);
+        assert_eq!(map_mouse(wheel(MouseEventKind::ScrollUp)), A::ScrollHalfUp);
         assert_eq!(
-            map_mouse(mouse(MouseEventKind::ScrollDown)),
+            map_mouse(wheel(MouseEventKind::ScrollDown)),
             A::ScrollHalfDown
         );
         assert_eq!(
-            map_mouse(mouse(MouseEventKind::Down(MouseButton::Left))),
+            map_mouse(wheel(MouseEventKind::Down(MouseButton::Left))),
             A::Ignored
         );
-        assert_eq!(map_mouse(mouse(MouseEventKind::Moved)), A::Ignored);
     }
 
     #[test]
-    fn v_releases_the_mouse_in_normal_mode_and_types_in_insert() {
-        assert_eq!(
-            map_key(Mode::Normal, key(KeyCode::Char('v'))),
-            A::ToggleMouse
+    fn the_help_is_built_from_the_bindings_and_fits_its_pane() {
+        let text = help_text();
+        for section in ["Typing:", "Chords:", "Fleet (ctrl-f):"] {
+            assert!(text.contains(section), "{text}");
+        }
+        assert!(text.contains("ctrl-f"), "{text}");
+        let lines = help_lines(80, 8);
+        assert!(lines.len() <= 8, "{lines:?}");
+        assert!(
+            lines.last().is_some_and(|l| l.contains("more lines")),
+            "what does not fit is counted: {lines:?}"
         );
-        assert_eq!(
-            map_key(Mode::Insert, key(KeyCode::Char('v'))),
-            A::InsertChar('v'),
-            "writing a message never toggles the mouse"
-        );
-    }
-
-    #[test]
-    fn release_events_are_ignored() {
-        let released = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
-        let released = KeyEvent {
-            kind: KeyEventKind::Release,
-            ..released
-        };
-        assert_eq!(map_key(Mode::Normal, released), A::Ignored);
-    }
-
-    #[test]
-    fn the_help_lists_both_modes_and_counts_what_does_not_fit() {
-        let whole = help_text();
-        assert!(whole.contains("Normal:"), "{whole}");
-        assert!(whole.contains("Insert:"), "{whole}");
-        assert!(whole.contains("answer the pending question"), "{whole}");
-        assert!(whole.contains("shift-enter"), "{whole}");
-
-        // a tall window shows everything
-        let lines = help_lines(100, 100);
-        assert_eq!(lines.join("\n"), help_text());
-
-        // a short window shows what fits and counts the rest
-        let lines = help_lines(40, 6);
-        let last = lines.last().unwrap();
-        assert!(last.contains("more lines"), "{last}");
-        assert!(lines.len() < help_lines(100, 100).len());
-        assert_eq!(lines.first().unwrap(), "Normal:");
     }
 }

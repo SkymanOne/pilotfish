@@ -30,7 +30,7 @@ use crate::tui::completions::{
     AgentCommandOption, CompletionState, CompletionTarget, apply_suggestion, completions_for,
     resolve_command,
 };
-use crate::tui::keys::{KeyAction, Mode, map_key};
+use crate::tui::keys::{KeyAction, map_key, map_overlay_key};
 use crate::tui::model::{
     DashboardRow, OrchSummary, RunRow, SessionTarget, activity_line, build_rows,
     session_display_name, session_label, worker_activity_line,
@@ -53,27 +53,17 @@ const CAPABILITIES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs
 /// What claude's own `/thinking` accepts; pi workers use [`THINKING_LEVELS`].
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// Rail widths the cycle steps through (the session list beside the
-/// transcript).
-pub const RAIL_MODES: [&str; 4] = ["compact", "auto", "wide", "full"];
-
 /// Sent messages kept per session for `up`-recall.
 const HISTORY_CAP: usize = 100;
 
-/// Which view the console shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum View {
-    /// The home: one row per session.
-    #[default]
-    Dashboard,
-    /// One session's transcript, the session list beside it, composer below.
-    Session,
-}
-
-/// An overlay on top of the base layout; the renderer draws whichever is set.
+/// An overlay on top of the conversation; the renderer draws whichever is
+/// set. There is no second view: the console is one conversation, and the
+/// fleet is something you open over it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Overlay {
     Help,
+    /// Every session, and what can be done to the one selected.
+    Fleet,
     Confirm(ConfirmState),
     /// A permission prompt or `AskUserQuestion` from the orchestrator.
     Permission(PermissionOverlay),
@@ -214,26 +204,14 @@ pub struct Flash {
 
 /// Remembered preferences, kept in `fleet.json` under a namespaced key so the
 /// watcher's cursors survive us.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Prefs {
-    /// Width of the session list beside the transcript.
-    pub rail_mode: String,
     /// The row that was open when the console last closed (`orchestrator`
     /// or a run id), restored within the opened session.
     pub last_session: Option<String>,
     /// The session that was open, by uuid: re-anchors the console on open,
     /// so a switch is remembered even when the row changed afterwards.
     pub last_session_uuid: Option<String>,
-}
-
-impl Default for Prefs {
-    fn default() -> Self {
-        Self {
-            rail_mode: "auto".to_string(),
-            last_session: None,
-            last_session_uuid: None,
-        }
-    }
 }
 
 /// Everything the console launch flags carry; constructed verbatim by
@@ -373,8 +351,6 @@ pub struct Console {
     /// inbox and prompt all live under `orchestrators/<key>/`. The runtime
     /// sets it before the first draw.
     pub(crate) orch_key: SessionKey,
-    mode: Mode,
-    view: View,
     selected: usize,
     rows: Vec<DashboardRow>,
     runs: Vec<RunEntry>,
@@ -399,6 +375,12 @@ pub struct Console {
     scroll_base: usize,
     /// The last search applied to the open session.
     search: Option<SearchState>,
+    /// Permission requests already raised on their own, so dismissing one
+    /// does not have it pop straight back up.
+    raised_permissions: std::collections::HashSet<String>,
+    /// Show every line of an old turn's reasoning and tool output, rather
+    /// than folding each to a summary row (`ctrl-o`, `/verbose`).
+    verbose: bool,
     /// Answers gathered so far for a multi-question `AskUserQuestion`.
     permission_answers: HashMap<String, String>,
     prefs: Prefs,
@@ -433,8 +415,6 @@ impl Console {
             // The session this console renders; the runtime replaces the
             // default with the fleet's current session before the first draw.
             orch_key: SessionKey::default(),
-            mode: Mode::Normal,
-            view: View::Dashboard,
             mouse_captured: true,
             selected: 0,
             rows: Vec::new(),
@@ -450,6 +430,8 @@ impl Console {
             overlay: None,
             scroll: None,
             scroll_base: 0,
+            raised_permissions: std::collections::HashSet::new(),
+            verbose: false,
             search: None,
             permission_answers: HashMap::new(),
             prefs: Prefs::default(),
@@ -501,6 +483,24 @@ impl Console {
         self.orch = state;
         self.pending_effort = None;
         self.refresh_rows();
+        self.raise_pending_permission();
+    }
+
+    /// A permission prompt blocks the orchestrator, so it opens itself rather
+    /// than waiting to be found. Once per request: dismissing one with `esc`
+    /// to go and look something up must not trap the console in a loop, and
+    /// the approvals count in the status line is the reminder.
+    fn raise_pending_permission(&mut self) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let Some(request) = self.orch.pending_requests.first() else {
+            return;
+        };
+        if !self.raised_permissions.insert(request.request_id.clone()) {
+            return;
+        }
+        self.open_permission_overlay();
     }
 
     /// Note a worker's diff stat for its dashboard row, when the runtime has
@@ -633,14 +633,10 @@ impl Console {
     // -----------------------------------------------------------------------
     // View model for the renderer
 
+    /// Whether old reasoning and tool output are shown in full.
     #[must_use]
-    pub const fn mode(&self) -> Mode {
-        self.mode
-    }
-
-    #[must_use]
-    pub const fn view(&self) -> View {
-        self.view
+    pub const fn verbose(&self) -> bool {
+        self.verbose
     }
 
     #[must_use]
@@ -846,11 +842,6 @@ impl Console {
             return;
         };
         if let Some(prefs) = value.get("console").and_then(Value::as_object) {
-            if let Some(mode) = prefs.get("railMode").and_then(Value::as_str)
-                && RAIL_MODES.contains(&mode)
-            {
-                self.prefs.rail_mode = mode.to_string();
-            }
             if let Some(session) = prefs.get("lastSessionUuid").and_then(Value::as_str) {
                 self.prefs.last_session_uuid = Some(session.to_string());
             }
@@ -874,7 +865,6 @@ impl Console {
     pub fn save_prefs(&self) {
         let fleet_dir = self.fleet.root().to_path_buf();
         let prefs = json!({
-            "railMode": self.prefs.rail_mode,
             "lastSession": self.prefs.last_session,
             "lastSessionUuid": self.prefs.last_session_uuid,
         });
@@ -888,13 +878,23 @@ impl Console {
 
     /// Turn a key press into view-model changes plus effects to carry out.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        if self.overlay.is_some() {
-            // An overlay owns the keys: it reads them like the composer does,
-            // so printable characters are always text and the mode is moot.
-            let action = map_key(Mode::Insert, key);
-            return self.handle_action(action);
-        }
-        let action = map_key(self.mode, key);
+        // The palette and the search box are text fields, so they read keys
+        // the way the composer does. Every other overlay is a list, and reads
+        // single letters as its own commands.
+        // The palette and the search box are text fields, and so is a
+        // permission overlay while a deny reason or a custom answer is being
+        // written — a reason starting with "just" must not lose its letters
+        // to the list navigation.
+        let typed = match &self.overlay {
+            None | Some(Overlay::Palette(_) | Overlay::Search(_)) => true,
+            Some(Overlay::Permission(state)) => state.denying || state.custom,
+            Some(_) => false,
+        };
+        let action = if typed {
+            map_key(key)
+        } else {
+            map_overlay_key(key)
+        };
         self.handle_action(action)
     }
 
@@ -904,28 +904,22 @@ impl Console {
         if let Some(overlay) = self.overlay.clone() {
             return self.handle_overlay(overlay, action);
         }
-        match self.mode {
-            Mode::Normal => self.handle_normal(action),
-            Mode::Insert => self.handle_insert(action),
-        }
+        self.handle_compose(action)
     }
 
     fn handle_overlay(&mut self, overlay: Overlay, action: KeyAction) -> Vec<Effect> {
         match overlay {
             Overlay::Help => {
-                if matches!(
-                    action,
-                    KeyAction::Help
-                        | KeyAction::Back
-                        | KeyAction::Quit
-                        | KeyAction::Open
-                        | KeyAction::Send
-                        | KeyAction::LeaveInsert
-                ) {
+                // whatever you reach for to dismiss a help panel closes it:
+                // the key that opened it, esc, enter, and `q`
+                let closes = matches!(action, KeyAction::Escape | KeyAction::Open)
+                    || matches!(action, KeyAction::InsertChar('?' | 'q' | 'Q'));
+                if closes {
                     self.overlay = None;
                 }
                 Vec::new()
             }
+            Overlay::Fleet => self.handle_fleet(action),
             Overlay::Confirm(state) => self.handle_confirm(state, action),
             Overlay::Permission(state) => self.handle_permission(state, action),
             Overlay::Palette(state) => self.handle_palette(state, action),
@@ -936,8 +930,9 @@ impl Console {
 
     fn handle_confirm(&mut self, state: ConfirmState, action: KeyAction) -> Vec<Effect> {
         let yes = matches!(action, KeyAction::InsertChar('y' | 'Y'));
-        let no = matches!(action, KeyAction::InsertChar('n' | 'N'))
-            || matches!(action, KeyAction::LeaveInsert | KeyAction::Send);
+        // enter is deliberately not an answer: these prompts guard work that
+        // cannot be undone, and the hint asks for y or n
+        let no = matches!(action, KeyAction::InsertChar('n' | 'N') | KeyAction::Escape);
         if !yes && !no {
             return Vec::new();
         }
@@ -1027,7 +1022,7 @@ impl Console {
                     }
                     return self.answer_question(state, request, &questions, value);
                 }
-                KeyAction::LeaveInsert => {
+                KeyAction::Escape => {
                     state.denying = false;
                     state.custom = false;
                     state.input.clear();
@@ -1062,7 +1057,7 @@ impl Console {
                         return self.answer_question(state, request, &questions, answer);
                     }
                 }
-                KeyAction::LeaveInsert => {
+                KeyAction::Escape => {
                     self.overlay = None;
                     return Vec::new();
                 }
@@ -1084,7 +1079,7 @@ impl Console {
                 self.overlay = Some(Overlay::Permission(state));
                 Vec::new()
             }
-            KeyAction::LeaveInsert => {
+            KeyAction::Escape => {
                 self.overlay = None;
                 Vec::new()
             }
@@ -1206,7 +1201,7 @@ impl Console {
                 }
                 return Vec::new();
             }
-            KeyAction::LeaveInsert | KeyAction::Back => {
+            KeyAction::Escape => {
                 self.overlay = None;
                 return Vec::new();
             }
@@ -1222,7 +1217,6 @@ impl Console {
             PaletteAction::ConsoleCommand(name) => match resolve_command(&name) {
                 // commands that take an argument prefill the composer
                 Some(spec) if spec.takes_argument => {
-                    self.mode = Mode::Insert;
                     self.composer.input = format!("{name} ");
                     self.composer.cursor = self.composer.input.chars().count();
                     self.composer.dismissed = true;
@@ -1236,7 +1230,6 @@ impl Console {
                 takes_argument,
             } => {
                 if takes_argument {
-                    self.mode = Mode::Insert;
                     self.composer.input = format!("/{name} ");
                     self.composer.cursor = self.composer.input.chars().count();
                     self.composer.dismissed = true;
@@ -1262,7 +1255,7 @@ impl Console {
             KeyAction::InsertBackspace => {
                 state.query.pop();
             }
-            KeyAction::Send | KeyAction::Open | KeyAction::LeaveInsert | KeyAction::Back => {
+            KeyAction::Send | KeyAction::Open | KeyAction::Escape => {
                 // keep the matches found so far
                 self.apply_search(state.query.clone());
                 self.overlay = None;
@@ -1323,11 +1316,7 @@ impl Console {
             KeyAction::ScrollHalfDown | KeyAction::ScrollPageDown => {
                 state.offset = state.offset.saturating_add(step);
             }
-            KeyAction::Help
-            | KeyAction::Back
-            | KeyAction::Open
-            | KeyAction::Send
-            | KeyAction::LeaveInsert => {
+            KeyAction::Open | KeyAction::Send | KeyAction::Escape => {
                 self.overlay = None;
                 return Vec::new();
             }
@@ -1369,122 +1358,67 @@ impl Console {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn handle_normal(&mut self, action: KeyAction) -> Vec<Effect> {
+    /// The fleet overlay: a list of every session, where single letters are
+    /// commands because nothing is being typed.
+    fn handle_fleet(&mut self, action: KeyAction) -> Vec<Effect> {
         match action {
             KeyAction::Move(delta) => {
                 self.move_selection(i64::from(delta));
                 Vec::new()
             }
             KeyAction::First => {
-                match self.view {
-                    View::Dashboard => self.selected = 0,
-                    View::Session => self.scroll = Some(0),
-                }
+                self.selected = 0;
+                self.on_selection_changed();
                 Vec::new()
             }
             KeyAction::Last => {
-                match self.view {
-                    View::Dashboard => self.selected = self.rows.len().saturating_sub(1),
-                    View::Session => self.scroll = None,
-                }
-                Vec::new()
-            }
-            KeyAction::Open => {
-                if self.view == View::Dashboard {
-                    self.open_selected();
-                }
-                Vec::new()
-            }
-            KeyAction::Back => {
-                self.view = View::Dashboard;
-                Vec::new()
-            }
-            KeyAction::NextSession => {
-                self.move_selection(1);
-                Vec::new()
-            }
-            KeyAction::PrevSession => {
-                self.move_selection(-1);
+                self.selected = self.rows.len().saturating_sub(1);
+                self.on_selection_changed();
                 Vec::new()
             }
             KeyAction::JumpTo(index) => {
                 if index < self.rows.len() {
                     self.selected = index;
+                    self.on_selection_changed();
                 }
                 Vec::new()
             }
-            KeyAction::Search => {
-                self.overlay = Some(Overlay::Search(SearchState::default()));
+            // enter and esc both land back in the conversation; enter takes
+            // the row it was on, esc leaves the selection where it was
+            KeyAction::Send | KeyAction::Open | KeyAction::Escape => {
+                self.overlay = None;
                 Vec::new()
             }
             KeyAction::OpenPalette => self.open_palette(PaletteScope::All),
-            KeyAction::Help => {
-                self.overlay = Some(Overlay::Help);
-                Vec::new()
-            }
-            KeyAction::Brief => self.open_brief(),
-            KeyAction::Quit => vec![Effect::Quit],
-            KeyAction::EnterInsert => {
-                self.enter_insert();
-                Vec::new()
-            }
-            KeyAction::Shutdown => {
-                self.overlay = Some(Overlay::Confirm(ConfirmState {
-                    message: self.shutdown_question(),
-                    action: ConfirmAction::Shutdown,
-                }));
-                Vec::new()
-            }
-            KeyAction::Answer => self.answer_selected(),
-            KeyAction::Stop => self.stop_selected(),
-            KeyAction::Remove => self.remove_selected(),
-            KeyAction::CycleThinking => self.cycle_thinking(),
-            KeyAction::Models => self.open_palette(PaletteScope::Models),
-            KeyAction::PermissionMode => self.cycle_permission_mode(),
             KeyAction::ToggleMouse => self.toggle_mouse(),
-            KeyAction::ScrollHalfDown => {
-                if self.view == View::Session {
-                    self.scroll_page(self.viewport_rows as i64 / 2);
+            KeyAction::InsertChar(ch) => match ch {
+                'a' => {
+                    self.overlay = None;
+                    self.answer_selected()
                 }
-                Vec::new()
-            }
-            KeyAction::ScrollHalfUp => {
-                if self.view == View::Session {
-                    self.scroll_page(-(self.viewport_rows as i64) / 2);
+                's' => self.stop_selected(),
+                'x' => self.remove_selected(),
+                't' => self.cycle_thinking(),
+                'm' => self.open_palette(PaletteScope::Models),
+                'p' => self.cycle_permission_mode(),
+                'b' => self.open_brief(),
+                '?' => {
+                    self.overlay = Some(Overlay::Help);
+                    Vec::new()
                 }
-                Vec::new()
-            }
-            KeyAction::ScrollPageDown => {
-                if self.view == View::Session {
-                    self.scroll_page(self.viewport_rows as i64);
-                }
-                Vec::new()
-            }
-            KeyAction::ScrollPageUp => {
-                if self.view == View::Session {
-                    self.scroll_page(-(self.viewport_rows as i64));
-                }
-                Vec::new()
-            }
-            KeyAction::NextMatch => {
-                self.step_match(1);
-                Vec::new()
-            }
-            KeyAction::PrevMatch => {
-                self.step_match(-1);
-                Vec::new()
-            }
-            // typing starts a message, keeping the character
-            KeyAction::InsertChar(ch) => {
-                self.enter_insert();
-                self.composer.input.push(ch);
-                self.composer.cursor = self.composer.input.chars().count();
-                self.composer.dismissed = false;
-                self.recompute_completion();
-                Vec::new()
-            }
+                _ => Vec::new(),
+            },
             _ => Vec::new(),
         }
+    }
+
+    /// Everything that has to follow the selection, wherever it moved from.
+    fn on_selection_changed(&mut self) {
+        self.search = None;
+        self.scroll = None;
+        self.scroll_base = self.open_transcript_dropped();
+        self.remember_last_session();
+        self.recompute_completion();
     }
 
     fn move_selection(&mut self, delta: i64) {
@@ -1495,21 +1429,14 @@ impl Console {
         let next = (self.selected as i64 + delta).rem_euclid(total as i64) as usize;
         if next != self.selected {
             self.selected = next;
-            // the search belonged to the session that was open
-            self.search = None;
-            self.scroll = None;
-            self.scroll_base = self.open_transcript_dropped();
+            // the search and the scroll belonged to the session that was open
+            self.on_selection_changed();
         }
     }
 
-    fn open_selected(&mut self) {
-        if self.rows.is_empty() {
-            return;
-        }
-        self.view = View::Session;
-        self.scroll = None;
-        self.search = None;
-        self.scroll_base = self.open_transcript_dropped();
+    /// Remember which row the conversation is showing, so reopening the
+    /// console comes back to it.
+    fn remember_last_session(&mut self) {
         if let Some(row) = self.rows.get(self.selected) {
             self.prefs.last_session = Some(row.key.clone());
         }
@@ -1550,13 +1477,7 @@ impl Console {
         self.scroll = Some(search.matches[next]);
     }
 
-    fn enter_insert(&mut self) {
-        self.mode = Mode::Insert;
-        self.composer.dismissed = false;
-        self.recompute_completion();
-    }
-
-    fn handle_insert(&mut self, action: KeyAction) -> Vec<Effect> {
+    fn handle_compose(&mut self, action: KeyAction) -> Vec<Effect> {
         match action {
             KeyAction::InsertChar(ch) => {
                 let cursor = self
@@ -1660,27 +1581,89 @@ impl Console {
                 }
                 Vec::new()
             }
-            KeyAction::LeaveInsert => {
-                self.mode = Mode::Normal;
-                self.composer.answering = None;
-                self.composer.dismissed = true;
+            // esc walks out of whatever is in the way, innermost first:
+            // a suggestion popup, then an answer being composed, then the
+            // line itself, and only with nothing left does it stop the turn
+            KeyAction::Escape => {
+                if self.composer.completion.is_some() && !self.composer.dismissed {
+                    self.composer.dismissed = true;
+                    return Vec::new();
+                }
+                if self.composer.answering.take().is_some() {
+                    self.composer.input.clear();
+                    self.composer.cursor = 0;
+                    return Vec::new();
+                }
+                if !self.composer.input.is_empty() {
+                    self.composer.input.clear();
+                    self.composer.cursor = 0;
+                    self.composer.completion = None;
+                    self.history_at = None;
+                    return Vec::new();
+                }
+                self.interrupt_turn()
+            }
+            KeyAction::OpenFleet => {
+                self.overlay = Some(Overlay::Fleet);
                 Vec::new()
             }
-            // the wheel (and the odd ctrl-d/ctrl-u) scroll the transcript
-            // while the composer has focus; typing is never interrupted
-            KeyAction::ScrollHalfUp | KeyAction::ScrollHalfDown => {
-                if self.view == View::Session {
-                    let delta = if action == KeyAction::ScrollHalfUp {
-                        -1
-                    } else {
-                        1
-                    };
-                    self.scroll_page(delta * (self.viewport_rows as i64 / 2));
+            KeyAction::ToggleVerbose => self.toggle_verbose(),
+            KeyAction::OpenPalette => self.open_palette(PaletteScope::All),
+            // the same key opens the box and then walks the matches, the way
+            // a shell's reverse search does
+            KeyAction::Search => {
+                if self.search.is_some() {
+                    self.step_match(1);
+                } else {
+                    self.overlay = Some(Overlay::Search(SearchState::default()));
                 }
                 Vec::new()
             }
-            KeyAction::PaletteInInsert => self.open_palette(PaletteScope::All),
+            KeyAction::ToggleMouse => self.toggle_mouse(),
+            // the wheel and the page keys scroll the transcript while the
+            // composer has focus; typing is never interrupted
+            KeyAction::ScrollHalfUp => {
+                self.scroll_page(-(self.viewport_rows as i64) / 2);
+                Vec::new()
+            }
+            KeyAction::ScrollHalfDown => {
+                self.scroll_page(self.viewport_rows as i64 / 2);
+                Vec::new()
+            }
+            KeyAction::ScrollPageUp => {
+                self.scroll_page(-(self.viewport_rows as i64));
+                Vec::new()
+            }
+            KeyAction::ScrollPageDown => {
+                self.scroll_page(self.viewport_rows as i64);
+                Vec::new()
+            }
+            KeyAction::First => {
+                self.scroll = Some(0);
+                Vec::new()
+            }
+            KeyAction::Last => {
+                self.scroll = None;
+                Vec::new()
+            }
             _ => Vec::new(),
+        }
+    }
+
+    /// Esc with an empty composer: stop whatever the selected session is
+    /// doing. Nothing running means nothing to stop, and saying so beats a
+    /// key that silently does nothing.
+    fn interrupt_turn(&mut self) -> Vec<Effect> {
+        match self.selected_target() {
+            SessionTarget::Orchestrator(_) => {
+                if self.orch.turn_active || self.orch_transcript.turn_active() {
+                    self.notice("■ stopping the orchestrator's turn", false);
+                    vec![Effect::Interrupt]
+                } else {
+                    Vec::new()
+                }
+            }
+            SessionTarget::Worker { .. } => self.stop_selected(),
         }
     }
 
@@ -2116,11 +2099,11 @@ impl Console {
         self.runs.clear();
         self.rows.clear();
         self.selected = 0;
-        self.view = View::Dashboard;
         self.scroll = None;
         self.search = None;
         self.scroll_base = 0;
         self.permission_answers.clear();
+        self.raised_permissions.clear();
         self.pending_effort = None;
         self.pending_thinking.clear();
         self.composer.answering = None;
@@ -2171,6 +2154,27 @@ impl Console {
     }
 
     /// `a`: answer the selected session's pending question or dialog.
+    /// Put the first pending request up. A question with no options is
+    /// answered in your own words, so the overlay opens straight into its
+    /// text field.
+    fn open_permission_overlay(&mut self) {
+        let Some(request) = self.orch.pending_requests.first() else {
+            return;
+        };
+        let custom = crate::orch::protocol::is_ask_user_question(&request.request)
+            && questions_of(&request.request.input)
+                .first()
+                .is_some_and(|first| first.options.as_ref().is_none_or(Vec::is_empty));
+        self.overlay = Some(Overlay::Permission(PermissionOverlay {
+            at: 0,
+            question: 0,
+            selected: 0,
+            denying: false,
+            custom,
+            input: String::new(),
+        }));
+    }
+
     fn answer_selected(&mut self) -> Vec<Effect> {
         match self.selected_target() {
             SessionTarget::Orchestrator(_) => {
@@ -2178,26 +2182,7 @@ impl Console {
                     self.toast("! the orchestrator has nothing waiting for an answer", true);
                     return Vec::new();
                 }
-                // a question with no options is answered in your own words
-                let mut custom = false;
-                let request = &self.orch.pending_requests[0];
-                if crate::orch::protocol::is_ask_user_question(&request.request) {
-                    let questions = questions_of(&request.request.input);
-                    if questions
-                        .first()
-                        .is_some_and(|first| first.options.as_ref().is_none_or(Vec::is_empty))
-                    {
-                        custom = true;
-                    }
-                }
-                self.overlay = Some(Overlay::Permission(PermissionOverlay {
-                    at: 0,
-                    question: 0,
-                    selected: 0,
-                    denying: false,
-                    custom,
-                    input: String::new(),
-                }));
+                self.open_permission_overlay();
                 Vec::new()
             }
             SessionTarget::Worker { run_id } => {
@@ -2206,7 +2191,6 @@ impl Console {
                     return Vec::new();
                 };
                 if let Some(question) = &state.pending_question {
-                    self.enter_insert();
                     self.composer.input.clear();
                     self.composer.cursor = 0;
                     self.composer.answering = Some(Answering {
@@ -2217,7 +2201,6 @@ impl Console {
                     return Vec::new();
                 }
                 if let Some(dialog) = &state.pending_dialog {
-                    self.enter_insert();
                     // a select or confirm dialog answers with one of its options
                     let prefill = match dialog.method.as_str() {
                         "select" | "confirm" => dialog
@@ -2455,9 +2438,9 @@ impl Console {
                 return Vec::new();
             }
             Some("/session") => return self.session_command(argument),
-            Some("/rail") => return self.set_rail((!argument.is_empty()).then_some(argument)),
             Some("/mouse") => return self.toggle_mouse(),
             Some("/clear") => return self.clear_transcript(),
+            Some("/verbose") => return self.toggle_verbose(),
             Some("/trim") => return vec![Effect::TrimTranscript],
             _ => {}
         }
@@ -2466,6 +2449,21 @@ impl Console {
             SessionTarget::Worker { run_id } => self.submit_to_worker(&run_id, &text),
             SessionTarget::Orchestrator(_) => self.submit_to_orchestrator(&text),
         }
+    }
+
+    /// `/verbose` (or `ctrl-o`): show an old turn's reasoning and tool
+    /// output in full, or fold each back to a summary row.
+    fn toggle_verbose(&mut self) -> Vec<Effect> {
+        self.verbose = !self.verbose;
+        self.notice(
+            if self.verbose {
+                "· showing every line of older turns"
+            } else {
+                "· older reasoning and tool output folded"
+            },
+            false,
+        );
+        Vec::new()
     }
 
     /// `/clear`: forget the open session's transcript here. The file on disk
@@ -2483,27 +2481,6 @@ impl Console {
         self.search = None;
         self.notice("· transcript cleared from the console", false);
         Vec::new()
-    }
-
-    fn set_rail(&mut self, want: Option<&str>) -> Vec<Effect> {
-        let Some(want) = want.map(str::trim).filter(|w| !w.is_empty()) else {
-            self.notice(
-                format!(
-                    "· session list {}. Set one of {}",
-                    self.prefs.rail_mode,
-                    RAIL_MODES.join(", ")
-                ),
-                false,
-            );
-            return Vec::new();
-        };
-        if !RAIL_MODES.contains(&want) {
-            self.notice(format!("! usage: /rail <{}>", RAIL_MODES.join("|")), true);
-            return Vec::new();
-        }
-        self.prefs.rail_mode = want.to_string();
-        self.notice(format!("· session list {want}"), false);
-        vec![Effect::SavePrefs]
     }
 
     fn remember_history(&mut self, text: &str) {
@@ -3207,6 +3184,10 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    fn ctrl_code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
     fn enter() -> KeyEvent {
         key(KeyCode::Enter)
     }
@@ -3217,10 +3198,6 @@ mod tests {
 
     fn tab() -> KeyEvent {
         key(KeyCode::Tab)
-    }
-
-    fn shift_tab() -> KeyEvent {
-        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)
     }
 
     fn running_run(run_id: &str, name: &str) -> RunEntry {
@@ -3242,21 +3219,43 @@ mod tests {
         console
     }
 
-    /// Type `text` as if in the composer (starting from normal mode).
+    /// Type `text` into the composer, which always has focus.
     fn type_text(c: &mut Console, text: &str) {
-        if c.mode() == Mode::Normal {
-            c.handle_key(ch('i'));
-        }
         for character in text.chars() {
             c.handle_key(ch(character));
         }
     }
 
+    /// Open the fleet overlay, where single letters are commands.
+    fn open_fleet(c: &mut Console) {
+        c.handle_key(ctrl('f'));
+    }
+
+    /// Select the nth fleet row and come back to the conversation.
+    fn select_row(c: &mut Console, index: usize) {
+        open_fleet(c);
+        let digit = char::from_digit(index as u32 + 1, 10).expect("rows 1-9");
+        c.handle_key(ch(digit));
+        c.handle_key(enter());
+    }
+
+    /// Press one of the fleet overlay's letter commands, leaving the console
+    /// back in the conversation unless the command opened something itself.
+    fn fleet_key(c: &mut Console, letter: char) -> Vec<Effect> {
+        open_fleet(c);
+        let effects = c.handle_key(ch(letter));
+        if matches!(c.overlay(), Some(Overlay::Fleet)) {
+            c.handle_key(esc());
+        }
+        effects
+    }
+
     // -- navigation ----------------------------------------------------------
 
     #[test]
-    fn the_dashboard_selects_between_the_orchestrator_and_workers() {
+    fn the_fleet_overlay_selects_between_the_orchestrator_and_workers() {
         let mut c = setup_with_worker();
+        open_fleet(&mut c);
         assert_eq!(c.selected(), 0, "the orchestrator first");
         c.handle_key(ch('j'));
         assert_eq!(c.selected(), 1);
@@ -3311,56 +3310,44 @@ mod tests {
     }
 
     #[test]
-    fn enter_opens_a_session_and_esc_returns_to_the_dashboard() {
+    fn ctrl_f_opens_the_fleet_and_enter_or_esc_returns_to_the_conversation() {
         let mut c = setup_with_worker();
+        assert_eq!(c.overlay(), None, "the conversation is the console");
+        open_fleet(&mut c);
+        assert_eq!(c.overlay(), Some(&Overlay::Fleet));
         c.handle_key(ch('j'));
-        assert_eq!(c.view(), View::Dashboard);
         c.handle_key(enter());
-        assert_eq!(c.view(), View::Session);
-        c.handle_key(enter());
-        assert_eq!(c.view(), View::Session, "enter does nothing in a session");
-        c.handle_key(esc());
-        assert_eq!(c.view(), View::Dashboard);
-    }
-
-    #[test]
-    fn tab_cycles_sessions_in_both_views() {
-        let mut c = setup_with_worker();
-        c.handle_key(tab());
+        assert_eq!(c.overlay(), None, "enter takes the row it was on");
         assert_eq!(c.selected(), 1);
-        c.handle_key(shift_tab());
-        assert_eq!(c.selected(), 0);
-        c.handle_key(enter());
-        c.handle_key(tab());
-        assert_eq!(c.view(), View::Session);
-        assert_eq!(c.selected(), 1, "the drill-down follows the selection");
-    }
-
-    // -- modes ---------------------------------------------------------------
-
-    #[test]
-    fn i_enters_insert_and_esc_leaves() {
-        let mut c = setup_with_worker();
-        assert_eq!(c.mode(), Mode::Normal);
-        c.handle_key(ch('i'));
-        assert_eq!(c.mode(), Mode::Insert);
+        open_fleet(&mut c);
         c.handle_key(esc());
-        assert_eq!(c.mode(), Mode::Normal);
+        assert_eq!(c.overlay(), None, "esc leaves it where it was");
+        assert_eq!(c.selected(), 1);
     }
 
     #[test]
-    fn typing_a_printable_in_normal_mode_enters_insert_keeping_the_char() {
+    fn the_fleet_overlay_does_not_eat_the_letters_a_message_starts_with() {
+        let mut c = setup_with_worker();
+        // in the conversation every printable is text, `q` and `j` included
+        type_text(&mut c, "quick job");
+        assert_eq!(c.composer().input, "quick job");
+        assert_eq!(c.overlay(), None);
+        assert_eq!(c.selected(), 0, "nothing moved the selection");
+    }
+
+    // -- the composer --------------------------------------------------------
+
+    #[test]
+    fn every_key_a_message_starts_with_reaches_the_composer() {
         let mut c = setup_with_worker();
         c.handle_key(ch('h'));
-        assert_eq!(c.mode(), Mode::Insert);
         assert_eq!(c.composer().input, "h");
         c.handle_key(ch('e'));
         assert_eq!(c.composer().input, "he");
-        // and 'q' inside insert mode does not quit
+        // `q` used to quit the console; it is a letter like any other now
         c.handle_key(ch('q'));
         assert_eq!(c.composer().input, "heq");
         c.handle_key(enter());
-        // it went to the orchestrator as a message, not as a quit
         assert!(
             c.orchestrator_transcript()
                 .blocks()
@@ -3370,7 +3357,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_mode_edits_the_composer() {
+    fn the_composer_edits_its_line() {
         let mut c = setup_with_worker();
         type_text(&mut c, "abc");
         assert_eq!(c.composer().input, "abc");
@@ -3409,7 +3396,7 @@ mod tests {
     #[test]
     fn text_steers_the_selected_worker() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         type_text(&mut c, "hi");
         let effects = c.handle_key(enter());
         assert_eq!(
@@ -3425,7 +3412,6 @@ mod tests {
     fn a_modified_enter_inserts_a_newline_instead_of_sending() {
         for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT] {
             let mut c = setup_with_worker();
-            c.handle_key(ch('i'));
             c.handle_key(ch('a'));
             c.handle_key(KeyEvent::new(KeyCode::Enter, modifier));
             c.handle_key(ch('b'));
@@ -3491,7 +3477,7 @@ mod tests {
             source: "skill".into(),
         }];
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         let effects = c.submit("/skill:review");
         assert_eq!(
             effects,
@@ -3516,7 +3502,6 @@ mod tests {
             }],
             ..Capabilities::default()
         });
-        c.handle_key(ch('i'));
         c.handle_key(ch('/'));
         let completion = c.composer().completion.as_ref().unwrap();
         let labels: Vec<&str> = completion.items.iter().map(|s| s.label.as_str()).collect();
@@ -3528,7 +3513,6 @@ mod tests {
         c.handle_key(tab());
         assert_eq!(c.composer().input, "/quit", "/quit takes no argument");
         // accepting does not run it
-        assert_eq!(c.mode(), Mode::Insert);
     }
 
     #[test]
@@ -3649,7 +3633,6 @@ mod tests {
         palette.query = "/thinking".into();
         palette.refilter();
         c.handle_palette(palette, KeyAction::Send);
-        assert_eq!(c.mode(), Mode::Insert);
         assert_eq!(c.composer().input, "/thinking ");
     }
 
@@ -3663,8 +3646,8 @@ mod tests {
             name: Some("Opus".into()),
         }];
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
-        c.handle_key(ch('m'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'm');
         let Overlay::Palette(palette) = c.overlay().unwrap() else {
             panic!();
         };
@@ -3695,7 +3678,7 @@ mod tests {
     #[test]
     fn choosing_a_model_on_the_orchestrator_targets_the_orchestrator() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('m'));
+        fleet_key(&mut c, 'm');
         let Overlay::Palette(mut palette) = c.overlay().unwrap().clone() else {
             panic!();
         };
@@ -3722,9 +3705,8 @@ mod tests {
             asked_at: crate::util::now_iso(),
         });
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
-        c.handle_key(ch('a'));
-        assert_eq!(c.mode(), Mode::Insert);
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'a');
         let answering = c.composer().answering.as_ref().unwrap();
         assert_eq!(answering.question_id, "q_1");
         type_text(&mut c, "use");
@@ -3753,8 +3735,8 @@ mod tests {
             asked_at: crate::util::now_iso(),
         });
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
-        c.handle_key(ch('a'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'a');
         // a select dialog is prefilled with its first option
         assert_eq!(c.composer().input, "yes");
         let answering = c.composer().answering.as_ref().unwrap();
@@ -3769,17 +3751,16 @@ mod tests {
     #[test]
     fn a_without_anything_pending_says_so() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('j'));
-        c.handle_key(ch('a'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'a');
         assert!(c.flash().unwrap().text.contains("no pending question"));
-        assert_eq!(c.mode(), Mode::Normal);
     }
 
     #[test]
     fn s_stops_the_worker_and_interrupts_the_orchestrator() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('j'));
-        let effects = c.handle_key(ch('s'));
+        select_row(&mut c, 1);
+        let effects = fleet_key(&mut c, 's');
         assert_eq!(
             effects,
             vec![Effect::WorkerAbort {
@@ -3787,22 +3768,25 @@ mod tests {
             }]
         );
         // the orchestrator: interrupt only when a turn is active
-        c.handle_key(ch('g'));
-        let effects = c.handle_key(ch('s'));
+        select_row(&mut c, 0);
+        let effects = fleet_key(&mut c, 's');
         assert!(
             effects.is_empty(),
             "an idle orchestrator has nothing to stop"
         );
         c.orch_transcript.push_sent("hello");
-        let effects = c.handle_key(ch('s'));
+        let effects = fleet_key(&mut c, 's');
+        assert_eq!(effects, vec![Effect::Interrupt]);
+        // esc on an empty composer stops the turn too
+        let effects = c.handle_key(esc());
         assert_eq!(effects, vec![Effect::Interrupt]);
     }
 
     #[test]
     fn x_asks_before_removing() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('j'));
-        c.handle_key(ch('x'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'x');
         let Overlay::Confirm(confirm) = c.overlay().unwrap() else {
             panic!();
         };
@@ -3810,8 +3794,11 @@ mod tests {
         // n cancels; nothing was removed
         c.handle_key(ch('n'));
         assert!(c.overlay().is_none());
+        // enter is not an answer to a prompt that destroys work
+        fleet_key(&mut c, 'x');
+        assert!(c.handle_key(enter()).is_empty());
+        assert!(matches!(c.overlay(), Some(Overlay::Confirm(_))));
         // y removes with force (the worker is running)
-        c.handle_key(ch('x'));
         let effects = c.handle_key(ch('y'));
         assert_eq!(
             effects,
@@ -3826,15 +3813,15 @@ mod tests {
     fn t_cycles_the_thinking_level_of_whichever_session_is_selected() {
         let mut c = setup_with_worker();
         // the orchestrator cycles claude's effort
-        let effects = c.handle_key(ch('t'));
+        let effects = fleet_key(&mut c, 't');
         assert_eq!(effects, vec![Effect::SetEffort("low".to_string())]);
         assert_eq!(c.effort(), Some("low"), "optimistic until state confirms");
         // the worker cycles pi's from the level it reports
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         let mut entry = running_run("db-20260829120000", "db");
         entry.state.thinking_level = Some("high".into());
         c.set_runs(vec![entry]);
-        let effects = c.handle_key(ch('t'));
+        let effects = fleet_key(&mut c, 't');
         assert_eq!(
             effects,
             vec![Effect::WorkerThinking {
@@ -3844,7 +3831,7 @@ mod tests {
         );
         // and the next press advances from the optimistically written level,
         // even though the monitor has not written it back into run.json yet
-        let effects = c.handle_key(ch('t'));
+        let effects = fleet_key(&mut c, 't');
         assert!(matches!(
             &effects[0],
             Effect::WorkerThinking { level, .. } if level == "max"
@@ -3856,7 +3843,7 @@ mod tests {
         let mut c = test_console();
         assert!(c.mouse_captured(), "the console owns the wheel by default");
 
-        let effects = c.handle_key(ch('v'));
+        let effects = c.handle_key(ctrl('y'));
         assert_eq!(effects, vec![Effect::SetMouseCapture(false)]);
         assert!(!c.mouse_captured());
         assert!(
@@ -3864,12 +3851,11 @@ mod tests {
             "it says what just happened"
         );
 
-        let effects = c.handle_key(ch('v'));
+        let effects = c.handle_key(ctrl('y'));
         assert_eq!(effects, vec![Effect::SetMouseCapture(true)]);
         assert!(c.mouse_captured());
 
         // and the command reaches the same place, for the palette
-        c.mode = Mode::Insert;
         c.composer.input = "/mouse".to_string();
         c.composer.cursor = 6;
         let effects = c.handle_key(enter());
@@ -3880,19 +3866,19 @@ mod tests {
     #[test]
     fn t_cycles_a_worker_thinking_level_without_the_monitor_writeback() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         let mut entry = running_run("db-20260829120000", "db");
         entry.state.thinking_level = Some("high".into());
         c.set_runs(vec![entry]);
 
         // the monitor never writes the applied level back into run.json: the
         // polled state still says "high", yet the press advances anyway
-        let first = c.handle_key(ch('t'));
+        let first = fleet_key(&mut c, 't');
         assert!(matches!(
             &first[0],
             Effect::WorkerThinking { level, .. } if level == "xhigh"
         ));
-        let second = c.handle_key(ch('t'));
+        let second = fleet_key(&mut c, 't');
         assert!(
             matches!(
                 &second[0],
@@ -3919,7 +3905,7 @@ mod tests {
             0,
             "the monitor owns the level now"
         );
-        let next = c.handle_key(ch('t'));
+        let next = fleet_key(&mut c, 't');
         assert!(
             matches!(
                 &next[0],
@@ -3932,11 +3918,11 @@ mod tests {
     #[test]
     fn p_cycles_the_permission_mode_orchestrator_only() {
         let mut c = setup_with_worker();
-        let effects = c.handle_key(ch('p'));
+        let effects = fleet_key(&mut c, 'p');
         assert_eq!(effects, vec![Effect::SetPermissionMode("auto".to_string())]);
         // and refuses on a worker
-        c.handle_key(ch('j'));
-        c.handle_key(ch('p'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'p');
         assert!(c.flash().unwrap().text.contains("orchestrator-only"));
     }
 
@@ -3945,7 +3931,7 @@ mod tests {
         let mut c = setup_with_worker();
         // the orchestrator's brief is the rendered prompt; none on a fresh
         // fleet, so the popup says so dimmed instead of erroring
-        c.handle_key(ch('b'));
+        fleet_key(&mut c, 'b');
         let Overlay::Brief(state) = c.overlay().unwrap() else {
             panic!("expected the brief overlay");
         };
@@ -3957,8 +3943,8 @@ mod tests {
         let mut entry = running_run("db-20260829120000", "db");
         entry.state.task_brief = "Build the auth module.\n\nDo not touch tests.".into();
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
-        c.handle_key(ch('b'));
+        select_row(&mut c, 1);
+        fleet_key(&mut c, 'b');
         let Overlay::Brief(state) = c.overlay().unwrap() else {
             panic!();
         };
@@ -3980,7 +3966,7 @@ mod tests {
         assert_eq!(offset(&c), 20, "two notches of the 20-row viewport");
         c.handle_action(KeyAction::ScrollHalfUp);
         assert_eq!(offset(&c), 10);
-        c.handle_action(KeyAction::Back);
+        c.handle_action(KeyAction::Escape);
         assert!(c.overlay().is_none());
 
         // with a rendered prompt on disk, the orchestrator shows it
@@ -3990,21 +3976,21 @@ mod tests {
             "You are the orchestrator.",
         )
         .unwrap();
-        c.handle_key(ch('k'));
-        c.handle_key(ch('b'));
+        select_row(&mut c, 0);
+        fleet_key(&mut c, 'b');
         let Overlay::Brief(state) = c.overlay().unwrap() else {
             panic!();
         };
         assert_eq!(state.text, "You are the orchestrator.");
         assert!(!state.placeholder);
-        c.handle_action(KeyAction::Back);
+        c.handle_action(KeyAction::Escape);
 
         // a worker whose record is gone (or brief empty) reads as a placeholder
         let mut empty = running_run("db-20260829120000", "db");
         empty.state.task_brief = String::new();
         c.set_runs(vec![empty]);
-        c.handle_key(ch('j'));
-        let effects = c.handle_key(ch('b'));
+        select_row(&mut c, 1);
+        let effects = fleet_key(&mut c, 'b');
         assert!(effects.is_empty());
         let Overlay::Brief(state) = c.overlay().unwrap() else {
             panic!();
@@ -4013,11 +3999,10 @@ mod tests {
     }
 
     #[test]
-    fn q_quits_and_q_upper_asks_before_shutdown() {
+    fn slash_quit_leaves_and_slash_shutdown_asks_before_stopping_everything() {
         let mut c = setup_with_worker();
-        let effects = c.handle_key(ch('q'));
-        assert_eq!(effects, vec![Effect::Quit]);
-        let effects = c.handle_key(ch('Q'));
+        assert_eq!(c.submit("/quit"), vec![Effect::Quit]);
+        let effects = c.submit("/shutdown");
         assert!(effects.is_empty(), "shutdown waits for confirmation");
         let Overlay::Confirm(confirm) = c.overlay().unwrap() else {
             panic!();
@@ -4034,40 +4019,32 @@ mod tests {
         assert!(effects.contains(&Effect::StopOrchestrator));
         assert!(effects.contains(&Effect::Quit));
         // n cancels
-        c.handle_key(ch('Q'));
+        c.submit("/shutdown");
         let effects = c.handle_key(ch('n'));
         assert!(effects.is_empty());
         assert!(c.overlay().is_none());
     }
 
-    // -- scrolling and search --------------------------------------------------
-
     #[test]
-    fn the_session_view_scrolls() {
+    fn the_conversation_scrolls_with_the_page_keys_and_the_wheel() {
         let mut c = setup_with_worker();
         for i in 0..40 {
             c.orch_transcript.push_notice(&format!("line {i}"));
         }
-        c.handle_key(enter());
         assert_eq!(c.scroll(), None, "the tail is followed by default");
-        c.handle_key(ch('g'));
-        assert_eq!(c.scroll(), Some(0), "g pins the top");
-        c.handle_key(ctrl('d'));
-        assert_eq!(c.scroll(), Some(10), "half of the 20-row viewport");
-        c.handle_key(ctrl('f'));
-        assert_eq!(c.scroll(), Some(30));
-        c.handle_key(ctrl('u'));
-        assert_eq!(c.scroll(), Some(20));
-        c.handle_key(ctrl('b'));
+        c.handle_key(ctrl_code(KeyCode::Home));
+        assert_eq!(c.scroll(), Some(0), "ctrl-home pins the top");
+        c.handle_key(key(KeyCode::PageDown));
+        assert_eq!(c.scroll(), Some(20), "one 20-row page");
+        c.handle_key(key(KeyCode::PageUp));
         assert_eq!(c.scroll(), Some(0));
-        c.handle_key(ch('G'));
-        assert_eq!(c.scroll(), None, "G follows the tail again");
-        // on the dashboard these keys select instead
-        c.handle_key(esc());
-        c.handle_key(ch('g'));
-        assert_eq!(c.selected(), 0);
-        c.handle_key(ch('G'));
-        assert_eq!(c.selected(), 1);
+        // the wheel is half a page
+        c.handle_action(KeyAction::ScrollHalfDown);
+        assert_eq!(c.scroll(), Some(10));
+        c.handle_key(ctrl_code(KeyCode::End));
+        assert_eq!(c.scroll(), None, "ctrl-end follows the tail again");
+        // and none of those keys are text
+        assert!(c.composer().input.is_empty());
     }
 
     #[test]
@@ -4082,11 +4059,10 @@ mod tests {
         for i in 0..600 {
             notice(&mut c, format!("line {i}"));
         }
-        c.handle_key(enter());
-        c.handle_key(ch('g'));
+        c.handle_key(ctrl_code(KeyCode::Home));
         // far enough in that the trim below does not take the pinned row with it
         for _ in 0..8 {
-            c.handle_key(ctrl('f'));
+            c.handle_key(key(KeyCode::PageDown));
         }
         let pinned = c.scroll().expect("pinned somewhere");
         let content = c.orch_transcript.blocks()[pinned].text.clone();
@@ -4109,8 +4085,7 @@ mod tests {
         c.orch_transcript.push_notice("the quick brown fox");
         c.orch_transcript.push_notice("lazy dog");
         c.orch_transcript.push_notice("another quick fox");
-        c.handle_key(enter());
-        c.handle_key(ch('/'));
+        c.handle_key(ctrl('r'));
         let Overlay::Search(search) = c.overlay().unwrap() else {
             panic!();
         };
@@ -4124,25 +4099,32 @@ mod tests {
         c.handle_key(enter());
         assert!(c.overlay().is_none());
         assert_eq!(c.search().unwrap().current, Some(0));
-        c.handle_key(ch('n'));
+        // the same key steps once a search is running, rather than reopening
+        c.handle_key(ctrl('r'));
         assert_eq!(c.search().unwrap().current, Some(1));
-        c.handle_key(ch('n'));
+        c.handle_key(ctrl('r'));
         assert_eq!(c.search().unwrap().current, Some(0), "wraps");
-        c.handle_key(ch('N'));
-        assert_eq!(c.search().unwrap().current, Some(1));
         // and the view is pinned at the match
         assert!(c.scroll().is_some());
     }
 
-    // -- overlays --------------------------------------------------------------
-
     #[test]
     fn help_opens_and_closes() {
         let mut c = setup_with_worker();
-        c.handle_key(ch('?'));
+        fleet_key(&mut c, '?');
         assert!(matches!(c.overlay(), Some(Overlay::Help)));
+        // the key that opened it closes it, and so do esc and `q`
+        c.handle_key(ch('?'));
+        assert!(c.overlay().is_none());
+        fleet_key(&mut c, '?');
+        c.handle_key(ch('q'));
+        assert!(c.overlay().is_none(), "`q` closes a help panel");
+        fleet_key(&mut c, '?');
         c.handle_key(esc());
         assert!(c.overlay().is_none());
+        // and `/help` reaches the same panel
+        c.submit("/help");
+        assert!(matches!(c.overlay(), Some(Overlay::Help)));
     }
 
     #[test]
@@ -4165,7 +4147,7 @@ mod tests {
             ..OrchestratorState::default()
         };
         c.set_orchestrator_state(state);
-        c.handle_key(ch('a')); // 'a' with approvals pending opens the overlay
+        // the prompt blocks the orchestrator, so it raises itself
         assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
         let effects = c.handle_key(ch('y'));
         assert!(matches!(
@@ -4188,7 +4170,6 @@ mod tests {
             ..OrchestratorState::default()
         };
         c.set_orchestrator_state(state);
-        c.handle_key(ch('a'));
         c.handle_key(ch('n')); // start the deny reason
         c.handle_key(ch('n'));
         c.handle_key(ch('o'));
@@ -4225,7 +4206,8 @@ mod tests {
             ..OrchestratorState::default()
         };
         c.set_orchestrator_state(state);
-        c.handle_key(ch('a'));
+        // a blocked orchestrator raises its own prompt
+        assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
         // the first option is highlighted; down moves, enter answers
         c.handle_key(key(KeyCode::Down));
         let effects = c.handle_key(enter());
@@ -4245,7 +4227,6 @@ mod tests {
             ..OrchestratorState::default()
         };
         c.set_orchestrator_state(state);
-        c.handle_key(ch('a'));
         c.handle_key(key(KeyCode::Down)); // onto "something else"
         c.handle_key(enter()); // start typing
         c.handle_key(ch('s'));
@@ -4287,7 +4268,7 @@ mod tests {
             effects,
             vec![Effect::SetOrchestratorModel("fable".to_string())]
         );
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         let effects = c.submit("/model claude-opus-5");
         assert_eq!(
             effects,
@@ -4311,16 +4292,6 @@ mod tests {
     }
 
     #[test]
-    fn slash_rail_is_remembered() {
-        let mut c = setup_with_worker();
-        let effects = c.submit("/rail wide");
-        assert_eq!(effects, vec![Effect::SavePrefs]);
-        assert_eq!(c.prefs().rail_mode, "wide");
-        c.submit("/rail nonsense");
-        assert!(c.flash().unwrap().text.contains("usage: /rail"));
-    }
-
-    #[test]
     fn slash_shutdown_asks_first() {
         let mut c = setup_with_worker();
         let effects = c.submit("/shutdown");
@@ -4341,7 +4312,7 @@ mod tests {
             asked_at: crate::util::now_iso(),
         });
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         let effects = c.submit("/answer use argon2");
         assert_eq!(
             effects,
@@ -4360,7 +4331,7 @@ mod tests {
         entry.state.status = RunStatus::Settled;
         entry.state.pid = None;
         c.set_runs(vec![entry]);
-        c.handle_key(ch('j'));
+        select_row(&mut c, 1);
         c.submit("hello");
         assert!(c.flash().unwrap().text.contains("is settled"));
     }
@@ -4634,14 +4605,14 @@ mod tests {
         let mut c = test_console();
         // a session row, as the monitor owns it
         let session = crate::orch::session::create_session(c.fleet.root(), Some("alpha")).unwrap();
-        c.prefs.rail_mode = "wide".into();
+        c.prefs.last_session = Some("orchestrator".into());
         c.prefs.last_session_uuid = Some(session.uuid.to_string());
 
         // order 1: the store writes a heartbeat, then the console writes prefs
         crate::orch::session::touch_heartbeat(c.fleet.root(), session.uuid).unwrap();
         c.save_prefs();
         let raw = std::fs::read_to_string(c.fleet.fleet_json()).unwrap();
-        assert!(raw.contains("\"railMode\": \"wide\""), "{raw}");
+        assert!(raw.contains("\"lastSession\": \"orchestrator\""), "{raw}");
         let store = crate::orch::session::load(c.fleet.root()).unwrap();
         assert!(
             store.sessions[&session.uuid].last_heartbeat.is_some(),
@@ -4651,9 +4622,9 @@ mod tests {
             store
                 .extra
                 .get("console")
-                .and_then(|v| v.get("railMode"))
+                .and_then(|v| v.get("lastSession"))
                 .and_then(serde_json::Value::as_str)
-                == Some("wide"),
+                == Some("orchestrator"),
             "the store itself round-trips the console key now"
         );
 
@@ -4661,7 +4632,7 @@ mod tests {
         c.save_prefs();
         crate::orch::session::touch_heartbeat(c.fleet.root(), session.uuid).unwrap();
         let raw = std::fs::read_to_string(c.fleet.fleet_json()).unwrap();
-        assert!(raw.contains("\"railMode\": \"wide\""), "{raw}");
+        assert!(raw.contains("\"lastSession\": \"orchestrator\""), "{raw}");
         assert!(
             raw.contains(&session.uuid.to_string()),
             "the session row survived the prefs write: {raw}"
@@ -4723,7 +4694,6 @@ mod tests {
             Some(uuid.to_string().as_str())
         );
         // and save_prefs persists both under the console key
-        reopened.prefs.rail_mode = "compact".into();
         reopened.save_prefs();
         let raw = std::fs::read_to_string(c.fleet.fleet_json()).unwrap();
         assert!(raw.contains("\"lastSessionUuid\": \""), "{raw}");
@@ -4731,7 +4701,6 @@ mod tests {
             raw.contains("\"lastSession\": \"auth-20260830000000\""),
             "{raw}"
         );
-        assert!(raw.contains("\"railMode\": \"compact\""), "{raw}");
     }
 
     #[test]
@@ -4836,12 +4805,10 @@ mod tests {
     fn begin_session_resets_console_state_for_the_new_session() {
         let mut c = setup_with_worker();
         c.orch_transcript.push_sent("hello");
-        c.handle_key(enter()); // in the session view now
         c.toast("a note", false);
         let other = crate::orch::session::create_session(c.fleet.root(), Some("docs")).unwrap();
         c.begin_session(&other.key());
         assert_eq!(c.orch_key, other.key());
-        assert_eq!(c.view(), View::Dashboard);
         assert!(
             c.runs.is_empty(),
             "the new session's runs arrive with the feeds"

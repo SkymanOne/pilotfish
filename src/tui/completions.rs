@@ -123,15 +123,15 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
     },
     CommandSpec {
-        name: "/rail",
-        detail: "width of the session list: compact, auto, wide, full",
-        takes_argument: true,
-        worker_only: false,
-        aliases: &["/rw"],
-    },
-    CommandSpec {
         name: "/clear",
         detail: "clear this session's transcript from the console (the file is kept)",
+        takes_argument: false,
+        worker_only: false,
+        aliases: &[],
+    },
+    CommandSpec {
+        name: "/verbose",
+        detail: "show an older turn's reasoning and tool output in full, or fold it again",
         takes_argument: false,
         worker_only: false,
         aliases: &[],

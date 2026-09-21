@@ -29,7 +29,7 @@ Single crate `parl`, lib + bin. The library is the contract, and the binary only
 | `src/orch/` | the claude side: stream-json wire types (`protocol.rs`), argv builder (`args.rs`), child process (`process.rs`), detached monitor (`monitor.rs`), transcript records (`records.rs`), console-side client (`client.rs`), embedded prompt (`prompt.rs`), the `.mcp.json` (`mcp_config.rs`), health and the orphan reaper (`health.rs`), the run-state watcher that turns state into fleet events (`watcher.rs`), and the session store for `fleet.json` (`session.rs`). |
 | `src/ops/` | the shared operation layer both the CLI and the MCP tools call: `spawn.rs`, `query.rs` (status/output/logs/report/wait/attach), `steer.rs` (send/followup/answer/stop), `integrate.rs` (diff/merge/cleanup). The CLI-shaped signatures live beside `_core` variants that take a `Party` source, so the console and MCP can attribute actions honestly. |
 | `src/mcp/` | the stdio MCP server (`server.rs`), one tool per op, built on `rmcp`. Server name stays `fleet` so tools stay `mcp__fleet__*`. |
-| `src/tui/` | the console: app state and update loop (`app.rs`), view model (`model.rs`), modal keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (dashboard, session, composer, overlay, statusline). |
+| `src/tui/` | the console: app state and update loop (`app.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
 | `pi/`, `prompts/` | TypeScript on purpose, embedded with `include_str!` and materialised into `.parl/pi/` at worker boot: `pi/extensions/fleet-worker.ts`, `pi/skills/fleet-worker-report/SKILL.md`, `prompts/orchestrator.md`. |
 
 ## The orchestrator contract
@@ -139,6 +139,16 @@ What an agent offers is **asked for, never snapshotted**. A session's command li
 - The one thing that cannot be asked for is claude's model list — no control request lists it (verified fact 3) — so `ORCHESTRATOR_MODEL_ALIASES` in `src/orch/records.rs` seeds `capabilities.models` and the session's own resolved model is appended.
 - `fleet_status` reports the pi catalogue alongside the runs, so the orchestrator can see what it is choosing between.
 
+## The console's shape
+
+One conversation, and overlays over it. There is no second view and no modal split.
+
+- **The composer always has focus**, so every printable key is text and no letter is stolen from a message. The only non-text keys are `ctrl` chords: `ctrl-f` fleet, `ctrl-k` palette, `ctrl-r` search (again steps), `ctrl-o` unfold, `ctrl-y` mouse, page keys to scroll. `esc` walks outwards — popup, answer, line — and interrupts the turn when there is nothing left to clear.
+- **The fleet is `Overlay::Fleet`**, drawn by `view/dashboard.rs` over the conversation. `build_rows` in `src/tui/model.rs` is the one source of rows, as it always was; what went is the rail beside the transcript and the `railMode` preference it needed.
+- **An overlay that is a list reads single letters as commands** (`map_overlay_key`), and one that is a text field reads them as text (`map_key`). `Console::handle_key` picks per overlay, including the permission overlay, which switches while a deny reason or a custom answer is being written — a reason starting with "just" must not lose its letters to list navigation. `n` and `y` are never remapped, because that is how a confirm prompt hears no.
+- **A permission prompt raises itself**, once per request id: it blocks the orchestrator, so waiting to be found is wrong, and re-raising one that was dismissed would trap the console.
+- **Folding.** Reasoning and tool output older than `RECENT_BLOCKS` fold to one summary row each; `/verbose` (`ctrl-o`) unfolds. The model's prose, the human's prompts, fleet events and errors are never folded.
+
 ## Streaming and trimming
 
 A token reaches the screen through three intervals, and all three are named constants: the monitor coalesces deltas every `STREAM_FLUSH_MS` (50 ms), the console reads the transcript tail every `TAIL_MS` (120 ms) and draws on `TICK_MS` (250 ms). Reloading every `run.json` and the diff stats is separate and slower (`FEED_MS`, 400 ms) — a frame is skipped only when a tail poll found nothing.
@@ -174,7 +184,7 @@ Each of these cost a debugging session once already.
 - Envelope readers stay tolerant on purpose: an unknown `type` or an unknown payload field parses, decodes to `None`, and the line is skipped, so a newer writer can never crash an older reader. Keep it that way.
 - Tool output is drawn with control characters and reaches the screen verbatim: `git rebase` writes `Rebasing (1/6)\rRebasing (2/6)\r…\rSuccessfully rebased and updated …` as one line. A cell holding a bare CR sends the terminal's cursor to column 0 mid-row, so the rest of the row repaints over what was drawn and the whole frame tears (an `ESC` would do worse). Two defences, both needed: `util::visible_line` resolves CRs the way a terminal would and spaces out every other control character, and every block goes through `Transcript::push`, which calls it; `view::scrub_controls` then sweeps the finished frame buffer, so a widget that skips the first defence still cannot tear the screen.
 - The orphan reaper once matched a bare `"claude"` substring. With N sessions, a stale pid recycled onto another session's claude child matched, and the reaper SIGTERMed a healthy session. It now matches `--session <uuid>` and refuses any pid whose process started after the recorded `pid_started_at`.
-- `session::save` destroyed every key it did not model. The console keeps prefs under a `"console"` key in the same `fleet.json`, so the monitor's 5 s heartbeat erased `railMode` and `lastSession` continuously. `FleetSessions` now carries `#[serde(flatten)] extra` so unknown top-level keys round-trip. This passed a full green suite because nothing asserted that one writer preserves another writer's keys.
+- `session::save` destroyed every key it did not model. The console keeps prefs under a `"console"` key in the same `fleet.json`, so the monitor's 5 s heartbeat erased the console's keys continuously. `FleetSessions` now carries `#[serde(flatten)] extra` so unknown top-level keys round-trip. This passed a full green suite because nothing asserted that one writer preserves another writer's keys.
 - `fleet.json` is written by atomic rename, so an flock on the store file locks a fresh inode every write. Mutations go through `session::with_store_mutation`, which locks a stable `fleet.json.lock` sidecar.
 
 ## Conventions

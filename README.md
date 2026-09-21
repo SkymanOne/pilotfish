@@ -27,6 +27,6 @@ Then say what you want: *"Add token refresh to the auth module and update the te
 ## Docs
 
 * [Getting started](docs/getting-started.md): install, first run, launch options, where the state lives
-* [The console](docs/console.md): the dashboard, keys, palette, permissions, transcript
+* [The console](docs/console.md): the conversation, the fleet overlay, keys, palette, permissions, transcript
 * [Headless commands](docs/cli.md): the CLI surface and its exit codes
 * [AGENTS.md](AGENTS.md): the map for anyone working on the code, human or agent. Module layout, the on-disk contract, what was verified about the pi and claude protocols, and why things are the way they are.

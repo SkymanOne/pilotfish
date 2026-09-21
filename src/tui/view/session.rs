@@ -1,8 +1,10 @@
-//! The session drill-down: a slim session list on the left, the selected
-//! session's transcript filling the rest, the composer below it. The
-//! transcript renders the blocks `transcript.rs` produces, blocks separated
-//! by blank lines, in the colour language the console established — the
-//! human's prompts in cyan, reasoning dimmed and abridged, the model's
+//! The conversation: the selected session's transcript filling the pane,
+//! the composer below it. There is no rail — the fleet is an overlay
+//! (`ctrl-f`), not a column that steals width from what you are reading.
+//!
+//! The transcript renders the blocks `transcript.rs` produces, blocks
+//! separated by blank lines, in the colour language the console established —
+//! the human's prompts in cyan, reasoning dimmed and abridged, the model's
 //! answer as rendered markdown, tool calls in blue with their results dimmed
 //! beneath, fleet events in yellow, errors red. Tool calls are shown as
 //! written; tool output is a preview with a count of what was left out (the
@@ -12,41 +14,28 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::Console;
 use crate::tui::markdown;
-use crate::tui::model::DashboardRow;
 use crate::tui::theme::Palette;
 use crate::tui::transcript::{Block, BlockKind};
+use crate::tui::view::Feeds;
 use crate::tui::view::composer;
-use crate::tui::view::{Feeds, clip_to};
 use crate::util::now_ms;
 
 /// The transcript never goes below this, even when the composer is tall.
 const TRANSCRIPT_MIN_ROWS: u16 = 3;
-/// The session list's automatic width: glyph + name + age, nothing more.
-const RAIL_AUTO: u16 = 24;
 /// Every non-text block opens with a one-column marker and a space (`> `,
 /// `⚙ `, `↳ `), so its wrapped rows hang two columns in to line up under it.
 const MARKER_WIDTH: usize = 2;
 
-/// Width of the session list, from the remembered `/rail` mode. `full`
-/// hides the list — the transcript is the pane; `/rail` brings it back.
-#[must_use]
-pub fn rail_width_for(mode: &str) -> u16 {
-    match mode {
-        "compact" => 14,
-        "auto" => RAIL_AUTO,
-        "wide" => 36,
-        _ => 0,
-    }
-}
+/// Blocks at the tail that are never folded, however old the rest gets: the
+/// turn you are watching stays whole.
+const RECENT_BLOCKS: usize = 40;
 
-/// Draw the session view over `area` (the frame minus the status line).
+/// Draw the conversation over `area` (the frame minus the status line).
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
@@ -54,18 +43,9 @@ pub fn draw(
     _feeds: &Feeds<'_>,
     pal: &Palette,
 ) {
-    let rail_width = rail_width_for(&console.prefs().rail_mode);
-    let (rail, rest) = if rail_width > 0 {
-        let [rail, rest] =
-            Layout::horizontal([Constraint::Length(rail_width), Constraint::Min(1)]).areas(area);
-        (Some(rail), rest)
-    } else {
-        (None, area)
-    };
-
     // the box grows by the rows the text actually wraps to, not by its
     // newlines: a long unbroken sentence needs the room just as much
-    let composer_lines = composer::layout(&console.composer().input, 0, composer::inner_width(rest))
+    let composer_lines = composer::layout(&console.composer().input, 0, composer::inner_width(area))
         .rows
         .len()
         .clamp(1, composer::MAX_LINES) as u16;
@@ -77,91 +57,14 @@ pub fn draw(
         Constraint::Min(TRANSCRIPT_MIN_ROWS),
         Constraint::Length(composer_height + flash + activity),
     ])
-    .areas(rest);
+    .areas(area);
 
-    // half/full-page scrolling keys are measured against this pane
+    // page-scrolling keys are measured against this pane
     console.viewport_rows = transcript_area.height as usize;
 
-    if let Some(rail) = rail {
-        draw_rail(frame, rail, console, pal);
-    }
     draw_transcript(frame, transcript_area, console, pal);
     composer::draw(frame, chrome_area, console, pal, now);
     composer::draw_popup(frame, transcript_area, chrome_area, console, pal);
-}
-
-// ---------------------------------------------------------------------------
-// The session list
-
-fn draw_rail(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
-    let rows = console.rows();
-    let selected = console.selected();
-    let capacity = area.height as usize;
-    let start = if rows.len() <= capacity {
-        0
-    } else {
-        selected
-            .saturating_sub(capacity.saturating_sub(1))
-            .min(rows.len() - capacity)
-    };
-    let overflow = rows.len() - start > capacity;
-    let room = if overflow { capacity - 1 } else { capacity };
-    let visible = (rows.len() - start).min(room);
-    for (at, i) in (start..start + visible).enumerate() {
-        let line = rail_line(&rows[i], i == selected, area.width, pal);
-        frame.render_widget(
-            Paragraph::new(line),
-            Rect::new(area.x, area.y + at as u16, area.width, 1),
-        );
-    }
-    if overflow {
-        let hidden = rows.len() - start - visible;
-        let at = area.y + capacity.saturating_sub(1) as u16;
-        frame.render_widget(
-            Paragraph::new(Line::styled(format!("… {hidden} more"), pal.dim())),
-            Rect::new(area.x, at, area.width, 1),
-        );
-    }
-}
-
-/// `▸ ● db    2m` — one line per session; the age is always shown, the name
-/// yields for it.
-fn rail_line(row: &DashboardRow, selected: bool, width: u16, pal: &Palette) -> Line<'static> {
-    let width = width as usize;
-    // the orchestrator owns the conversation, so it keeps its accent in
-    // every state: selection paints the background over the row's own
-    // colour rather than replacing it, which also keeps a worker that wants
-    // the human yellow while it is the selected row
-    let base = if row.attention {
-        pal.attention()
-    } else if row.target.is_worker() {
-        Style::default()
-    } else {
-        pal.accent().add_modifier(Modifier::BOLD)
-    };
-    let base = if selected {
-        base.patch(pal.selected())
-    } else {
-        base
-    };
-    let marker = if selected { "▸ " } else { "  " };
-    let age_room = usize::from(!row.age.is_empty()) * (row.age.width() + 1);
-    let name_room = width
-        .saturating_sub(marker.width() + row.glyph.width() + 1 + age_room)
-        .max(3);
-    let name = clip_to(&row.name, name_room);
-    let mut spans = vec![
-        Span::styled(marker.to_string(), base),
-        Span::styled(format!("{} ", row.glyph), base),
-        Span::styled(name.clone(), base),
-    ];
-    if !row.age.is_empty() {
-        let used = marker.width() + row.glyph.width() + 1 + name.width();
-        let gap = width.saturating_sub(used + age_room).max(1);
-        spans.push(Span::styled(" ".repeat(gap), base));
-        spans.push(Span::styled(row.age.clone(), base));
-    }
-    Line::from(spans)
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +121,16 @@ fn build_units(blocks: &[Block]) -> Vec<Unit> {
     units
 }
 
+/// The pane the transcript is being drawn into: its size, and the block
+/// index before which old reasoning and tool output fold to a summary row
+/// (`None` while `/verbose` is on).
+#[derive(Debug, Clone, Copy)]
+pub struct Pane {
+    pub width: usize,
+    pub height: usize,
+    pub fold_before: Option<usize>,
+}
+
 /// What the search highlight needs, copied out so the transcript borrow can
 /// end before rendering starts.
 #[derive(Debug, Clone, Default)]
@@ -237,16 +150,25 @@ fn draw_transcript(frame: &mut Frame, area: Rect, console: &mut Console, pal: &P
         matches: s.matches.clone(),
         current: s.current,
     });
+    let verbose = console.verbose();
     let lines = {
         let transcript = console.open_transcript();
         let partial = transcript.partial();
+        let fold = if verbose {
+            None
+        } else {
+            Some(transcript.blocks().len().saturating_sub(RECENT_BLOCKS))
+        };
         render_rows(
             transcript.blocks(),
             partial.as_deref(),
             scroll,
             search.as_ref(),
-            width,
-            height,
+            Pane {
+                width,
+                height,
+                fold_before: fold,
+            },
             pal,
         )
     };
@@ -262,14 +184,20 @@ fn render_rows(
     partial: Option<&str>,
     scroll: Option<usize>,
     search: Option<&Highlight>,
-    width: usize,
-    height: usize,
+    pane: Pane,
     pal: &Palette,
 ) -> Vec<Line<'static>> {
+    let Pane {
+        width,
+        height,
+        fold_before,
+    } = pane;
     let units = build_units(blocks);
     let total_units = units.len();
-    let render =
-        |unit: &Unit| -> Vec<(usize, Line<'static>)> { render_unit(unit, blocks, width, pal) };
+    let render = |unit: &Unit| -> Vec<(usize, Line<'static>)> {
+        let fold = fold_before.is_some_and(|at| unit.end <= at);
+        render_unit(unit, blocks, width, fold, pal)
+    };
 
     let mut rows: Vec<(usize, Line<'static>)> = Vec::new();
     let mut more_below = false;
@@ -361,9 +289,13 @@ fn render_unit(
     unit: &Unit,
     blocks: &[Block],
     width: usize,
+    fold: bool,
     pal: &Palette,
 ) -> Vec<(usize, Line<'static>)> {
     let range = &blocks[unit.start..unit.end];
+    if fold && let Some(line) = folded(range, pal) {
+        return vec![(unit.start, line)];
+    }
     if range[0].kind == BlockKind::Text {
         let joined = range
             .iter()
@@ -388,6 +320,29 @@ fn render_unit(
             .flat_map(|(i, block)| wrap_block(block, unit.start + i, width, pal))
             .collect()
     }
+}
+
+/// An old unit's one-line summary, or `None` for a unit worth keeping whole.
+///
+/// Reasoning and tool output are the bulk of a long session and the least
+/// worth re-reading once the turn is over; the model's prose, the human's
+/// prompts, fleet events and errors are never folded. `/verbose` (or
+/// `ctrl-o`) shows everything again.
+fn folded(range: &[Block], pal: &Palette) -> Option<Line<'static>> {
+    let kind = range[0].kind;
+    if !matches!(kind, BlockKind::Thinking | BlockKind::Tool) {
+        return None;
+    }
+    let head = range[0].text.trim_end();
+    let rest = range.len() - 1;
+    if rest == 0 {
+        return None;
+    }
+    let style = pal.block(kind);
+    Some(Line::from(vec![
+        Span::styled(head.to_string(), style),
+        Span::styled(format!("  ⋯ {rest} more"), pal.dim()),
+    ]))
 }
 
 /// One non-text block as rows. A block is a single line of text, so anything
@@ -506,7 +461,16 @@ fn apply_highlight(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::tui::model::SessionTarget;
+    use ratatui::style::Modifier;
+    use unicode_width::UnicodeWidthStr;
+
+    fn pane(width: usize, height: usize, fold_before: Option<usize>) -> Pane {
+        Pane {
+            width,
+            height,
+            fold_before,
+        }
+    }
 
     fn plain(rows: &[Line<'static>]) -> Vec<String> {
         rows.iter()
@@ -545,69 +509,58 @@ mod tests {
     }
 
     #[test]
-    fn the_orchestrator_row_keeps_its_accent_when_selected() {
-        let pal = Palette::colored();
-        let orch = DashboardRow {
-            key: "orchestrator".into(),
-            glyph: "●",
-            name: "orchestrator · docs".into(),
-            detail: "idle".into(),
-            age: String::new(),
-            target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
-            attention: false,
-            branch: None,
-            diff_stat: None,
-        };
-        let worker = DashboardRow {
-            key: "auth-1f2e3d4".into(),
-            name: "auth".into(),
-            target: SessionTarget::Worker {
-                run_id: "auth-1f2e3d4".into(),
-            },
-            ..orch.clone()
-        };
-        let accent = pal.accent().fg;
-        for selected in [false, true] {
-            let line = rail_line(&orch, selected, 30, &pal);
-            assert!(
-                line.spans.iter().all(|s| s.style.fg == accent),
-                "the session that owns the conversation keeps its colour                  (selected: {selected}): {line:?}"
-            );
-            let line = rail_line(&worker, selected, 30, &pal);
-            assert!(
-                line.spans.iter().all(|s| s.style.fg != accent),
-                "a worker never borrows it (selected: {selected}): {line:?}"
-            );
-        }
-        // selection still paints its background over both
-        let line = rail_line(&orch, true, 30, &pal);
+    fn an_older_turn_folds_its_reasoning_and_tool_output_to_one_row() {
+        let blocks = vec![
+            block(BlockKind::Thinking, "✻ first thought"),
+            block(BlockKind::Thinking, "  second thought"),
+            block(BlockKind::Tool, "⚙ Bash cargo test"),
+            block(BlockKind::ToolResult, "  ↳ Bash: ok"),
+            block(BlockKind::Text, "done"),
+        ];
+        // folded: everything before the cut collapses to its head plus a count
+        let folded = plain(&render_rows(
+            &blocks,
+            None,
+            None,
+            None,
+            pane(60, 20, Some(blocks.len())),
+            &Palette::plain(),
+        ));
         assert!(
-            line.spans.iter().all(|s| s.style.bg == pal.selected().bg),
-            "{line:?}"
+            folded
+                .iter()
+                .any(|r| r.contains("✻ first thought") && r.contains("⋯ 1 more")),
+            "reasoning folds: {folded:?}"
         );
-    }
+        assert!(
+            folded
+                .iter()
+                .any(|r| r.contains("⚙ Bash cargo test") && r.contains("⋯ 1 more")),
+            "the tool call keeps its command and counts its output: {folded:?}"
+        );
+        assert!(
+            !folded.iter().any(|r| r.contains("second thought")),
+            "the rest is not drawn: {folded:?}"
+        );
+        assert!(
+            folded.iter().any(|r| r.contains("done")),
+            "the model's own prose is never folded: {folded:?}"
+        );
 
-    #[test]
-    fn a_selected_worker_that_wants_the_human_stays_yellow() {
-        let pal = Palette::colored();
-        let row = DashboardRow {
-            key: "auth-1f2e3d4".into(),
-            glyph: "●",
-            name: "auth".into(),
-            detail: "blocked".into(),
-            age: "2m".into(),
-            target: SessionTarget::Worker {
-                run_id: "auth-1f2e3d4".into(),
-            },
-            attention: true,
-            branch: None,
-            diff_stat: None,
-        };
-        let line = rail_line(&row, true, 30, &pal);
+        // unfolded, every line is there again
+        let whole = plain(&render_rows(
+            &blocks,
+            None,
+            None,
+            None,
+            pane(60, 20, None),
+            &Palette::plain(),
+        ));
         assert!(
-            line.spans.iter().all(|s| s.style.fg == pal.attention().fg),
-            "selection must not hide a pending question: {line:?}"
+            whole.iter().any(|r| r.contains("second thought")),
+            "{whole:?}"
         );
+        assert!(whole.iter().any(|r| r.contains("↳ Bash: ok")), "{whole:?}");
     }
 
     #[test]
@@ -616,7 +569,14 @@ mod tests {
             BlockKind::User,
             "> plan the development of the thing and present it to me",
         )];
-        let rows = render_rows(&blocks, None, None, None, 24, 20, &Palette::plain());
+        let rows = render_rows(
+            &blocks,
+            None,
+            None,
+            None,
+            pane(24, 20, None),
+            &Palette::plain(),
+        );
         let rows = plain(&rows);
         assert!(rows.len() > 1, "the prompt wrapped: {rows:?}");
         assert!(
@@ -647,8 +607,7 @@ mod tests {
             None,
             None,
             None,
-            16,
-            20,
+            pane(16, 20, None),
             &Palette::plain(),
         ));
         assert!(rows.len() > 1, "wrapped: {rows:?}");
@@ -689,7 +648,7 @@ mod tests {
             block(BlockKind::Tool, "⚙ bash ls"),
         ];
         let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, 80, 20, &pal);
+        let rows = render_rows(&blocks, None, None, None, pane(80, 20, None), &pal);
         let texts = plain(&rows);
         assert_eq!(
             texts,
@@ -704,7 +663,7 @@ mod tests {
             .map(|i| block(BlockKind::System, &format!("note {i}")))
             .collect();
         let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, 80, 6, &pal);
+        let rows = render_rows(&blocks, None, None, None, pane(80, 6, None), &pal);
         let texts = plain(&rows);
         assert_eq!(texts.len(), 6, "{texts:?}");
         // the notice counts every line hidden above the window
@@ -718,7 +677,7 @@ mod tests {
             .map(|i| block(BlockKind::System, &format!("note {i}")))
             .collect();
         let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, Some(10), None, 80, 4, &pal);
+        let rows = render_rows(&blocks, None, Some(10), None, pane(80, 4, None), &pal);
         let texts = plain(&rows);
         assert_eq!(texts[0], "… 10 earlier lines", "{texts:?}");
         assert_eq!(texts[1], "note 10");
@@ -736,7 +695,7 @@ mod tests {
             matches: vec![0, 1],
             current: Some(1),
         };
-        let rows = render_rows(&blocks, None, None, Some(&search), 80, 10, &pal);
+        let rows = render_rows(&blocks, None, None, Some(&search), pane(80, 10, None), &pal);
         // blank separators sit between blocks: rows[0] block 0, rows[2] block 1
         // the highlight patches over the block's own style
         assert!(
@@ -760,7 +719,7 @@ mod tests {
             block(BlockKind::Text, "with **bold**"),
         ];
         let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, 80, 10, &pal);
+        let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
         let texts = plain(&rows);
         assert_eq!(texts[0], "The plan", "the heading marker is gone");
         assert!(rows[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
@@ -781,7 +740,7 @@ mod tests {
             block(BlockKind::Error, "✖ boom"),
         ];
         let pal = Palette::colored();
-        let rows = render_rows(&blocks, None, None, None, 80, 10, &pal);
+        let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
         // blank separators sit between the four blocks
         assert_eq!(rows[0].spans[0].style.fg, Some(ratatui::style::Color::Cyan));
         assert_eq!(
@@ -796,7 +755,14 @@ mod tests {
     fn partial_streams_at_the_bottom_with_a_caret() {
         let blocks = vec![block(BlockKind::System, "note")];
         let pal = Palette::plain();
-        let rows = render_rows(&blocks, Some("streaming text"), None, None, 80, 10, &pal);
+        let rows = render_rows(
+            &blocks,
+            Some("streaming text"),
+            None,
+            None,
+            pane(80, 10, None),
+            &pal,
+        );
         let texts = plain(&rows);
         assert_eq!(texts[0], "note");
         // the partial is its own block: a blank, then the stream with a caret
@@ -808,7 +774,7 @@ mod tests {
     #[test]
     fn an_empty_transcript_says_so() {
         let pal = Palette::plain();
-        let rows = render_rows(&[], None, None, None, 80, 10, &pal);
+        let rows = render_rows(&[], None, None, None, pane(80, 10, None), &pal);
         assert_eq!(plain(&rows), vec!["(no events captured yet)"]);
     }
 }

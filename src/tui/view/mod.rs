@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::orch::records::OrchestratorState;
-use crate::tui::app::{Console, RunEntry, View};
+use crate::tui::app::{Console, RunEntry};
 use crate::tui::theme::Palette;
 
 /// The facts the runtime polled from `.parl` and hands the renderer beside
@@ -33,10 +33,7 @@ pub struct Feeds<'a> {
 pub fn draw(frame: &mut Frame, console: &mut Console, feeds: &Feeds<'_>, pal: &Palette) {
     let area = frame.area();
     let [main, status] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
-    match console.view() {
-        View::Dashboard => dashboard::draw(frame, main, console, pal),
-        View::Session => session::draw(frame, main, console, feeds, pal),
-    }
+    session::draw(frame, main, console, feeds, pal);
     statusline::draw(frame, status, console, feeds, pal);
     // overlays go last so they sit over everything, dimming what is behind
     if let Some(overlay) = console.overlay().cloned() {
@@ -68,8 +65,8 @@ fn scrub_controls(buffer: &mut ratatui::buffer::Buffer) {
     }
 }
 
-/// Clip to `max` printed columns, ellipsis on the cut. Shared by the
-/// dashboard and the session list, whose names yield for the age column.
+/// Clip to `max` printed columns, ellipsis on the cut: a name yields for
+/// the age column rather than pushing it off the row.
 pub(crate) fn clip_to(text: &str, max: usize) -> String {
     if text.width() <= max {
         return text.to_string();
@@ -236,12 +233,17 @@ mod tests {
         );
     }
 
-    // -- dashboard ------------------------------------------------------------
+    // -- the fleet overlay ----------------------------------------------------
+
+    fn ctrl_f() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)
+    }
 
     #[test]
-    fn the_dashboard_draws_a_fleet_of_workers_in_different_states() {
+    fn the_fleet_overlay_draws_a_fleet_of_workers_in_different_states() {
         let (mut console, runs, orch) = fleet();
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 14);
+        console.handle_key(ctrl_f());
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
         // header: the fleet summary — db running, api asking, tests done
         assert_visible(&buf, "parl");
@@ -265,16 +267,17 @@ mod tests {
         // the detail line under the blocked worker says what it needs
         assert_visible(&buf, "needs an answer");
 
-        // the footer carries the mode's key hints
+        // the footer carries the panel's key hints
         assert_visible(&buf, "j/k move");
     }
 
     #[test]
-    fn the_dashboard_marks_the_selected_worker_and_shows_the_flash() {
+    fn the_fleet_overlay_marks_the_selected_worker_and_shows_the_flash() {
         let (mut console, runs, orch) = fleet();
+        console.handle_key(ctrl_f());
         console.handle_key(ch('j'));
         console.toast("! that worker is gone", true);
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 14);
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
         // the selection moved to db; its row is marked, the orchestrator is not
         let db_row = find_row(&buf, "● db").unwrap();
@@ -288,33 +291,35 @@ mod tests {
     // -- session view ---------------------------------------------------------
 
     #[test]
-    fn the_session_view_draws_the_rail_the_transcript_and_the_composer() {
+    fn the_conversation_draws_the_transcript_and_the_composer_with_no_rail() {
         let (mut console, runs, orch) = fleet();
         console.ingest_orchestrator_record(&notice_record("· halfway there"));
-        console.handle_key(key(KeyCode::Enter)); // open the orchestrator session
-        console.handle_key(ch('i')); // compose
         for c in "fix the tests".chars() {
             console.handle_key(ch(c));
         }
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
-        // the rail lists the sessions
-        assert_visible(&buf, "orchestrator");
-        assert_visible(&buf, "db");
-        assert_visible(&buf, "api");
         // the transcript shows the fed block
         assert_visible(&buf, "· halfway there");
         // the composer is aimed at the orchestrator and holds the message
         assert_visible(&buf, "orchestrator > ");
         assert_visible(&buf, "fix the tests");
-        // the status line carries the mode chip
-        assert_visible(&buf, "INSERT");
+        // the way into the fleet is always on screen
+        assert_visible(&buf, "ctrl+f fleet");
+        // no rail: the other sessions are not listed beside the transcript
+        let drawn = (0..buf.area.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !drawn.contains("● db"),
+            "the fleet is an overlay, not a column: {drawn}"
+        );
     }
 
     #[test]
     fn the_session_view_renders_transcript_block_kinds_with_blank_separators() {
         let (mut console, runs, orch) = fleet();
-        console.handle_key(key(KeyCode::Enter));
         // a sent prompt lands as a cyan user block
         console.submit("hello there");
         // a fleet batch lands as a yellow event block
@@ -335,14 +340,15 @@ mod tests {
     #[test]
     fn the_status_line_shows_the_selected_worker_facts() {
         let (mut console, runs, orch) = fleet();
+        console.handle_key(ctrl_f());
         console.handle_key(ch('j'));
+        console.handle_key(key(KeyCode::Enter));
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
         let status = row_text(&buf, buf.area.height - 1);
         assert!(status.contains("db"), "{status}");
         assert!(status.contains("running"), "{status}");
         assert!(status.contains("default model"), "{status}");
         assert!(status.contains("parl/db-7"), "{status}");
-        assert!(status.contains("NORMAL"), "{status}");
     }
 
     #[test]
@@ -372,17 +378,19 @@ mod tests {
     #[test]
     fn the_help_overlay_lists_the_keys() {
         let (mut console, runs, orch) = fleet();
+        console.handle_key(ctrl_f());
         console.handle_key(ch('?'));
         // tall enough that help_lines shows every row, not a counted tail
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 44);
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 50);
         assert_visible(&buf, "keys");
         assert_visible(&buf, "move the selection");
-        assert_visible(&buf, "close the console; workers keep running");
+        assert_visible(&buf, "the command palette");
     }
 
     #[test]
     fn the_confirm_overlay_asks_before_destroying() {
         let (mut console, runs, orch) = fleet();
+        console.handle_key(ctrl_f());
         console.handle_key(ch('j'));
         console.handle_key(ch('x'));
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
@@ -417,8 +425,8 @@ mod tests {
             },
             received_at: now_iso(),
         }];
+        // a blocked orchestrator raises its own prompt
         console.set_orchestrator_state(orch.clone());
-        console.handle_key(ch('a'));
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
         assert_visible(&buf, "Run touch a.txt");
         assert_visible(&buf, "Bash touch a.txt");
@@ -444,7 +452,6 @@ mod tests {
             received_at: now_iso(),
         }];
         console.set_orchestrator_state(orch.clone());
-        console.handle_key(ch('a'));
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
         assert_visible(&buf, "question 1/1");
         assert_visible(&buf, "Which hash?");
@@ -456,10 +463,9 @@ mod tests {
     #[test]
     fn the_search_overlay_counts_its_matches() {
         let (mut console, runs, orch) = fleet();
-        console.handle_key(key(KeyCode::Enter));
         console.ingest_orchestrator_record(&notice_record("the quick brown fox"));
         console.ingest_orchestrator_record(&notice_record("another quick fox"));
-        console.handle_key(ch('/'));
+        console.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         for c in "quick".chars() {
             console.handle_key(ch(c));
         }

@@ -1,28 +1,27 @@
-//! The dashboard: the home view. The whole fleet at a glance — a header
-//! summarising it, one two-line row per session (the orchestrator first),
-//! and a footer of key hints for the current mode. The primary line carries
-//! the state glyph, the name, and the age on the right; workers also show
-//! their branch and diff stat when known. The dimmed second line is what the
-//! session is doing right now. A dozen workers stay readable because the
-//! rows use the full width — nothing is clipped to a narrow rail.
+//! The fleet panel: the whole fleet at a glance, drawn as an overlay over
+//! the conversation (`ctrl-f`). A header summarising it, one two-line row
+//! per session (the orchestrator first), and a footer of key hints. The
+//! primary line carries the state glyph, the name, and the age on the right;
+//! workers also show their branch and diff stat when known. The dimmed
+//! second line is what the session is doing right now. A dozen workers stay
+//! readable because the rows use the full width.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::tui::app::Console;
 use crate::tui::model::DashboardRow;
 use crate::tui::theme::Palette;
+use crate::tui::view::clip_to;
 
-/// The key hints, by mode (the footer line).
-pub const HINTS_NORMAL: &str =
-    "j/k move · enter open · a answer · s stop · i compose · : palette · ? help · q quit";
-pub const HINTS_INSERT: &str = "enter send · shift-enter newline · tab accept · esc normal";
+/// The footer line: what the letters do in here.
+pub const HINTS_FLEET: &str = "j/k move · enter open · a answer · s stop · x remove · t thinking · m model · ? help · esc back";
 
-/// Draw the dashboard over `area` (the frame minus the status line).
+/// Draw the fleet rows over `area` (the overlay's inner area).
 pub fn draw(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
     let [header, rows, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -103,15 +102,10 @@ fn draw_rows(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
 fn primary_line(row: &DashboardRow, selected: bool, width: u16, pal: &Palette) -> Line<'static> {
     let width = width as usize;
     let marker = if selected { "▸ " } else { "  " };
-    let base = if selected {
-        pal.selected()
-    } else if row.attention {
-        pal.attention()
-    } else if row.target.is_worker() {
-        Style::default()
-    } else {
-        pal.accent().add_modifier(Modifier::BOLD)
-    };
+    // Selection paints its background *over* the row's own colour rather
+    // than replacing it: the orchestrator keeps its accent, and a worker
+    // waiting on an answer stays yellow while it is the selected row.
+    let base = row_style(row, selected, pal);
     let mut spans = vec![
         Span::styled(marker.to_string(), base),
         Span::styled(format!("{} ", row.glyph), base),
@@ -149,14 +143,36 @@ fn primary_line(row: &DashboardRow, selected: bool, width: u16, pal: &Palette) -
     Line::from(spans)
 }
 
+/// The row's own colour, with the selection painted over it rather than
+/// instead of it — the orchestrator owns the conversation and keeps its
+/// accent in every state, and a worker that wants an answer stays yellow
+/// even while it is the selected row.
+fn row_style(row: &DashboardRow, selected: bool, pal: &Palette) -> Style {
+    let base = if row.attention {
+        pal.attention()
+    } else if row.target.is_worker() {
+        Style::default()
+    } else {
+        pal.accent().add_modifier(Modifier::BOLD)
+    };
+    if selected {
+        base.patch(pal.selected())
+    } else {
+        base
+    }
+}
+
 /// The dimmed second line: what the session is doing right now.
 fn secondary_line(row: &DashboardRow, selected: bool, pal: &Palette) -> Line<'static> {
-    let base = if selected {
-        pal.selected()
-    } else if row.attention {
+    let base = if row.attention {
         pal.attention()
     } else {
         pal.dim()
+    };
+    let base = if selected {
+        base.patch(pal.selected())
+    } else {
+        base
     };
     Line::from(vec![
         Span::styled("    ".to_string(), base),
@@ -166,13 +182,7 @@ fn secondary_line(row: &DashboardRow, selected: bool, pal: &Palette) -> Line<'st
 
 fn draw_footer(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
     let line = console.flash().map_or_else(
-        || {
-            let hint = match console.mode() {
-                crate::tui::keys::Mode::Normal => HINTS_NORMAL,
-                crate::tui::keys::Mode::Insert => HINTS_INSERT,
-            };
-            Line::styled(hint.to_string(), pal.dim())
-        },
+        || Line::styled(HINTS_FLEET.to_string(), pal.dim()),
         |flash| {
             Line::styled(
                 flash.text.clone(),
@@ -211,21 +221,74 @@ fn state_style(pal: &Palette, glyph: &str) -> Style {
     }
 }
 
-/// Clip to `max` printed columns, ellipsis on the cut.
-fn clip_to(text: &str, max: usize) -> String {
-    if text.width() <= max {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(1);
-        if used + w > max.saturating_sub(1) {
-            break;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::model::SessionTarget;
+
+    #[test]
+    fn the_orchestrator_row_keeps_its_accent_when_selected() {
+        let pal = Palette::colored();
+        let orch = DashboardRow {
+            key: "orchestrator".into(),
+            glyph: "●",
+            name: "orchestrator · docs".into(),
+            detail: "idle".into(),
+            age: String::new(),
+            target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
+            attention: false,
+            branch: None,
+            diff_stat: None,
+        };
+        let worker = DashboardRow {
+            key: "auth-1f2e3d4".into(),
+            name: "auth".into(),
+            target: SessionTarget::Worker {
+                run_id: "auth-1f2e3d4".into(),
+            },
+            ..orch.clone()
+        };
+        let accent = pal.accent().fg;
+        for selected in [false, true] {
+            let line = primary_line(&orch, selected, 30, &pal);
+            assert!(
+                line.spans.iter().all(|s| s.style.fg == accent),
+                "the session that owns the conversation keeps its colour                  (selected: {selected}): {line:?}"
+            );
+            let line = primary_line(&worker, selected, 30, &pal);
+            assert!(
+                line.spans.iter().all(|s| s.style.fg != accent),
+                "a worker never borrows it (selected: {selected}): {line:?}"
+            );
         }
-        out.push(ch);
-        used += w;
+        // selection still paints its background over both
+        let line = primary_line(&orch, true, 30, &pal);
+        assert!(
+            line.spans.iter().all(|s| s.style.bg == pal.selected().bg),
+            "{line:?}"
+        );
     }
-    out.push('…');
-    out
+
+    #[test]
+    fn a_selected_worker_that_wants_the_human_stays_yellow() {
+        let pal = Palette::colored();
+        let row = DashboardRow {
+            key: "auth-1f2e3d4".into(),
+            glyph: "●",
+            name: "auth".into(),
+            detail: "blocked".into(),
+            age: "2m".into(),
+            target: SessionTarget::Worker {
+                run_id: "auth-1f2e3d4".into(),
+            },
+            attention: true,
+            branch: None,
+            diff_stat: None,
+        };
+        let line = primary_line(&row, true, 30, &pal);
+        assert!(
+            line.spans.iter().all(|s| s.style.fg == pal.attention().fg),
+            "selection must not hide a pending question: {line:?}"
+        );
+    }
 }

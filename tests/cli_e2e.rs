@@ -996,19 +996,26 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     .to_envelope(parl::fleet::envelope::Party::Console);
     parl::fleet::envelope::append_envelope(&inbox, &user).unwrap();
 
+    // the store is created before the session row is upserted into it, so
+    // waiting for the file alone can catch it empty
     let fleet_json = fleet_dir.join("fleet.json");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while !fleet_json.is_file() {
+    let store: Value = loop {
+        let store = std::fs::read_to_string(&fleet_json)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        if let Some(store) = store
+            && store["sessions"].as_object().is_some_and(|s| !s.is_empty())
+        {
+            break store;
+        }
         assert!(
             std::time::Instant::now() < deadline,
-            "fleet.json never appeared; claude.log: {}",
+            "no session row appeared in fleet.json; claude.log: {}",
             std::fs::read_to_string(session_path.join("claude.log")).unwrap_or_default()
         );
         std::thread::sleep(POLL);
-    }
-
-    let store: Value =
-        serde_json::from_str(&std::fs::read_to_string(&fleet_json).unwrap()).unwrap();
+    };
     assert_eq!(store["version"], json!(2), "{store}");
     let sessions = store["sessions"].as_object().unwrap();
     assert_eq!(sessions.len(), 1, "{store}");
@@ -1018,11 +1025,25 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     assert!(session["uuid"].is_string(), "{store}");
     let key =
         parl::paths::SessionKey::new(None, session["uuid"].as_str().unwrap().parse().unwrap());
-    let state = parl::orch::monitor::load_orchestrator_state(&fleet_dir, &key).unwrap();
+    // `fleet.json` is written just before `state.json`, so seeing the one
+    // does not mean the other has landed yet
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let state = loop {
+        let state = parl::orch::monitor::load_orchestrator_state(&fleet_dir, &key);
+        if state.as_ref().is_some_and(|s| s.session_id.is_some()) {
+            break state.unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "state.json never carried the session id"
+        );
+        std::thread::sleep(POLL);
+    };
     assert_eq!(state.session_id.as_deref(), Some("sess-e2e-12345678"));
 
     for documented in [
         session_path.join("state.json"),
+        session_path.join("capabilities.json"),
         session_path.join("events.jsonl"),
         session_path.join("inbox.jsonl"),
         session_path.join("claude.log"),
@@ -1388,6 +1409,13 @@ fn refusal_exit_codes_on_a_running_then_stopped_run() {
             .join(&run_id)
             .join("run.json"),
     };
+
+    // `spawn` returns before the monitor has reported its pid, and a run
+    // without one still reads as `starting`: wait for the state the
+    // assertions below are about.
+    poll_status(&root, "slowpoke", SETTLE, |state| {
+        state["status"] == "running"
+    });
 
     // A running run cannot be merged (1) and has nothing to answer (1).
     let (code, _, stderr) = run(&root, &["merge", "slowpoke"]);

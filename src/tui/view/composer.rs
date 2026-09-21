@@ -14,7 +14,6 @@ use tui_textarea::TextArea;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::tui::app::Console;
-use crate::tui::keys::Mode;
 use crate::tui::theme::Palette;
 
 /// The composer grows with the message, up to this many text rows.
@@ -59,18 +58,16 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette, now
     draw_box(frame, chunks[at], console, pal);
 }
 
-/// The input box itself: what it is aimed at as the title, a caret only when
-/// the console is in insert mode, an amber title while answering a question.
+/// The input box itself: what it is aimed at as the title, an amber title
+/// while answering a question. The composer always has focus, so the border
+/// is only ever accent or answering-amber.
 fn draw_box(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
     let composer = console.composer();
-    let insert = console.mode() == Mode::Insert;
     let answering = composer.answering.is_some();
     let style = if answering {
         pal.attention()
-    } else if insert {
-        pal.accent()
     } else {
-        pal.dim()
+        pal.accent()
     };
     let block = Block::new()
         .borders(Borders::ALL)
@@ -88,13 +85,8 @@ fn draw_box(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
     textarea.set_block(block);
     textarea.set_style(Style::default());
     textarea.set_cursor_line_style(Style::default());
-    if insert {
-        textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
-    } else {
-        // the same style as the cursor line hides the caret: the composer is
-        // not focused in normal mode
-        textarea.set_cursor_style(Style::default());
-    }
+    // the composer always has focus, so the caret is always drawn
+    textarea.set_cursor_style(Style::default().add_modifier(Modifier::REVERSED));
     textarea.move_cursor(tui_textarea::CursorMove::Jump(
         laid.row as u16,
         laid.col as u16,

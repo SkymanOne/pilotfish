@@ -24,19 +24,36 @@ use crate::tui::view::Feeds;
 pub fn draw(
     frame: &mut Frame,
     area: Rect,
-    _console: &crate::tui::app::Console,
+    console: &crate::tui::app::Console,
     feeds: &Feeds<'_>,
     overlay: &Overlay,
     pal: &Palette,
 ) {
     match overlay {
         Overlay::Help => help(frame, area, pal),
+        Overlay::Fleet => fleet(frame, area, console, pal),
         Overlay::Confirm(state) => confirm(frame, area, state, pal),
         Overlay::Permission(state) => permission(frame, area, state, feeds, pal),
         Overlay::Palette(state) => palette(frame, area, state, pal),
         Overlay::Search(state) => search(frame, area, state, pal),
         Overlay::Brief(state) => brief(frame, area, state, pal),
     }
+}
+
+/// The fleet: every session and what can be done to the one selected. The
+/// panel is deliberately large — the point of opening it is to see the whole
+/// fleet, and a dozen workers need the room.
+fn fleet(frame: &mut Frame, area: Rect, console: &crate::tui::app::Console, pal: &Palette) {
+    let width = area.width.saturating_sub(4).max(20);
+    let height = area.height.saturating_sub(2).max(6);
+    let inner = panel(
+        frame,
+        centered(area, width, height),
+        "fleet",
+        OverlayRole::Fleet,
+        pal,
+    );
+    crate::tui::view::dashboard::draw(frame, inner, console, pal);
 }
 
 /// Shrink `area` to `width`×`height` and centre it inside.

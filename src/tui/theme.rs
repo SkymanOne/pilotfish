@@ -163,6 +163,8 @@ impl Palette {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayRole {
     Help,
+    /// The fleet panel.
+    Fleet,
     Confirm,
     Permission,
     Palette,
@@ -175,6 +177,7 @@ impl Palette {
     pub fn border(&self, role: OverlayRole) -> Style {
         match role {
             OverlayRole::Help => self.dim(),
+            OverlayRole::Fleet => self.heading(),
             OverlayRole::Confirm => self.error(),
             OverlayRole::Permission => self.attention(),
             OverlayRole::Palette | OverlayRole::Search => self.accent(),
