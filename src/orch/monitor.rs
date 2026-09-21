@@ -39,8 +39,15 @@ use crate::util::{atomic_write_json, now_iso, read_new_lines};
 
 const FLUSH_MS: u64 = 200;
 const CONTROL_POLL_MS: u64 = 200;
-/// Token deltas are coalesced into one record per tick, so the file stays small.
-const STREAM_FLUSH_MS: u64 = 150;
+/// Token deltas are coalesced into one record per tick, so the file stays
+/// small. Short, because this interval is the first of the three that stand
+/// between a token and the screen (the other two are the console's tail poll
+/// and its draw).
+const STREAM_FLUSH_MS: u64 = 50;
+/// How many lines `events.jsonl` may hold while the monitor runs. The file
+/// is the console's replay source, so it has to stay readable in one gulp;
+/// past this the head is dropped and the console replays what is left.
+const MAX_EVENT_LINES: usize = 5_000;
 /// Consecutive polls with the fleet directory missing before the monitor
 /// accepts that it was deleted or moved out from under it: a single
 /// transient `NotFound` under load is not a deletion.
@@ -144,6 +151,9 @@ struct Shared {
     dir_missing_polls: u32,
     /// Epoch ms of the last heartbeat write; the first poll writes at once.
     last_heartbeat_written: Option<i64>,
+    /// Turn count at the last compaction, so the threshold measures turns
+    /// *since* one rather than turns in total.
+    compacted_at_turn: u32,
     /// Set once the fleet directory loss (or an answering stop) ends the
     /// session; blocks a flag-change restart from respawning a child into a
     /// directory that no longer exists.
@@ -164,6 +174,8 @@ pub struct Monitor {
     pid: i32,
     /// The model asked for at launch; claude's own default when none.
     launch_model: Option<String>,
+    /// Turns between automatic `/compact`s, or none when it is switched off.
+    auto_compact_turns: Option<u32>,
     budget_usd: Option<f64>,
     paths: FleetPaths,
     shared: Mutex<Shared>,
@@ -247,6 +259,7 @@ impl Monitor {
             pid: i32::try_from(std::process::id()).unwrap_or(1),
             launch_model: launch.model.clone(),
             budget_usd: launch.budget_usd,
+            auto_compact_turns: launch.auto_compact_turns.filter(|t| *t > 0),
             paths,
             shared: Mutex::new(Shared {
                 state,
@@ -261,6 +274,7 @@ impl Monitor {
                 control_offset: 0,
                 dir_missing_polls: 0,
                 last_heartbeat_written: None,
+                compacted_at_turn: 0,
                 shutting_down: false,
             }),
         });
@@ -365,6 +379,7 @@ impl Monitor {
             match event {
                 ProcEvent::Message(msg) => self.on_message(&msg),
                 ProcEvent::TextDelta(delta) => self.on_text_delta(&delta),
+                ProcEvent::ThinkingDelta(delta) => self.on_thinking_delta(&delta),
                 ProcEvent::Init(init) => self.on_init(&init),
                 ProcEvent::Commands(commands) => {
                     {
@@ -481,6 +496,13 @@ impl Monitor {
         sh.dirty = true;
     }
 
+    fn on_thinking_delta(&self, delta: &str) {
+        let mut sh = self.shared();
+        sh.transcript.stream_thinking(delta);
+        sh.state.last_activity = Some(now_iso());
+        sh.dirty = true;
+    }
+
     fn on_init(&self, init: &SystemInitMessage) {
         {
             let mut sh = self.shared();
@@ -538,6 +560,35 @@ impl Monitor {
             sh.dirty = true;
         }
         self.flush_state();
+        // a turn is the only moment either of these is safe: the child is
+        // idle, and the transcript has just been flushed
+        records::trim_events_file(&self.paths.orchestrator_events(&self.key), MAX_EVENT_LINES);
+        self.maybe_compact(&proc);
+    }
+
+    /// Compact the session's context once it has run far enough since the
+    /// last compaction. `/compact` is claude's own command, so this is an
+    /// ordinary user turn — which is also why it is only worth doing rarely.
+    fn maybe_compact(&self, proc: &Arc<OrchestratorProcess>) {
+        let Some(threshold) = self.auto_compact_turns else {
+            return;
+        };
+        let (turns, compacted_at) = {
+            let sh = self.shared();
+            (sh.state.num_turns, sh.compacted_at_turn)
+        };
+        let since = turns.saturating_sub(compacted_at);
+        if since < threshold {
+            return;
+        }
+        // recorded before sending: `/compact` is itself a turn, and a second
+        // one must not be triggered by the first one's result
+        self.shared().compacted_at_turn = turns;
+        self.write_notice(
+            format!("· compacting the session's context after {since} turns"),
+            None,
+        );
+        proc.send("/compact");
     }
 
     fn write_notice(&self, text: String, error: Option<bool>) {
@@ -1042,6 +1093,7 @@ mod tests {
             permission_mode: Some("acceptEdits".into()),
             remote_control: Some(String::new()),
             fresh: Some(true),
+            auto_compact_turns: None,
         };
         let key = record.key();
         store.upsert(record);

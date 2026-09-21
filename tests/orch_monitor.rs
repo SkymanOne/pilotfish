@@ -60,7 +60,18 @@ impl Fixture {
     /// claude. The fake-claude knobs travel through the monitor's env, like
     /// the TypeScript test's `useFakeClaude`.
     fn client(&self, fresh: bool) -> Arc<OrchestratorClient> {
-        let mut env: HashMap<String, String> = HashMap::new();
+        self.client_with(fresh, HashMap::new(), None)
+    }
+
+    /// A client with extra fake-claude env, and optionally a `~/.parl` of its
+    /// own so a test can set user config without touching the real home.
+    fn client_with(
+        &self,
+        fresh: bool,
+        extra: HashMap<String, String>,
+        user_dir: Option<&Path>,
+    ) -> Arc<OrchestratorClient> {
+        let mut env: HashMap<String, String> = extra;
         env.insert(
             "PARL_CLAUDE_BIN".to_string(),
             format!("node {}", fake_claude().display()),
@@ -79,11 +90,15 @@ impl Fixture {
             "FAKE_CLAUDE_SESSION_ID".to_string(),
             self.session_id.to_string(),
         );
+        if let Some(dir) = user_dir {
+            env.insert("PARL_HOME".to_string(), dir.to_string_lossy().into_owned());
+        }
         OrchestratorClient::new(OrchestratorClientOptions {
             fresh,
             monitor_bin: Some(assert_cmd::cargo_bin!("parl").to_path_buf()),
             monitor_env: Some(env),
             poll_ms: 30,
+            user_config_dir: user_dir.map(Path::to_path_buf),
             ..OrchestratorClientOptions::new(self.fleet_dir.clone(), self.cwd.clone())
         })
     }
@@ -477,6 +492,56 @@ async fn refreshing_capabilities_picks_up_a_command_installed_later() {
             .any(|c| c.name == "late-skill")
     })
     .await;
+
+    client.shutdown().await.unwrap();
+}
+
+/// A long session keeps itself small: the monitor compacts claude's context
+/// once the turn threshold is crossed, and caps the transcript file.
+#[tokio::test]
+async fn a_session_past_its_turn_threshold_compacts_itself() {
+    if !node_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+    let fixture = Fixture::new("sess-compact1");
+    let home = fixture.cwd.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "[session]\nauto_compact_turns = 1\n",
+    )
+    .unwrap();
+    let stdin_log = fixture.cwd.join("stdin.log");
+    let mut extra = HashMap::new();
+    extra.insert(
+        "FAKE_CLAUDE_STDIN_LOG".to_string(),
+        stdin_log.to_string_lossy().into_owned(),
+    );
+
+    let client = fixture.client_with(true, extra, Some(&home));
+    let mut rx = client.subscribe();
+    client.start().unwrap();
+    wait(WAIT, || client.running()).await;
+    client.send("first").await.unwrap();
+    wait_event(
+        &mut rx,
+        WAIT,
+        |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
+    )
+    .await;
+
+    wait(WAIT, || {
+        std::fs::read_to_string(&stdin_log).is_ok_and(|log| log.contains("/compact"))
+    })
+    .await;
+    assert!(
+        transcript_of(&fixture.fleet_dir)
+            .iter()
+            .any(|record| record.kind == "notice"
+                && format!("{:?}", record.body).contains("compacting")),
+        "the seam is marked in the transcript"
+    );
 
     client.shutdown().await.unwrap();
 }

@@ -348,6 +348,11 @@ pub enum OrchestratorEvent {
     StreamText {
         text: String,
     },
+    /// Coalesced reasoning, written like [`Self::StreamText`] so the console
+    /// can show thinking as it is written instead of at turn end.
+    StreamThinking {
+        text: String,
+    },
     Activity {
         activity: Option<Activity>,
     },
@@ -380,6 +385,10 @@ impl OrchestratorEvent {
             Self::StreamText { text } => {
                 body.insert("text".into(), Value::String(text.clone()));
                 "stream_text"
+            }
+            Self::StreamThinking { text } => {
+                body.insert("text".into(), Value::String(text.clone()));
+                "stream_thinking"
             }
             Self::Activity { activity } => {
                 body.insert(
@@ -441,6 +450,13 @@ impl EventRecord {
         let body = &self.body;
         match self.kind.as_str() {
             "stream_text" => OrchestratorEvent::StreamText {
+                text: body
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+            "stream_thinking" => OrchestratorEvent::StreamThinking {
                 text: body
                     .get("text")
                     .and_then(Value::as_str)
@@ -513,6 +529,7 @@ pub fn append_record(events_path: &Path, record: &EventRecord) -> std::io::Resul
 pub struct Transcript {
     path: PathBuf,
     pending_text: String,
+    pending_thinking: String,
 }
 
 impl Transcript {
@@ -522,6 +539,7 @@ impl Transcript {
         Self {
             path,
             pending_text: String::new(),
+            pending_thinking: String::new(),
         }
     }
 
@@ -530,21 +548,36 @@ impl Transcript {
         self.pending_text.push_str(delta);
     }
 
-    /// Write any pending text as one `stream_text` record.
+    /// Accumulate streamed reasoning, flushed alongside the text.
+    pub fn stream_thinking(&mut self, delta: &str) {
+        self.pending_thinking.push_str(delta);
+    }
+
+    /// Write any pending reasoning and text, in that order — a model thinks
+    /// before it answers, and the records have to read that way too.
     ///
     /// # Errors
     ///
-    /// Returns an I/O error when the record cannot be appended.
+    /// Returns an I/O error when a record cannot be appended.
     pub fn flush_text(&mut self) -> std::io::Result<bool> {
-        if self.pending_text.is_empty() {
-            return Ok(false);
+        let mut wrote = false;
+        if !self.pending_thinking.is_empty() {
+            let text = std::mem::take(&mut self.pending_thinking);
+            append_record(
+                &self.path,
+                &OrchestratorEvent::StreamThinking { text }.to_record(),
+            )?;
+            wrote = true;
         }
-        let text = std::mem::take(&mut self.pending_text);
-        append_record(
-            &self.path,
-            &OrchestratorEvent::StreamText { text }.to_record(),
-        )?;
-        Ok(true)
+        if !self.pending_text.is_empty() {
+            let text = std::mem::take(&mut self.pending_text);
+            append_record(
+                &self.path,
+                &OrchestratorEvent::StreamText { text }.to_record(),
+            )?;
+            wrote = true;
+        }
+        Ok(wrote)
     }
 
     /// Append one record, flushing pending text first so ordering stays sane.
@@ -556,6 +589,24 @@ impl Transcript {
         self.flush_text()?;
         append_record(&self.path, &event.to_record())
     }
+}
+
+/// Keep a transcript file to its last `max_lines` lines, rewriting it in
+/// place. The one bound on a file that otherwise grows for the life of a
+/// session; the console notices the file shrank and replays what is left.
+///
+/// Best effort: an unreadable or unwritable file is left alone, because a
+/// transcript that cannot be trimmed is better than one that is lost.
+pub fn trim_events_file(events_path: &Path, max_lines: usize) -> bool {
+    let Ok(raw) = std::fs::read_to_string(events_path) else {
+        return false;
+    };
+    let lines: Vec<&str> = raw.split('\n').filter(|l| !l.is_empty()).collect();
+    if lines.len() <= max_lines {
+        return false;
+    }
+    let trimmed = format!("{}\n", lines[lines.len() - max_lines..].join("\n"));
+    std::fs::write(events_path, trimmed).is_ok()
 }
 
 /// Pending requests ordered by arrival, newest last — what `state.json` holds.
@@ -732,6 +783,29 @@ mod tests {
         assert!(line.contains(r#""sessionId":"sess""#), "{line}");
         assert!(line.contains(r#""turnActive":true"#), "{line}");
         assert!(line.contains(r#""requestId":"req_1""#), "{line}");
+    }
+
+    #[test]
+    fn trimming_an_events_file_keeps_its_tail_and_leaves_a_short_one_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("events.jsonl");
+        let line = |i: usize| format!("{{\"type\":\"notice\",\"text\":\"{i}\"}}");
+        let body: String = (0..10).map(|i| format!("{}\n", line(i))).collect();
+        std::fs::write(&path, &body).unwrap();
+
+        assert!(!trim_events_file(&path, 10), "exactly at the cap is fine");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+
+        assert!(trim_events_file(&path, 4));
+        let kept = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = kept.lines().collect();
+        assert_eq!(lines.len(), 4, "{kept}");
+        assert_eq!(lines[0], line(6), "the tail is what survives");
+        assert_eq!(lines[3], line(9));
+        assert!(kept.ends_with('\n'), "still a well-framed JSONL file");
+
+        // a file that is not there is not an error
+        assert!(!trim_events_file(&tmp.path().join("missing.jsonl"), 1));
     }
 
     #[test]

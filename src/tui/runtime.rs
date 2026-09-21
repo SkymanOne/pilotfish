@@ -53,6 +53,16 @@ fn repo_cwd(fleet: &FleetPaths) -> String {
 /// The dashboard's diff-stat refresh cadence: `diff` shells out to git once
 /// per run, so this is a background nicety the poll loop catches up on, not
 /// a per-tick duty.
+/// The clock: ages, elapsed counters and spinners move on this tick even
+/// when no file changed.
+const TICK_MS: u64 = 250;
+/// How often the transcript tail is read. Two offset reads, so it is cheap
+/// enough to run at this rate — end to end a token now reaches the screen in
+/// about a quarter of a second rather than the better part of one.
+const TAIL_MS: u64 = 120;
+/// How often run state, capabilities and diff stats are reloaded. Every
+/// run.json is read, so this stays slow.
+const FEED_MS: u64 = 400;
 const DIFF_STAT_MS: i64 = 10_000;
 
 // ---------------------------------------------------------------------------
@@ -312,10 +322,22 @@ impl Poll {
     /// and every worker's events. Offsets start at zero, so the first poll
     /// *is* the replay on console open — the same ingest path a live tail
     /// uses.
-    fn tail_events(&mut self, console: &mut Console) {
-        let (lines, offset) =
-            read_new_lines(&self.fleet.orchestrator_events(&self.key), self.orch_offset);
+    /// Returns whether anything new was folded in, so the caller can skip a
+    /// redraw that would paint the same frame again.
+    fn tail_events(&mut self, console: &mut Console) -> bool {
+        let mut ingested = false;
+        // The monitor caps the file while it runs, so a file shorter than
+        // our cursor means it was trimmed, not that it went backwards: start
+        // the transcript again from what is left.
+        let events_path = self.fleet.orchestrator_events(&self.key);
+        if std::fs::metadata(&events_path).is_ok_and(|meta| meta.len() < self.orch_offset) {
+            self.orch_offset = 0;
+            console.reset_orchestrator_transcript();
+            ingested = true;
+        }
+        let (lines, offset) = read_new_lines(&events_path, self.orch_offset);
         self.orch_offset = offset;
+        ingested |= !lines.is_empty();
         for line in &lines {
             if let Ok(record) = serde_json::from_str::<EventRecord>(line) {
                 console.ingest_orchestrator_record(&record);
@@ -328,12 +350,14 @@ impl Poll {
             let offset = self.worker_offsets.entry(run.run_id.clone()).or_insert(0);
             let (lines, next) = read_new_lines(&self.fleet.run_events(&run.run_id), *offset);
             *offset = next;
+            ingested |= !lines.is_empty();
             for line in &lines {
                 if let Ok(event) = serde_json::from_str::<Value>(line) {
                     console.ingest_worker_event(&run.run_id, &event);
                 }
             }
         }
+        ingested
     }
 
     /// The watcher seam (`orch::watcher`): one poll pass, then everything
@@ -540,6 +564,7 @@ fn record_launch_options(
         permission_mode: options.permission_mode.clone(),
         remote_control: options.remote_control.clone(),
         fresh: Some(options.fresh),
+        auto_compact_turns: config.auto_compact_turns(),
     };
     // Opening this session makes it the one a reopened console resumes.
     let now = crate::util::now_iso();
@@ -681,22 +706,33 @@ pub async fn run_console(
     poll.save_cursors();
 
     let mut events = EventStream::new();
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
-    let mut feed = tokio::time::interval(Duration::from_millis(400));
+    let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    // the transcript tail is two file reads at an offset, so it can run often;
+    // reloading every run.json and the diff stats cannot
+    let mut tail = tokio::time::interval(Duration::from_millis(TAIL_MS));
+    let mut feed = tokio::time::interval(Duration::from_millis(FEED_MS));
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
-    for timer in [&mut tick, &mut feed, &mut heartbeat] {
+    for timer in [&mut tick, &mut tail, &mut feed, &mut heartbeat] {
         timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
     }
+    // Reading `$NO_COLOR` and friends once per frame told us the same thing
+    // every time; the environment does not change under a running console.
+    let palette = Palette::detect();
+    // Skipped only for a tail that found nothing: every other wake-up changes
+    // something on screen, and a missed redraw is worse than a wasted one.
+    let mut draw = true;
 
     loop {
         // the flash's expiry is a clock matter, not an event matter
         console.tick(now_ms());
-        let feeds = Feeds {
-            orch: &poll.orch,
-            runs: &poll.runs,
-        };
-        let palette = Palette::detect();
-        terminal.draw(|frame| view::draw(frame, &mut console, &feeds, &palette))?;
+        if draw {
+            let feeds = Feeds {
+                orch: &poll.orch,
+                runs: &poll.runs,
+            };
+            terminal.draw(|frame| view::draw(frame, &mut console, &feeds, &palette))?;
+        }
+        draw = true;
 
         tokio::select! {
             maybe = events.next() => match maybe {
@@ -750,6 +786,9 @@ pub async fn run_console(
             },
             // the clock: ages, activity lines and the elapsed counters move
             _ = tick.tick() => {}
+            _ = tail.tick() => {
+                draw = poll.tail_events(&mut console);
+            }
             _ = feed.tick() => {
                 poll.reconcile_session();
                 poll.reload_runs();

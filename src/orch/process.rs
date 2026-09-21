@@ -32,8 +32,8 @@ use crate::orch::protocol::{
     interrupt_request, is_assistant, is_can_use_tool, is_control_cancel_request,
     is_control_response, is_result, is_stream_event, is_system_init, is_thinking_event, is_user,
     new_request_id, parse_claude_line, serialize, set_model_request, set_permission_mode_request,
-    text_delta_of, tool_uses_of, try_can_use_tool, try_control_response, try_result,
-    try_system_init, user_message,
+    text_delta_of, thinking_delta_of, tool_uses_of, try_can_use_tool, try_control_response,
+    try_result, try_system_init, user_message,
 };
 use crate::orch::records::{Activity, ActivityKind, sorted_pending};
 use crate::util::now_iso;
@@ -91,6 +91,9 @@ pub enum ProcEvent {
     Assistant(Value),
     User(Value),
     TextDelta(String),
+    /// A `thinking_delta`, coalesced by the monitor like a text delta so
+    /// reasoning reaches the console as it is written, not at turn end.
+    ThinkingDelta(String),
     StreamEvent(Value),
     Result(ResultMessage),
     PermissionRequest(PermissionRequest),
@@ -844,6 +847,9 @@ impl OrchestratorProcess {
                 self.emit(ProcEvent::TextDelta(delta));
             } else if is_thinking_event(&msg) {
                 self.bump_activity(ActivityKind::Thinking, None);
+                if let Some(delta) = thinking_delta_of(&msg) {
+                    self.emit(ProcEvent::ThinkingDelta(delta));
+                }
             }
             self.emit(ProcEvent::StreamEvent(msg));
             return;

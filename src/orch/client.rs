@@ -472,17 +472,11 @@ impl OrchestratorClient {
             .context("cannot write to the orchestrator inbox")
     }
 
-    /// Keep the transcript restorable without letting it grow forever.
+    /// Keep the transcript restorable without letting it grow forever. The
+    /// monitor caps the file on its own while it runs; this is the harder
+    /// cap applied when a dead monitor is being replaced.
     fn trim_transcript(events_path: &std::path::Path) {
-        let Ok(raw) = std::fs::read_to_string(events_path) else {
-            return; // no transcript yet, or unreadable: nothing to trim
-        };
-        let lines: Vec<&str> = raw.split('\n').filter(|l| !l.is_empty()).collect();
-        if lines.len() <= MAX_RESTORED_LINES {
-            return;
-        }
-        let trimmed = format!("{}\n", lines[lines.len() - MAX_RESTORED_LINES..].join("\n"));
-        let _ = std::fs::write(events_path, trimmed);
+        crate::orch::records::trim_events_file(events_path, MAX_RESTORED_LINES);
     }
 
     /// Spawn the detached monitor. Detached, like the TypeScript `detached:
@@ -547,6 +541,7 @@ impl OrchestratorClient {
             permission_mode: mode,
             remote_control: remote,
             fresh: Some(self.options.fresh),
+            auto_compact_turns: config.auto_compact_turns(),
         };
         // Opening this session makes it the one a reopened console resumes.
         session_record.last_used_at = crate::util::now_iso();

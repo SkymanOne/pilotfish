@@ -49,7 +49,7 @@ If that orchestrator is no longer running, after a reboot or a `/shutdown`, a ne
 
 It coordinates the work and never types code. `Edit`, `Write` and `NotebookEdit` are disabled for it. It can read the repository and run read-only git commands without asking. Anything else prompts you. Merge conflicts go back to the worker as a rebase brief rather than being fixed in place.
 
-Its brief ships inside the binary, and no file is ever copied into your project. To run a different one, point `$PARL_PROMPT` at a file, or drop one at `<repo>/.parl/orchestrator.md` or `~/.parl/orchestrator.md`. Whatever it was actually told, placeholders filled in, is written to `.parl/orchestrators/<session>/prompt.md` for you to read (one directory per orchestrator session). User-level defaults — `[orchestrator] model`, `[worker] model`/`provider`, `[limits] max_workers_per_session` — live in `~/.parl/config.toml`.
+Its brief ships inside the binary, and no file is ever copied into your project. To run a different one, point `$PARL_PROMPT` at a file, or drop one at `<repo>/.parl/orchestrator.md` or `~/.parl/orchestrator.md`. Whatever it was actually told, placeholders filled in, is written to `.parl/orchestrators/<session>/prompt.md` for you to read (one directory per orchestrator session). User-level defaults — `[orchestrator] model`, `[worker] model`/`provider`, `[session] auto_compact_turns`, `[limits] max_workers_per_session` — live in `~/.parl/config.toml`.
 
 ## Where the state lives
 

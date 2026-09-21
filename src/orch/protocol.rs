@@ -443,18 +443,31 @@ pub fn is_replayed_user_message(msg: &Value) -> bool {
         && user_text(msg).is_some()
 }
 
-/// The text of a stream delta, when this event carries one.
+/// The text of a `thinking_delta` stream event, or none. Reasoning streams
+/// like prose does; the monitor coalesces it the same way.
 #[must_use]
-pub fn text_delta_of(msg: &Value) -> Option<String> {
+pub fn thinking_delta_of(msg: &Value) -> Option<String> {
+    delta_text_of(msg, "thinking_delta", "thinking")
+}
+
+/// The text carried by one `content_block_delta` of `kind`, read from
+/// `field`.
+fn delta_text_of(msg: &Value, kind: &str, field: &str) -> Option<String> {
     let ev = msg.get("event")?;
     if ev.get("type").and_then(Value::as_str) != Some("content_block_delta") {
         return None;
     }
     let delta = ev.get("delta")?;
-    if delta.get("type").and_then(Value::as_str) != Some("text_delta") {
+    if delta.get("type").and_then(Value::as_str) != Some(kind) {
         return None;
     }
-    delta.get("text")?.as_str().map(str::to_string)
+    delta.get(field)?.as_str().map(str::to_string)
+}
+
+/// The text of a stream delta, when this event carries one.
+#[must_use]
+pub fn text_delta_of(msg: &Value) -> Option<String> {
+    delta_text_of(msg, "text_delta", "text")
 }
 
 // ---------------------------------------------------------------------------

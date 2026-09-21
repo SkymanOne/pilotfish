@@ -364,7 +364,7 @@ fn palette(frame: &mut Frame, area: Rect, state: &PaletteState, pal: &Palette) {
     // window adds its label line
     let query = input_rows("▶ ", &state.query, inner_width, pal);
     let fixed = 4u16 + query.len() as u16; // query + blank + footer + borders
-    let label_budget = 4u16; // five groups exist, one change earns a label
+    let label_budget = 5u16; // five groups exist, each earning a label line
     let max_items = (area.height.saturating_sub(fixed + label_budget)).max(3) as usize;
     let shown = state.visible.len().min(max_items);
     // a window over the ranked list, the selection kept in view
@@ -457,6 +457,14 @@ fn palette(frame: &mut Frame, area: Rect, state: &PaletteState, pal: &Palette) {
         ),
         pal.dim(),
     ));
+    // The row budget above is an estimate — group labels only appear for the
+    // groups the window happens to span. When it comes out short, results are
+    // what give way, never the footer: a panel that hides the key that closes
+    // it is worse than one showing fewer matches.
+    let room = inner.height as usize;
+    while lines.len() > room && lines.len() > 3 {
+        lines.remove(lines.len() - 3);
+    }
     draw_lines(frame, inner, lines);
 }
 

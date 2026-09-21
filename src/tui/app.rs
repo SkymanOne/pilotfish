@@ -262,6 +262,9 @@ pub enum Effect {
     /// completions show what is installed now rather than what was
     /// installed when the session started.
     RefreshCapabilities,
+    /// Cut the orchestrator's transcript file down to its recent tail. The
+    /// console notices the file shrank on its next poll and replays it.
+    TrimTranscript,
     /// The same question, asked of a running worker: pi's catalogue is
     /// fleet-wide, so any live worker can answer for the installation.
     RefreshWorkerCapabilities { run_id: String },
@@ -388,7 +391,12 @@ pub struct Console {
     history_at: Option<usize>,
     overlay: Option<Overlay>,
     /// Where the open session's view is pinned: `None` follows the tail.
+    /// A block index into the open transcript, so it has to be rebased when
+    /// blocks fall off the top — see [`Console::rebase_scroll`].
     scroll: Option<usize>,
+    /// The open transcript's dropped count when `scroll` and the search hits
+    /// were last in step with it.
+    scroll_base: usize,
     /// The last search applied to the open session.
     search: Option<SearchState>,
     /// Answers gathered so far for a multi-question `AskUserQuestion`.
@@ -441,6 +449,7 @@ impl Console {
             history_at: None,
             overlay: None,
             scroll: None,
+            scroll_base: 0,
             search: None,
             permission_answers: HashMap::new(),
             prefs: Prefs::default(),
@@ -515,15 +524,57 @@ impl Console {
         self.recompute_completion();
     }
 
+    /// Start the orchestrator transcript over, for a replay from the top of
+    /// a file the monitor has since trimmed. Anything anchored to a block
+    /// index goes with it — those indices meant the old content.
+    pub fn reset_orchestrator_transcript(&mut self) {
+        self.orch_transcript = Transcript::new();
+        self.scroll = None;
+        self.scroll_base = 0;
+        self.search = None;
+    }
+
     /// Fold one orchestrator record into the transcript.
     pub fn ingest_orchestrator_record(&mut self, record: &crate::orch::records::EventRecord) {
         self.orch_transcript.apply_orchestrator_record(record);
+        self.rebase_scroll();
         self.refresh_rows();
     }
 
     /// Fold one worker event into that worker's transcript.
     pub fn ingest_worker_event(&mut self, run_id: &str, event: &Value) {
         self.worker_transcript_mut(run_id).apply_worker_event(event);
+        self.rebase_scroll();
+    }
+
+    /// Follow the content a pinned scroll and the search hits point at when
+    /// blocks fall off the top. Without this a long session silently shifts
+    /// what the reader is looking at every time the transcript trims.
+    fn rebase_scroll(&mut self) {
+        let dropped = self.open_transcript_dropped();
+        let shift = dropped.saturating_sub(self.scroll_base);
+        self.scroll_base = dropped;
+        if shift == 0 {
+            return;
+        }
+        if let Some(at) = self.scroll.as_mut() {
+            *at = at.saturating_sub(shift);
+        }
+        if let Some(search) = self.search.as_mut() {
+            for hit in &mut search.matches {
+                *hit = hit.saturating_sub(shift);
+            }
+        }
+    }
+
+    fn open_transcript_dropped(&self) -> usize {
+        match self.selected_target() {
+            SessionTarget::Orchestrator(_) => self.orch_transcript.dropped(),
+            SessionTarget::Worker { run_id } => self
+                .worker_transcripts
+                .get(&run_id)
+                .map_or(0, Transcript::dropped),
+        }
     }
 
     /// Fold new fleet events in and return the effect that forwards them to
@@ -705,6 +756,7 @@ impl Console {
             // the search belonged to the session that was open
             self.search = None;
             self.scroll = None;
+            self.scroll_base = self.open_transcript_dropped();
         }
         true
     }
@@ -1446,6 +1498,7 @@ impl Console {
             // the search belonged to the session that was open
             self.search = None;
             self.scroll = None;
+            self.scroll_base = self.open_transcript_dropped();
         }
     }
 
@@ -1456,6 +1509,7 @@ impl Console {
         self.view = View::Session;
         self.scroll = None;
         self.search = None;
+        self.scroll_base = self.open_transcript_dropped();
         if let Some(row) = self.rows.get(self.selected) {
             self.prefs.last_session = Some(row.key.clone());
         }
@@ -2065,6 +2119,7 @@ impl Console {
         self.view = View::Dashboard;
         self.scroll = None;
         self.search = None;
+        self.scroll_base = 0;
         self.permission_answers.clear();
         self.pending_effort = None;
         self.pending_thinking.clear();
@@ -2402,6 +2457,8 @@ impl Console {
             Some("/session") => return self.session_command(argument),
             Some("/rail") => return self.set_rail((!argument.is_empty()).then_some(argument)),
             Some("/mouse") => return self.toggle_mouse(),
+            Some("/clear") => return self.clear_transcript(),
+            Some("/trim") => return vec![Effect::TrimTranscript],
             _ => {}
         }
         self.remember_history(&text);
@@ -2409,6 +2466,23 @@ impl Console {
             SessionTarget::Worker { run_id } => self.submit_to_worker(&run_id, &text),
             SessionTarget::Orchestrator(_) => self.submit_to_orchestrator(&text),
         }
+    }
+
+    /// `/clear`: forget the open session's transcript here. The file on disk
+    /// is the audit trail and is never touched — `/trim` is the one that
+    /// shortens it.
+    fn clear_transcript(&mut self) -> Vec<Effect> {
+        match self.selected_target() {
+            SessionTarget::Orchestrator(_) => self.orch_transcript = Transcript::new(),
+            SessionTarget::Worker { run_id } => {
+                self.worker_transcripts.insert(run_id, Transcript::new());
+            }
+        }
+        self.scroll = None;
+        self.scroll_base = 0;
+        self.search = None;
+        self.notice("· transcript cleared from the console", false);
+        Vec::new()
     }
 
     fn set_rail(&mut self, want: Option<&str>) -> Vec<Effect> {
@@ -2778,6 +2852,24 @@ impl Console {
                 }
                 Effect::RefreshCapabilities => {
                     self.append_orchestrator(&OrchestratorCommand::RefreshCapabilities)?;
+                }
+                Effect::TrimTranscript => {
+                    let path = self.fleet.orchestrator_events(&self.orch_key);
+                    let trimmed = crate::orch::records::trim_events_file(
+                        &path,
+                        crate::orch::client::MAX_RESTORED_LINES,
+                    );
+                    self.notice(
+                        if trimmed {
+                            format!(
+                                "· transcript cut to its last {} records",
+                                crate::orch::client::MAX_RESTORED_LINES
+                            )
+                        } else {
+                            "· transcript is already short enough".to_string()
+                        },
+                        false,
+                    );
                 }
                 Effect::RefreshWorkerCapabilities { run_id } => {
                     append_envelope(
@@ -3976,6 +4068,39 @@ mod tests {
         assert_eq!(c.selected(), 0);
         c.handle_key(ch('G'));
         assert_eq!(c.selected(), 1);
+    }
+
+    #[test]
+    fn a_pinned_scroll_follows_its_content_when_the_transcript_trims() {
+        let mut c = setup_with_worker();
+        let notice = |c: &mut Console, text: String| {
+            c.ingest_orchestrator_record(
+                &crate::orch::records::OrchestratorEvent::Notice { text, error: None }.to_record(),
+            );
+        };
+        // a transcript already at its cap, so the next records push blocks off
+        for i in 0..600 {
+            notice(&mut c, format!("line {i}"));
+        }
+        c.handle_key(enter());
+        c.handle_key(ch('g'));
+        // far enough in that the trim below does not take the pinned row with it
+        for _ in 0..8 {
+            c.handle_key(ctrl('f'));
+        }
+        let pinned = c.scroll().expect("pinned somewhere");
+        let content = c.orch_transcript.blocks()[pinned].text.clone();
+
+        for i in 0..50 {
+            notice(&mut c, format!("later {i}"));
+        }
+        let now = c.scroll().expect("still pinned");
+        assert_eq!(
+            c.orch_transcript.blocks()[now].text,
+            content,
+            "the pinned row still shows what it was pinned to"
+        );
+        assert_eq!(now, pinned - 50, "rebased by exactly what was dropped");
     }
 
     #[test]

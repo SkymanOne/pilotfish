@@ -218,19 +218,59 @@ pub fn first_line(s: &str) -> &str {
 /// draw progress with control characters: `git rebase` emits
 /// `Rebasing (1/6)\rRebasing (2/6)\r…\rSuccessfully rebased and updated …`.
 /// Carriage returns are applied the way a terminal would — the last segment
-/// is what the sequence finally said — and every other control character,
-/// `ESC` above all, becomes a space, so agent output can never move the
-/// cursor, repaint a row, or start an escape sequence of its own.
+/// is what the sequence finally said. Escape sequences are removed whole,
+/// rather than having their `ESC` spaced out and their payload left behind
+/// as literal `[31m` litter. Every control character that survives becomes a
+/// space, so agent output can never move the cursor, repaint a row, or start
+/// a sequence of its own.
 ///
 /// Newlines are the caller's business: split first, then call this per line.
 #[must_use]
 pub fn visible_line(text: &str) -> String {
     let settled = text.rsplit('\r').find(|part| !part.is_empty());
-    settled
-        .unwrap_or("")
+    strip_escapes(settled.unwrap_or(""))
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect()
+}
+
+/// Drop ANSI escape sequences whole. CSI (`ESC [ … final`) and OSC
+/// (`ESC ] … BEL`, or `ESC ] … ESC \`) are the ones tools actually emit;
+/// anything else introduced by `ESC` drops the `ESC` and its single
+/// following byte. An unterminated sequence swallows the rest of the line,
+/// which is what a terminal would do with it too.
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters and intermediates, then one final byte
+            Some('[') => {
+                for ch in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&ch) {
+                        break;
+                    }
+                }
+            }
+            // OSC: runs to BEL or to the two-byte string terminator
+            Some(']') => {
+                let mut prev_esc = false;
+                for ch in chars.by_ref() {
+                    if ch == '\u{7}' || (prev_esc && ch == '\\') {
+                        break;
+                    }
+                    prev_esc = ch == '\u{1b}';
+                }
+            }
+            // anything else is a two-character escape; both go
+            Some(_) | None => {}
+        }
+    }
+    out
 }
 
 /// Compact human age: `30s`, `5m`, `2h`, `3d`.
@@ -361,8 +401,8 @@ mod visible_line_tests {
         assert_eq!(visible_line("a\tb"), "a b", "a tab would jump a tab stop");
         assert_eq!(
             visible_line("\x1b[31mred\x1b[0m"),
-            " [31mred [0m",
-            "an escape sequence never starts"
+            "red",
+            "a colour sequence goes whole, payload included"
         );
         assert_eq!(visible_line("a\x08b"), "a b");
         assert_eq!(visible_line("bell\x07"), "bell ");
@@ -371,6 +411,24 @@ mod visible_line_tests {
             !out.chars().any(char::is_control),
             "nothing controlling survives: {out:?}"
         );
+    }
+
+    #[test]
+    fn escape_sequences_go_whole_rather_than_leaving_their_payload() {
+        // the litter this replaces: `ESC` spaced out, `[31m` left as text
+        assert_eq!(
+            visible_line("\x1b[1;32mPASS\x1b[0m 12 tests"),
+            "PASS 12 tests"
+        );
+        assert_eq!(visible_line("\x1b[2K\x1b[1Gbuilding"), "building");
+        // OSC 0 (set window title), both terminators
+        assert_eq!(visible_line("\x1b]0;a title\x07after"), "after");
+        assert_eq!(visible_line("\x1b]0;a title\x1b\\after"), "after");
+        // a two-character escape takes its second byte with it
+        assert_eq!(visible_line("a\x1b=b"), "ab");
+        // unterminated: the rest of the line goes, as a terminal would
+        assert_eq!(visible_line("keep\x1b[31"), "keep");
+        assert_eq!(visible_line("\x1b"), "");
     }
 
     #[test]

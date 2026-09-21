@@ -98,6 +98,8 @@ With the orchestrator selected the composer is a normal message. With a worker s
 | `/permissions <mode>` | `/perm` | how the orchestrator's tool use is approved. With no argument it says what is in force |
 | `/rail <mode>` | `/rw` | width of the drill-down's session list: `compact`, `auto`, `wide`, or `full` |
 | `/mouse` | | the same toggle as `v`, for the palette |
+| `/clear` | | forget this session's transcript in the console; the file on disk is untouched |
+| `/trim` | | cut the orchestrator's transcript file down to its recent tail |
 | `/help` | `/h` | keys and commands |
 | `/quit` | `/q` | leave the console (workers keep running) |
 | `/shutdown` | `/sd` | stop the orchestrator and every worker, then exit. Asks first, and worktrees and branches are kept |
@@ -134,6 +136,10 @@ A worker can block on a question of its own, or on a pi dialog (`select`, `confi
 
 ## The transcript
 
-The transcript separates the parts of a turn: your prompts in cyan, the model's reasoning dimmed and abridged, its answer as rendered markdown, tool calls in blue with their results dimmed under them, fleet events in yellow, errors in red, each block set off by a blank line. Tool calls are shown as written rather than clipped, so a long command stays readable. Tool output is a preview: the first few lines, then a count of what was left out, since output can run to megabytes. `/` searches it. Scrolling follows the tail until you scroll up, then pins there while you read.
+The transcript separates the parts of a turn: your prompts in cyan, the model's reasoning dimmed and abridged, its answer as rendered markdown, tool calls in blue with their results dimmed under them, fleet events in yellow, errors in red, each block set off by a blank line. Tool calls are shown as written rather than clipped, so a long command stays readable. Tool output is a preview: the first few lines, then a count of what was left out, since output can run to megabytes. `/` searches it. Scrolling follows the tail until you scroll up, then pins there while you read — and it stays on the same content as older blocks age out.
+
+Replies are drawn once: each line is rendered as markdown the moment it arrives, rather than shown raw and redrawn when the turn ends. Reasoning streams the same way, so it appears while the model is thinking rather than all at once afterwards.
+
+A session that runs for hours keeps itself small on its own. The transcript file is capped, and once a session has run `[session] auto_compact_turns` turns (60 by default, `0` to switch it off) the orchestrator's context is compacted with claude's own `/compact`, with a line in the transcript marking the seam. `/clear` forgets a transcript in the console without touching the file; `/trim` shortens the file itself.
 
 Workers disappear from the dashboard when they are done: the orchestrator cleans each one up after it merges and verifies it, and the console removes any settled worker whose branch is already merged. Nothing unmerged, dirty or still running is ever removed for you. That waits for `/remove` or `parl cleanup`, which tell you exactly what would be lost before they do anything.

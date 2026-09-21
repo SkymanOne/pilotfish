@@ -64,6 +64,11 @@ pub struct LaunchOptions {
     /// Remote Control name, `Some("")` for an automatic one, none for off.
     pub remote_control: Option<String>,
     pub fresh: Option<bool>,
+    /// Turns before the monitor compacts the session's context. Resolved
+    /// from `~/.parl/config.toml` by whoever launched the monitor, and
+    /// recorded here so the monitor needs no user-config read of its own.
+    /// `Some(0)` or `None` is off.
+    pub auto_compact_turns: Option<u32>,
 }
 
 /// The claude session, as persisted in `fleet.json`, one per session row.
@@ -468,6 +473,7 @@ mod tests {
             permission_mode: Some("acceptEdits".into()),
             remote_control: Some(String::new()),
             fresh: Some(true),
+            auto_compact_turns: Some(40),
         };
         let session_uuid = session.uuid;
         store.upsert(session);

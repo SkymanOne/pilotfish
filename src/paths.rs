@@ -306,6 +306,8 @@ pub struct UserConfig {
     pub orchestrator: OrchestratorConfig,
     /// Defaults for workers.
     pub worker: WorkerConfig,
+    /// How a long orchestrator session keeps itself small.
+    pub session: SessionConfig,
     /// Fleet-wide limits.
     pub limits: LimitsConfig,
 }
@@ -327,6 +329,34 @@ pub struct WorkerConfig {
     pub model: Option<String>,
     /// The provider spawned workers run under when no `--provider` is passed.
     pub provider: Option<String>,
+}
+
+/// Turns an orchestrator session runs before it is compacted, when
+/// `[session] auto_compact_turns` is absent. Generous: compaction costs a
+/// turn of its own, so it should be rare, and the point is to stop a session
+/// degrading over hours rather than to keep it short.
+pub const DEFAULT_AUTO_COMPACT_TURNS: u32 = 60;
+
+/// The `[session]` section.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Compact the orchestrator's context once it has run this many turns
+    /// since the last compaction. `Some(0)` turns it off; `None` means
+    /// [`DEFAULT_AUTO_COMPACT_TURNS`].
+    pub auto_compact_turns: Option<u32>,
+}
+
+impl SessionConfig {
+    /// The compaction threshold in turns, or `None` when it is switched off.
+    #[must_use]
+    pub fn auto_compact_turns(&self) -> Option<u32> {
+        match self.auto_compact_turns {
+            Some(0) => None,
+            Some(turns) => Some(turns),
+            None => Some(DEFAULT_AUTO_COMPACT_TURNS),
+        }
+    }
 }
 
 /// The default per-session worker cap when `[limits] max_workers_per_session`
@@ -374,6 +404,12 @@ impl UserConfig {
     #[must_use]
     pub fn max_workers_per_session(&self) -> usize {
         self.limits.max_workers_per_session()
+    }
+
+    /// The compaction threshold, resolved from the `[session]` section.
+    #[must_use]
+    pub fn auto_compact_turns(&self) -> Option<u32> {
+        self.session.auto_compact_turns()
     }
 
     /// The orchestrator model, most specific wins: the explicit argument,
@@ -714,6 +750,29 @@ mod tests {
     }
 
     #[test]
+    fn auto_compact_turns_reads_absent_as_the_default_and_zero_as_off() {
+        assert_eq!(
+            SessionConfig::default().auto_compact_turns(),
+            Some(DEFAULT_AUTO_COMPACT_TURNS)
+        );
+        assert_eq!(
+            SessionConfig {
+                auto_compact_turns: Some(0)
+            }
+            .auto_compact_turns(),
+            None,
+            "zero is off, never every turn"
+        );
+        assert_eq!(
+            SessionConfig {
+                auto_compact_turns: Some(12)
+            }
+            .auto_compact_turns(),
+            Some(12)
+        );
+    }
+
+    #[test]
     fn resolution_prefers_explicit_then_persisted_then_config_then_default() {
         let config = UserConfig {
             orchestrator: OrchestratorConfig {
@@ -723,6 +782,7 @@ mod tests {
                 model: Some("deepseek-v4-flash".into()),
                 provider: Some("opencode-go".into()),
             },
+            session: SessionConfig::default(),
             limits: LimitsConfig {
                 max_workers_per_session: Some(4),
             },

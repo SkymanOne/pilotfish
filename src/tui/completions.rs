@@ -130,6 +130,20 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &["/rw"],
     },
     CommandSpec {
+        name: "/clear",
+        detail: "clear this session's transcript from the console (the file is kept)",
+        takes_argument: false,
+        worker_only: false,
+        aliases: &[],
+    },
+    CommandSpec {
+        name: "/trim",
+        detail: "cut the orchestrator's transcript file down to its recent tail",
+        takes_argument: false,
+        worker_only: false,
+        aliases: &[],
+    },
+    CommandSpec {
         name: "/help",
         detail: "keys and commands",
         takes_argument: false,

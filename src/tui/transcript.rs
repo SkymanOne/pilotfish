@@ -74,6 +74,14 @@ fn task_notification_fields(text: &str) -> Option<Vec<(String, String)>> {
     (!fields.is_empty()).then_some(fields)
 }
 
+/// One worker content block still arriving: what has already been committed
+/// as blocks, and the trailing incomplete line that has not.
+#[derive(Debug, Clone, Default)]
+struct OpenText {
+    committed: String,
+    partial: String,
+}
+
 /// One transcript block: kind plus the text to draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
@@ -100,10 +108,20 @@ const MAX_BLOCKS: usize = 500;
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     blocks: Vec<Block>,
-    /// Worker streaming: in-flight assistant text by content index.
-    open: BTreeMap<usize, String>,
-    /// Orchestrator streaming: coalesced `stream_text` not yet committed.
+    /// Worker streaming: one in-flight assistant text per content index.
+    open: BTreeMap<usize, OpenText>,
+    /// Orchestrator streaming: the trailing incomplete line. Whole lines are
+    /// committed as blocks the moment they arrive, so the reply is drawn once,
+    /// as markdown, rather than drawn raw and re-drawn at turn end.
     partial: String,
+    /// What this turn has already committed from [`Self::partial`]. The
+    /// assistant message repeats the whole reply; this is the prefix of it
+    /// that is already on screen.
+    streamed: String,
+    /// Orchestrator streaming: the trailing incomplete line of reasoning.
+    thinking_partial: String,
+    /// Reasoning lines already committed this turn, against [`THINKING_LINES`].
+    thinking_lines: usize,
     /// Orchestrator: `tool_use_id → tool name`, so results can name their tool.
     tool_names: HashMap<String, String>,
     /// Orchestrator: texts we rendered ourselves; their replay is suppressed.
@@ -116,12 +134,22 @@ pub struct Transcript {
     cost_usd: f64,
     num_turns: u32,
     exited: bool,
+    /// Blocks dropped off the top over this transcript's life. Anything
+    /// holding a block index — a pinned scroll, a search hit — subtracts the
+    /// growth in this to stay on the content it was pointing at.
+    dropped: usize,
 }
 
 impl Transcript {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// How many blocks have fallen off the top so far.
+    #[must_use]
+    pub const fn dropped(&self) -> usize {
+        self.dropped
     }
 
     /// The committed blocks, oldest first.
@@ -135,10 +163,13 @@ impl Transcript {
     /// is just the in-flight deltas, and ownership beats a leak per frame.
     #[must_use]
     pub fn partial(&self) -> Option<String> {
+        // scrubbed here rather than on append: the in-flight line is the one
+        // piece of agent text that never goes through `push`
         if !self.open.is_empty() {
-            return Some(self.open.values().cloned().collect());
+            let joined: String = self.open.values().map(|o| o.partial.as_str()).collect();
+            return (!joined.is_empty()).then(|| crate::util::visible_line(&joined));
         }
-        (!self.partial.is_empty()).then(|| self.partial.clone())
+        (!self.partial.is_empty()).then(|| crate::util::visible_line(&self.partial))
     }
 
     /// What the orchestrator is doing right now, or none between turns.
@@ -243,19 +274,10 @@ impl Transcript {
     pub fn apply_orchestrator_record(&mut self, record: &EventRecord) {
         match record.decode() {
             OrchestratorEvent::StreamText { text } => {
-                self.partial.push_str(&text);
-                self.turn_active = true;
-                if self
-                    .activity
-                    .as_ref()
-                    .is_none_or(|a| a.kind != crate::orch::records::ActivityKind::Responding)
-                {
-                    self.activity = Some(Activity {
-                        kind: crate::orch::records::ActivityKind::Responding,
-                        label: None,
-                        since: crate::util::now_ms(),
-                    });
-                }
+                self.stream_text(&text);
+            }
+            OrchestratorEvent::StreamThinking { text } => {
+                self.stream_thinking(&text);
             }
             OrchestratorEvent::Activity { activity } => {
                 self.activity = activity;
@@ -336,51 +358,40 @@ impl Transcript {
 
         if is_stream_event(msg) {
             if let Some(delta) = text_delta_of(msg) {
-                self.partial.push_str(&delta);
-                self.turn_active = true;
-                if self
-                    .activity
-                    .as_ref()
-                    .is_none_or(|a| a.kind != crate::orch::records::ActivityKind::Responding)
-                {
-                    self.activity = Some(Activity {
-                        kind: crate::orch::records::ActivityKind::Responding,
-                        label: None,
-                        since: crate::util::now_ms(),
-                    });
-                }
-                return;
-            }
-            // thinking deltas: mark the activity, nothing to draw yet
-            if crate::orch::protocol::is_thinking_event(msg) {
-                self.turn_active = true;
-                if self
-                    .activity
-                    .as_ref()
-                    .is_none_or(|a| a.kind != crate::orch::records::ActivityKind::Thinking)
-                {
-                    self.activity = Some(Activity {
-                        kind: crate::orch::records::ActivityKind::Thinking,
-                        label: None,
-                        since: crate::util::now_ms(),
-                    });
-                }
+                self.stream_text(&delta);
+            } else if let Some(delta) = crate::orch::protocol::thinking_delta_of(msg) {
+                self.stream_thinking(&delta);
+            } else if crate::orch::protocol::is_thinking_event(msg) {
+                self.begin_activity(crate::orch::records::ActivityKind::Thinking);
             }
             return;
         }
 
         if is_assistant(msg) {
             self.turn_active = true;
+            // Reasoning that streamed is already on screen; only a turn that
+            // never streamed any needs the message's copy.
+            if self.thinking_lines == 0 && self.thinking_partial.is_empty() {
+                self.push_thinking(&thinking_of_assistant(msg));
+            } else {
+                self.commit_thinking(true);
+            }
+            let full = text_of_assistant(msg);
+            let rest = self.unstreamed_tail(&full);
+            // each assistant message is its own group: fresh text prefix and
+            // a fresh reasoning budget for whatever comes after a tool call
             self.partial.clear();
-            self.push_thinking(&thinking_of_assistant(msg));
-            let text = text_of_assistant(msg).trim().to_string();
-            if !text.is_empty() {
+            self.streamed.clear();
+            self.thinking_partial.clear();
+            self.thinking_lines = 0;
+            let rest = rest.trim_end();
+            if !rest.trim().is_empty() {
                 self.gap();
                 // markdown styling is the renderer's job; the block is raw
-                for line in text.split('\n') {
+                for line in rest.trim_start_matches('\n').split('\n') {
                     self.blocks.push(Block {
                         kind: BlockKind::Text,
-                        text: line.to_string(),
+                        text: crate::util::visible_line(line),
                     });
                 }
                 self.trim();
@@ -461,7 +472,7 @@ impl Transcript {
 
         if is_result(msg) {
             self.turn_active = false;
-            self.partial.clear();
+            self.end_stream();
             self.activity = None;
             if let Some(cost) = msg.get("total_cost_usd").and_then(Value::as_f64) {
                 self.cost_usd = cost;
@@ -677,20 +688,25 @@ impl Transcript {
                     .unwrap_or(0);
                 match a.get("type").and_then(Value::as_str) {
                     Some("text_start") => {
-                        self.open.insert(index, String::new());
+                        self.open.insert(index, OpenText::default());
                     }
                     Some("text_delta") => {
                         let delta = a.get("delta").and_then(Value::as_str).unwrap_or("");
-                        self.open.entry(index).or_default().push_str(delta);
+                        self.open.entry(index).or_default().partial.push_str(delta);
+                        self.commit_worker_text(index);
                     }
                     Some("text_end") => {
-                        // the content is authoritative when present; else what we buffered
-                        let full = match a.get("content").and_then(Value::as_str) {
-                            Some(content) => content.to_string(),
-                            None => self.open.remove(&index).unwrap_or_default(),
+                        // the content is authoritative when present, but only
+                        // for the part streaming has not already drawn
+                        let open = self.open.remove(&index).unwrap_or_default();
+                        let rest = match a.get("content").and_then(Value::as_str) {
+                            Some(content) if open.committed.is_empty() => content.to_string(),
+                            Some(content) => content
+                                .strip_prefix(open.committed.as_str())
+                                .map_or(open.partial, ToString::to_string),
+                            None => open.partial,
                         };
-                        self.open.remove(&index);
-                        for line in full.split('\n').filter(|l| !l.trim().is_empty()) {
+                        for line in rest.split('\n').filter(|l| !l.trim().is_empty()) {
                             self.push(BlockKind::Text, line);
                         }
                     }
@@ -797,6 +813,170 @@ impl Transcript {
 
     // -----------------------------------------------------------------------
     // Shared block plumbing
+
+    // -----------------------------------------------------------------------
+    // Streaming
+
+    /// Fold streamed prose in. Whole lines become blocks at once, so the
+    /// reply is rendered as markdown while it arrives and is never re-drawn
+    /// when the assistant message repeats it.
+    fn stream_text(&mut self, delta: &str) {
+        self.turn_active = true;
+        self.begin_activity(crate::orch::records::ActivityKind::Responding);
+        self.partial.push_str(delta);
+        self.commit_text();
+    }
+
+    /// Fold streamed reasoning in, on the same terms as the prose.
+    fn stream_thinking(&mut self, delta: &str) {
+        self.turn_active = true;
+        self.begin_activity(crate::orch::records::ActivityKind::Thinking);
+        self.thinking_partial.push_str(delta);
+        self.commit_thinking(false);
+    }
+
+    /// Start an activity of `kind` unless one of that kind is already running
+    /// (restarting it would reset the elapsed counter every delta).
+    fn begin_activity(&mut self, kind: crate::orch::records::ActivityKind) {
+        if self.activity.as_ref().is_none_or(|a| a.kind != kind) {
+            self.activity = Some(Activity {
+                kind,
+                label: None,
+                since: crate::util::now_ms(),
+            });
+        }
+    }
+
+    /// Commit every complete line of one worker content block, so its reply
+    /// is drawn once, as it arrives, rather than whole at `text_end`.
+    fn commit_worker_text(&mut self, index: usize) {
+        let Some(open) = self.open.get_mut(&index) else {
+            return;
+        };
+        let mut lines: Vec<String> = Vec::new();
+        while let Some(at) = open.partial.find('\n') {
+            let line: String = open.partial.drain(..=at).collect();
+            let line = line.trim_end_matches('\n').to_string();
+            open.committed.push_str(&line);
+            open.committed.push('\n');
+            if !line.trim().is_empty() {
+                lines.push(line);
+            }
+        }
+        for line in lines {
+            self.push(BlockKind::Text, &line);
+        }
+    }
+
+    /// Commit every complete line of [`Self::partial`] as a `Text` block.
+    fn commit_text(&mut self) {
+        while let Some(at) = self.partial.find('\n') {
+            let line: String = self.partial.drain(..=at).collect();
+            let line = line.trim_end_matches('\n').to_string();
+            // a reply often opens with a newline; nothing to show for it yet
+            if self.streamed.is_empty() && line.trim().is_empty() {
+                continue;
+            }
+            if self.streamed.is_empty() {
+                self.gap();
+            }
+            self.streamed.push_str(&line);
+            self.streamed.push('\n');
+            self.blocks.push(Block {
+                kind: BlockKind::Text,
+                text: crate::util::visible_line(&line),
+            });
+        }
+        self.trim();
+    }
+
+    /// Commit complete lines of streamed reasoning, up to [`THINKING_LINES`].
+    /// `finish` also commits the trailing incomplete line, which is what the
+    /// end of a turn means.
+    fn commit_thinking(&mut self, finish: bool) {
+        loop {
+            let line = match self.thinking_partial.find('\n') {
+                Some(at) => {
+                    let line: String = self.thinking_partial.drain(..=at).collect();
+                    line.trim_end_matches('\n').to_string()
+                }
+                None if finish && !self.thinking_partial.trim().is_empty() => {
+                    std::mem::take(&mut self.thinking_partial)
+                }
+                None => break,
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            if self.thinking_lines == 0 {
+                self.gap();
+            }
+            self.thinking_lines += 1;
+            match self.thinking_lines.cmp(&THINKING_LINES) {
+                std::cmp::Ordering::Greater => {
+                    // past the budget: the tail line counts what is not shown
+                    let more = self.thinking_lines - THINKING_LINES;
+                    let text = format!(
+                        "  … {more} more line{} of thinking",
+                        if more == 1 { "" } else { "s" }
+                    );
+                    if let Some(last) = self.blocks.last_mut()
+                        && last.kind == BlockKind::Thinking
+                        && last.text.starts_with("  … ")
+                    {
+                        last.text = text;
+                    } else {
+                        self.blocks.push(Block {
+                            kind: BlockKind::Thinking,
+                            text,
+                        });
+                    }
+                }
+                _ => {
+                    let marker = if self.thinking_lines == 1 {
+                        "✻ "
+                    } else {
+                        "  "
+                    };
+                    self.blocks.push(Block {
+                        kind: BlockKind::Thinking,
+                        text: format!("{marker}{}", crate::util::visible_line(&line)),
+                    });
+                }
+            }
+            if finish && self.thinking_partial.is_empty() {
+                break;
+            }
+        }
+        if finish {
+            self.thinking_partial.clear();
+        }
+        self.trim();
+    }
+
+    /// Close out a turn's streaming state, so the next turn's first line
+    /// opens a new group and gets its own reasoning budget.
+    fn end_stream(&mut self) {
+        self.commit_thinking(true);
+        self.partial.clear();
+        self.streamed.clear();
+        self.thinking_partial.clear();
+        self.thinking_lines = 0;
+    }
+
+    /// The part of an assistant message's text that streaming has not
+    /// already shown. When the prefix does not line up — nothing streamed, or
+    /// a message that does not match what arrived — the safe answer is the
+    /// whole text for the first case and only the in-flight line for the
+    /// second: repeating a reply that is already on screen is the one
+    /// outcome worth ruling out.
+    fn unstreamed_tail(&self, full: &str) -> String {
+        if self.streamed.is_empty() {
+            return full.to_string();
+        }
+        full.strip_prefix(self.streamed.as_str())
+            .map_or_else(|| self.partial.clone(), ToString::to_string)
+    }
 
     /// The one way a block is made, so every block is safe to draw: agent
     /// text reaches here from tool output, model prose and worker events,
@@ -914,6 +1094,7 @@ impl Transcript {
         if self.blocks.len() > MAX_BLOCKS {
             let excess = self.blocks.len() - MAX_BLOCKS;
             self.blocks.drain(..excess);
+            self.dropped += excess;
         }
     }
 }
@@ -1275,6 +1456,141 @@ mod tests {
         assert_eq!(thinking.len(), 9, "8 lines plus the count: {thinking:?}");
         assert!(thinking[0].starts_with("✻ line0"));
         assert_eq!(thinking[8], "  … 4 more lines of thinking");
+    }
+
+    /// The record stream a real turn produces: deltas, then the assistant
+    /// message repeating the whole reply.
+    fn stream(t: &mut Transcript, kind: &str, text: &str) {
+        let event = match kind {
+            "thinking" => crate::orch::records::OrchestratorEvent::StreamThinking {
+                text: text.to_string(),
+            },
+            _ => crate::orch::records::OrchestratorEvent::StreamText {
+                text: text.to_string(),
+            },
+        };
+        t.apply_orchestrator_record(&event.to_record());
+    }
+
+    fn text_blocks(t: &Transcript) -> Vec<&str> {
+        t.blocks()
+            .iter()
+            .filter(|b| b.kind == BlockKind::Text)
+            .map(|b| b.text.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_streamed_reply_is_committed_once_and_not_repeated_at_turn_end() {
+        let mut t = Transcript::new();
+        stream(&mut t, "text", "Two steps:\n\n- one\n");
+        assert_eq!(
+            text_blocks(&t),
+            vec!["Two steps:", "", "- one"],
+            "whole lines commit as they arrive"
+        );
+        assert_eq!(t.partial(), None, "nothing incomplete is left over");
+
+        stream(&mut t, "text", "- two");
+        assert_eq!(
+            t.partial().as_deref(),
+            Some("- two"),
+            "the incomplete line stays in flight"
+        );
+
+        // the assistant message repeats everything; only the tail is new
+        t.apply_claude_message(&serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": "Two steps:\n\n- one\n- two"}
+            ]},
+        }));
+        assert_eq!(
+            text_blocks(&t),
+            vec!["Two steps:", "", "- one", "- two"],
+            "the reply is on screen once, not twice"
+        );
+        assert_eq!(t.partial(), None);
+    }
+
+    #[test]
+    fn a_reply_that_never_streamed_still_lands_whole() {
+        let mut t = Transcript::new();
+        t.apply_claude_message(&serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "a\nb"}]},
+        }));
+        assert_eq!(text_blocks(&t), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn streamed_reasoning_arrives_before_the_reply_and_keeps_its_budget() {
+        let mut t = Transcript::new();
+        for i in 0..12 {
+            stream(&mut t, "thinking", &format!("line{i}\n"));
+        }
+        stream(&mut t, "text", "the answer\n");
+        let kinds: Vec<BlockKind> = t.blocks().iter().map(|b| b.kind).collect();
+        let first_text = kinds.iter().position(|k| *k == BlockKind::Text).unwrap();
+        let last_thinking = kinds
+            .iter()
+            .rposition(|k| *k == BlockKind::Thinking)
+            .unwrap();
+        assert!(
+            last_thinking < first_text,
+            "reasoning is drawn before the reply it produced: {kinds:?}"
+        );
+        let thinking: Vec<&str> = t
+            .blocks()
+            .iter()
+            .filter(|b| b.kind == BlockKind::Thinking)
+            .map(|b| b.text.as_str())
+            .collect();
+        assert_eq!(thinking.len(), 9, "8 lines plus one count: {thinking:?}");
+        assert!(thinking[0].starts_with("✻ line0"));
+        assert_eq!(thinking[8], "  … 4 more lines of thinking");
+
+        // the assistant message carries the same reasoning; it is not redrawn
+        t.apply_claude_message(&serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "line0"},
+                {"type": "text", "text": "the answer"},
+            ]},
+        }));
+        let thinking_now = t
+            .blocks()
+            .iter()
+            .filter(|b| b.kind == BlockKind::Thinking)
+            .count();
+        assert_eq!(thinking_now, 9, "reasoning is not repeated");
+        assert_eq!(text_blocks(&t), vec!["the answer"]);
+    }
+
+    #[test]
+    fn streamed_text_is_scrubbed_of_control_characters() {
+        let mut t = Transcript::new();
+        stream(&mut t, "text", "\x1b[31mred\x1b[0m\n");
+        assert_eq!(text_blocks(&t), vec!["red"], "no escape litter in a block");
+        stream(&mut t, "text", "in\x1b[2Kflight");
+        assert_eq!(
+            t.partial().as_deref(),
+            Some("inflight"),
+            "the in-flight line is scrubbed too"
+        );
+    }
+
+    #[test]
+    fn a_worker_reply_is_not_drawn_twice_at_text_end() {
+        let mut t = Transcript::new();
+        let deltas = [
+            serde_json::json!({"type":"message_update","ev":{"type":"text_start","contentIndex":0}}),
+            serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"one\n"}}),
+            serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"two"}}),
+            serde_json::json!({"type":"message_update","ev":{"type":"text_end","contentIndex":0,"content":"one\ntwo"}}),
+        ];
+        t.apply_worker_lines(&deltas.iter().map(ToString::to_string).collect::<Vec<_>>());
+        assert_eq!(text_blocks(&t), vec!["one", "two"]);
     }
 
     #[test]
