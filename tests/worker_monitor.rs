@@ -318,6 +318,27 @@ fn records_commands_and_forwards_a_command_as_a_prompt() {
     let run_raw = fleet.read("run.json");
     assert!(!run_raw.contains("\"commands\""), "{run_raw}");
 
+    // Asked for, not snapshotted: a skill installed after boot shows up on
+    // the next refresh, and the catalogue records when pi last answered.
+    assert!(!cache.fetched_at.is_empty(), "the answer is stamped");
+    fleet.append_inbox(&Envelope::refresh_capabilities(
+        Party::Console,
+        fleet.worker_party(),
+    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let refreshed = read_cache(&fleet.parl_dir);
+        if refreshed.commands.iter().any(|c| c.name == "late-skill") {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the refreshed catalogue never arrived: {:?}",
+            refreshed.commands
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
     fleet.append_inbox(&Envelope::command(
         Party::Console,
         fleet.worker_party(),
@@ -1145,6 +1166,7 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
             name: Some("GLM 5.3".into()),
         }],
         commands: Vec::new(),
+        ..parl::fleet::run::PiCache::default()
     };
     run::write_pi_cache(&fleet.parl_dir, &cache).unwrap();
     let loaded = run::load_state(&fleet.run_dir).unwrap();

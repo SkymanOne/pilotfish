@@ -18,7 +18,8 @@ pub const ENV_PREFIX: &str = "PARL";
 pub const BIN_NAME: &str = "parl";
 /// The fleet-level pi catalogue (`availableModels` + `commands`): a property
 /// of the pi installation, byte-identical across runs, so it lives once
-/// here instead of being copied into every `run.json`.
+/// here instead of being copied into every `run.json`. Refreshed on demand
+/// by any live worker monitor, and stamped with when pi last answered.
 pub const PI_CACHE_FILE: &str = "pi-cache.json";
 
 /// Env-var name from its suffix: `_DIR` -> `PARL_DIR`.
@@ -134,9 +135,16 @@ impl FleetPaths {
     }
 
     /// `orchestrators/<key>/state.json` — monitor pid, session id, model,
-    /// commands, cost, turns, activity, pending permission.
+    /// cost, turns, activity, pending permission.
     pub fn orchestrator_state(&self, key: &SessionKey) -> PathBuf {
         self.orchestrator_dir(key).join("state.json")
+    }
+
+    /// `orchestrators/<key>/capabilities.json` — what the agent offers right
+    /// now: tools, commands, MCP servers. Separate from `state.json` because
+    /// it is asked for and rewritten, not snapshotted once at handshake.
+    pub fn orchestrator_capabilities(&self, key: &SessionKey) -> PathBuf {
+        self.orchestrator_dir(key).join("capabilities.json")
     }
 
     /// `orchestrators/<key>/events.jsonl` — the orchestrator transcript.

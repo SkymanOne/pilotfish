@@ -302,7 +302,7 @@ fn render_rows(
             {
                 unit_rows.push((unit.start, Line::from(Span::raw(String::new()))));
             }
-            rows.splice(0..0, unit_rows.into_iter());
+            rows.splice(0..0, unit_rows);
             if rows.len() >= height {
                 break;
             }

@@ -30,6 +30,9 @@ const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let initialized = false;
+// How many `initialize` requests have arrived. The second one answers with an
+// extra command, so a test can tell a fresh answer from a cached one.
+let initCount = 0;
 let settings = {};
 let initSent = false;
 let numTurns = 0;
@@ -167,7 +170,7 @@ process.stdin.on("data", (chunk) => {
       if (resolve) { pendingControl.delete(rid); resolve(msg.response?.response ?? null); }
     } else if (msg.type === "control_request") {
       const sub = msg.request?.subtype;
-      if (sub === "initialize") initialized = true;
+      if (sub === "initialize") { initialized = true; initCount += 1; }
       if (sub === "interrupt") interrupted = true;
       if (sub === "apply_flag_settings") settings = { ...settings, ...(msg.request.settings ?? {}) };
       if (sub === "apply_flag_settings" && process.env.FAKE_CLAUDE_NO_FLAG_SETTINGS === "1") {
@@ -183,6 +186,8 @@ process.stdin.on("data", (chunk) => {
                   { name: "model", description: "Set the model", argumentHint: "<model>" },
                   { name: "usage", description: "Show plan usage", aliases: ["cost"] },
                   { name: "research", description: "Research a topic", argumentHint: "<topic>" },
+                  // stands in for a skill installed after the handshake
+                  ...(initCount > 1 ? [{ name: "late-skill", description: "Installed later" }] : []),
                 ],
                 agents: [],
                 models: [],

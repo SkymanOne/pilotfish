@@ -419,7 +419,7 @@ impl OrchestratorProcess {
         // The handshake is also how we learn which commands and skills this
         // claude offers, so it is always sent; the spike showed permission
         // prompts do not depend on it.
-        Self::spawn_handshake(self);
+        Self::request_commands(self);
     }
 
     fn spawn_writer(
@@ -539,7 +539,10 @@ impl OrchestratorProcess {
         });
     }
 
-    fn spawn_handshake(process: &Arc<Self>) {
+    /// Ask claude what it offers. Sent once at startup and again whenever a
+    /// console asks for a refresh — a session's command list grows when a
+    /// skill is installed, so one answer at handshake time goes stale.
+    pub fn request_commands(process: &Arc<Self>) {
         let owner = process.clone();
         tokio::spawn(async move {
             let id = new_request_id();

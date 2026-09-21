@@ -26,6 +26,10 @@ const WAIT_POLL: Duration = Duration::from_millis(2_000);
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusData {
     pub runs: Vec<Value>,
+    /// The models pi has configured, so a caller choosing one can see what
+    /// there is to choose from. Read from the fleet's pi catalogue; empty
+    /// when no worker has ever asked pi.
+    pub models: Vec<run::WorkerModel>,
 }
 
 /// The end state of a `wait`, for programmatic callers.
@@ -203,6 +207,7 @@ pub(crate) async fn status_core_with_env(
         return Ok(ok(
             StatusData {
                 runs: vec![derived],
+                models: worker_models(&fleet_dir),
             },
             vec![rendered],
         ));
@@ -215,14 +220,42 @@ pub(crate) async fn status_core_with_env(
         load_session_states(&fleet_dir, super::acting_session(&fleet_dir))
     };
     let runs: Vec<Value> = states.iter().map(derived_json).collect();
+    let models = worker_models(&fleet_dir);
     if json {
         let rendered = serde_json::to_string_pretty(&runs)?;
-        return Ok(ok(StatusData { runs }, vec![rendered]));
+        return Ok(ok(StatusData { runs, models }, vec![rendered]));
     }
+    let catalogue = models_line(&models);
     if states.is_empty() {
-        return Ok(ok(StatusData { runs }, vec!["(no runs)".to_string()]));
+        let mut lines = vec!["(no runs)".to_string()];
+        lines.extend(catalogue);
+        return Ok(ok(StatusData { runs, models }, lines));
     }
-    Ok(ok(StatusData { runs }, vec![fleet_table(&states)]))
+    let mut lines = vec![fleet_table(&states)];
+    lines.extend(catalogue);
+    Ok(ok(StatusData { runs, models }, lines))
+}
+
+/// The models pi has configured, from the fleet catalogue. Empty when no
+/// worker has ever asked pi — the catalogue is written by a live worker
+/// monitor, so a fleet that has never run one has nothing to report.
+fn worker_models(fleet_dir: &Path) -> Vec<run::WorkerModel> {
+    run::read_pi_cache(fleet_dir)
+        .map(|c| c.available_models)
+        .unwrap_or_default()
+}
+
+/// One `models:` line naming what `fleet_spawn` can be asked for, or nothing
+/// when the catalogue is empty.
+fn models_line(models: &[run::WorkerModel]) -> Option<String> {
+    if models.is_empty() {
+        return None;
+    }
+    let names: Vec<String> = models
+        .iter()
+        .map(|m| format!("{}:{}", m.provider, m.id))
+        .collect();
+    Some(format!("models: {}", names.join(", ")))
 }
 
 /// The fleet table, formatted by hand (the crate pins no table dependency):

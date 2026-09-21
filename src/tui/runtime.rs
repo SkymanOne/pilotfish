@@ -236,6 +236,8 @@ struct Poll {
     key: SessionKey,
     runs: Vec<RunEntry>,
     orch: OrchestratorState,
+    /// What the orchestrator's agent currently offers, re-read every poll.
+    caps: crate::orch::records::Capabilities,
     orch_offset: u64,
     worker_offsets: HashMap<String, u64>,
     /// The fleet-event watcher, owned for the console's lifetime: its
@@ -256,6 +258,7 @@ impl Poll {
             key,
             runs: Vec::new(),
             orch: OrchestratorState::default(),
+            caps: crate::orch::records::Capabilities::default(),
             orch_offset: 0,
             worker_offsets: HashMap::new(),
             watcher,
@@ -300,6 +303,9 @@ impl Poll {
         if let Ok(state) = serde_json::from_str::<OrchestratorState>(&raw) {
             self.orch = state;
         }
+        self.caps = crate::orch::records::read_capabilities(
+            &self.fleet.orchestrator_capabilities(&self.key),
+        );
     }
 
     /// Fold everything new into the console: the orchestrator's transcript
@@ -596,6 +602,7 @@ async fn anchor_console(
     poll.reload_orchestrator();
     console.set_runs(poll.runs.clone());
     console.set_orchestrator_state(poll.orch.clone());
+    console.set_capabilities(poll.caps.clone());
     poll.tail_events(console);
     let started = match ensure_orchestrator(fleet, options, user_dir, &key) {
         Ok(true) => {
@@ -753,6 +760,7 @@ pub async fn run_console(
                 console.orch_key = poll.key.clone();
                 console.set_runs(poll.runs.clone());
                 console.set_orchestrator_state(poll.orch.clone());
+                console.set_capabilities(poll.caps.clone());
                 poll.tail_events(&mut console);
                 poll.forward_fleet_events(&mut console).await;
                 poll.refresh_diff_stats(&mut console).await;

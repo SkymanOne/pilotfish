@@ -159,6 +159,18 @@ pub fn parse_ts_ms(ts: &str) -> Option<i64> {
         .map(|dt| (dt.unix_timestamp_nanos() / 1_000_000) as i64)
 }
 
+/// How long ago an RFC3339 timestamp was, or `None` when it does not parse
+/// or lies in the future (a clock that jumped should read as "unknown age",
+/// not as a negative one).
+#[must_use]
+pub fn age_of(ts: &str) -> Option<std::time::Duration> {
+    let then = parse_ts_ms(ts)?;
+    let millis = now_ms().checked_sub(then)?;
+    u64::try_from(millis)
+        .ok()
+        .map(std::time::Duration::from_millis)
+}
+
 /// The nil uuid, as the serde default for identity fields: a state file
 /// written before the field existed must read as the same degenerate
 /// identity every time. (`Uuid::default()` is a *random* v4 under the v4

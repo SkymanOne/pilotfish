@@ -183,6 +183,7 @@ impl Envelope {
             "command" => message(&self.payload).map(Decoded::Command),
             "thinking" => message(&self.payload).map(Decoded::Thinking),
             "abort" => Some(Decoded::Abort),
+            "refresh_capabilities" => Some(Decoded::RefreshCapabilities),
             "answer" => Some(Decoded::Answer {
                 message: self.payload.get("message").and_then(Value::as_str),
                 question_id: self.payload.get("questionId").and_then(Value::as_str),
@@ -242,6 +243,8 @@ pub enum Decoded<'a> {
     Command(&'a str),
     Thinking(&'a str),
     Abort,
+    /// Ask pi what it offers now and rewrite the fleet's pi catalogue.
+    RefreshCapabilities,
     Answer {
         message: Option<&'a str>,
         question_id: Option<&'a str>,
@@ -303,6 +306,12 @@ impl Envelope {
     /// `abort` — payload is exactly `{}`.
     pub fn abort(from: Party, to: Party) -> Self {
         Self::control(from, to, "abort", None, None)
+    }
+
+    /// `refresh_capabilities` — payload is exactly `{}`. The monitor asks pi
+    /// for its models and commands again and rewrites the fleet catalogue.
+    pub fn refresh_capabilities(from: Party, to: Party) -> Self {
+        Self::control(from, to, "refresh_capabilities", None, None)
     }
 
     /// `answer` — resolve the question the worker is blocked on.

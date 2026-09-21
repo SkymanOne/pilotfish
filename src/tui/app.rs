@@ -22,7 +22,9 @@ use crate::fleet::event::FleetEvent;
 use crate::fleet::run::{DerivedView, RunState, THINKING_LEVELS, derive_view};
 use crate::orch::args::{PERMISSION_MODES, describe_permission_mode};
 use crate::orch::protocol::PermissionRequest;
-use crate::orch::records::{OrchestratorCommand, OrchestratorState, PermissionDecisionRecord};
+use crate::orch::records::{
+    Capabilities, OrchestratorCommand, OrchestratorState, PermissionDecisionRecord,
+};
 use crate::paths::{FleetPaths, SessionKey};
 use crate::tui::completions::{
     AgentCommandOption, CompletionState, CompletionTarget, apply_suggestion, completions_for,
@@ -41,6 +43,12 @@ use crate::util::now_ms;
 
 /// How long a toolbar note stays up.
 const FLASH_MS: i64 = 6_000;
+
+/// How old the capability view may get before the console asks the agent
+/// again. Short enough that a skill installed mid-session shows up on the
+/// next palette, long enough that hammering `:` is not one control request
+/// per keystroke.
+const CAPABILITIES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What claude's own `/thinking` accepts; pi workers use [`THINKING_LEVELS`].
 const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -250,6 +258,13 @@ pub enum Effect {
     SendToOrchestrator(String),
     /// Stop the orchestrator's running turn.
     Interrupt,
+    /// Ask the agent what it currently offers, so the palette and the
+    /// completions show what is installed now rather than what was
+    /// installed when the session started.
+    RefreshCapabilities,
+    /// The same question, asked of a running worker: pi's catalogue is
+    /// fleet-wide, so any live worker can answer for the installation.
+    RefreshWorkerCapabilities { run_id: String },
     /// Set the orchestrator's reasoning effort.
     SetEffort(String),
     /// Set how the orchestrator's tool use is approved.
@@ -363,6 +378,9 @@ pub struct Console {
     diff_stats: HashMap<String, String>,
     files: Vec<String>,
     orch: OrchestratorState,
+    /// What the agent offers right now, read from `capabilities.json` rather
+    /// than from a snapshot in `state.json`.
+    caps: Capabilities,
     orch_transcript: Transcript,
     worker_transcripts: HashMap<String, Transcript>,
     composer: Composer,
@@ -403,6 +421,7 @@ impl Console {
         };
         Self {
             fleet,
+            caps: Capabilities::default(),
             // The session this console renders; the runtime replaces the
             // default with the fleet's current session before the first draw.
             orch_key: SessionKey::default(),
@@ -463,6 +482,12 @@ impl Console {
     }
 
     /// Replace the orchestrator state (state.json poll).
+    /// Replace the capability view; the console re-reads the file every poll
+    /// so a refresh the monitor answered shows up without a restart.
+    pub fn set_capabilities(&mut self, caps: Capabilities) {
+        self.caps = caps;
+    }
+
     pub fn set_orchestrator_state(&mut self, state: OrchestratorState) {
         self.orch = state;
         self.pending_effort = None;
@@ -1340,10 +1365,7 @@ impl Console {
                 self.overlay = Some(Overlay::Search(SearchState::default()));
                 Vec::new()
             }
-            KeyAction::OpenPalette => {
-                self.open_palette(PaletteScope::All);
-                Vec::new()
-            }
+            KeyAction::OpenPalette => self.open_palette(PaletteScope::All),
             KeyAction::Help => {
                 self.overlay = Some(Overlay::Help);
                 Vec::new()
@@ -1365,10 +1387,7 @@ impl Console {
             KeyAction::Stop => self.stop_selected(),
             KeyAction::Remove => self.remove_selected(),
             KeyAction::CycleThinking => self.cycle_thinking(),
-            KeyAction::Models => {
-                self.open_palette(PaletteScope::Models);
-                Vec::new()
-            }
+            KeyAction::Models => self.open_palette(PaletteScope::Models),
             KeyAction::PermissionMode => self.cycle_permission_mode(),
             KeyAction::ToggleMouse => self.toggle_mouse(),
             KeyAction::ScrollHalfDown => {
@@ -1606,10 +1625,7 @@ impl Console {
                 }
                 Vec::new()
             }
-            KeyAction::PaletteInInsert => {
-                self.open_palette(PaletteScope::All);
-                Vec::new()
-            }
+            KeyAction::PaletteInInsert => self.open_palette(PaletteScope::All),
             _ => Vec::new(),
         }
     }
@@ -1639,7 +1655,7 @@ impl Console {
     fn agent_commands_for_target(&self) -> Vec<AgentCommandOption> {
         match self.selected_target() {
             SessionTarget::Orchestrator(_) => self
-                .orch
+                .caps
                 .commands
                 .iter()
                 .map(|c| {
@@ -1719,7 +1735,10 @@ impl Console {
         self.composer.dismissed = true;
     }
 
-    fn open_palette(&mut self, scope: PaletteScope) {
+    /// Open the palette over the last-known capabilities, and ask for fresh
+    /// ones when they are stale. The palette draws immediately from what is
+    /// on disk; the answer lands on a later poll.
+    fn open_palette(&mut self, scope: PaletteScope) -> Vec<Effect> {
         let ctx = self.palette_context();
         let items = build_items(&ctx, scope);
         let mut state = PaletteState {
@@ -1731,6 +1750,44 @@ impl Console {
         };
         state.refilter();
         self.overlay = Some(Overlay::Palette(state));
+        self.refresh_capabilities_if_stale()
+    }
+
+    /// One [`Effect::RefreshCapabilities`] when the capability view has aged
+    /// past [`CAPABILITIES_MAX_AGE`], nothing when it is fresh.
+    fn refresh_capabilities_if_stale(&self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if self.caps.is_stale(CAPABILITIES_MAX_AGE) {
+            effects.push(Effect::RefreshCapabilities);
+        }
+        // pi's catalogue is a property of the installation, so any running
+        // worker can answer for it; with none running there is nobody to ask
+        // and the last answer stands.
+        let pi_stale = crate::fleet::run::read_pi_cache(self.fleet.root()).is_none_or(|cache| {
+            crate::util::age_of(&cache.fetched_at).is_none_or(|age| age > CAPABILITIES_MAX_AGE)
+        });
+        if pi_stale && let Some(run_id) = self.first_live_run_id() {
+            effects.push(Effect::RefreshWorkerCapabilities { run_id });
+        }
+        effects
+    }
+
+    /// A worker whose monitor can still answer an RPC, if there is one.
+    fn first_live_run_id(&self) -> Option<String> {
+        self.runs
+            .iter()
+            .find(|entry| {
+                matches!(
+                    crate::fleet::run::derive_view(
+                        &entry.state,
+                        crate::fleet::run::is_alive,
+                        crate::util::now_ms(),
+                    ),
+                    crate::fleet::run::DerivedView::Running
+                        | crate::fleet::run::DerivedView::Blocked
+                )
+            })
+            .map(|entry| entry.run_id.clone())
     }
 
     fn palette_context(&self) -> PaletteContext {
@@ -1754,7 +1811,7 @@ impl Console {
         PaletteContext {
             target_is_worker,
             orchestrator_commands: self
-                .orch
+                .caps
                 .commands
                 .iter()
                 .map(|c| {
@@ -1788,14 +1845,14 @@ impl Console {
     /// The orchestrator's MCP servers with their tools (from the system init
     /// message) and status.
     fn mcp_infos(&self) -> Vec<McpServerInfo> {
-        self.orch
+        self.caps
             .mcp_servers
             .iter()
             .map(|server| {
                 let prefix = format!("mcp__{}__", server.name);
                 let tools = self
-                    .orch_transcript
-                    .orchestrator_tools()
+                    .caps
+                    .tools
                     .iter()
                     .filter(|tool| tool.starts_with(&prefix))
                     .cloned()
@@ -2668,13 +2725,13 @@ impl Console {
             // neither ours nor one claude offers: almost certainly a typo,
             // and sending it would put a question about a command in the log
             let known = self
-                .orch
+                .caps
                 .commands
                 .iter()
                 .any(|c| format!("/{}", c.name) == head);
             if !known {
                 let available: Vec<String> = self
-                    .orch
+                    .caps
                     .commands
                     .iter()
                     .map(|c| format!("/{}", c.name))
@@ -2718,6 +2775,15 @@ impl Console {
                 }
                 Effect::Interrupt => {
                     self.append_orchestrator(&OrchestratorCommand::Interrupt)?;
+                }
+                Effect::RefreshCapabilities => {
+                    self.append_orchestrator(&OrchestratorCommand::RefreshCapabilities)?;
+                }
+                Effect::RefreshWorkerCapabilities { run_id } => {
+                    append_envelope(
+                        &self.fleet.run_inbox(&run_id),
+                        &Envelope::refresh_capabilities(Party::Console, self.worker_party(&run_id)),
+                    )?;
                 }
                 Effect::SetEffort(level) => {
                     self.append_orchestrator(&OrchestratorCommand::Effort { level })?;
@@ -3307,16 +3373,15 @@ mod tests {
     #[test]
     fn an_agent_command_the_orchestrator_offers_goes_verbatim() {
         let mut c = setup_with_worker();
-        let state = OrchestratorState {
+        c.set_capabilities(Capabilities {
             commands: vec![AgentCommand {
                 name: "usage".into(),
                 description: Some("Show usage".into()),
                 argument_hint: None,
                 aliases: None,
             }],
-            ..OrchestratorState::default()
-        };
-        c.set_orchestrator_state(state);
+            ..Capabilities::default()
+        });
         let effects = c.submit("/usage");
         assert_eq!(
             effects,
@@ -3350,16 +3415,15 @@ mod tests {
     #[test]
     fn slash_offers_console_then_agent_commands_and_tab_accepts() {
         let mut c = setup_with_worker();
-        let state = OrchestratorState {
+        c.set_capabilities(Capabilities {
             commands: vec![AgentCommand {
                 name: "usage".into(),
                 description: None,
                 argument_hint: None,
                 aliases: None,
             }],
-            ..OrchestratorState::default()
-        };
-        c.set_orchestrator_state(state);
+            ..Capabilities::default()
+        });
         c.handle_key(ch('i'));
         c.handle_key(ch('/'));
         let completion = c.composer().completion.as_ref().unwrap();
@@ -3408,7 +3472,7 @@ mod tests {
     #[test]
     fn ctrl_k_opens_the_palette_over_everything() {
         let mut c = setup_with_worker();
-        let state = OrchestratorState {
+        c.set_capabilities(Capabilities {
             commands: vec![AgentCommand {
                 name: "usage".into(),
                 description: None,
@@ -3419,15 +3483,9 @@ mod tests {
                 name: "fleet".into(),
                 status: "connected".into(),
             }],
-            ..OrchestratorState::default()
-        };
-        c.set_orchestrator_state(state);
-        let init = crate::orch::records::OrchestratorEvent::Passthrough(serde_json::json!({
-            "type": "system", "subtype": "init", "session_id": "s1",
-            "tools": ["Bash", "mcp__fleet__fleet_spawn"],
-        }))
-        .to_record();
-        c.ingest_orchestrator_record(&init);
+            tools: vec!["Bash".into(), "mcp__fleet__fleet_spawn".into()],
+            ..Capabilities::default()
+        });
         c.handle_key(ctrl('k'));
         let Overlay::Palette(palette) = c.overlay().unwrap() else {
             panic!("palette should be open");

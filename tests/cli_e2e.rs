@@ -634,10 +634,7 @@ fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
     // The detached monitor (and its fake pi) ran against the given fleet
     // dir; wait for it to be gone before the temp tree drops.
     let deadline = std::time::Instant::now() + MONITOR_EXIT;
-    loop {
-        let Some(pid) = monitor_pid(&run_json) else {
-            break;
-        };
+    while let Some(pid) = monitor_pid(&run_json) {
         if !parl::fleet::run::is_alive(Some(pid)) {
             break;
         }

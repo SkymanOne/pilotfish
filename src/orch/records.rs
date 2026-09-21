@@ -118,6 +118,10 @@ pub enum OrchestratorCommand {
     Model {
         name: String,
     },
+    /// Ask the agent what it currently offers and rewrite
+    /// `capabilities.json`. The console sends this instead of trusting a
+    /// snapshot taken at handshake time.
+    RefreshCapabilities,
     Stop,
 }
 
@@ -197,10 +201,6 @@ pub struct OrchestratorState {
     pub session_id: Option<String>,
     pub model: Option<String>,
     pub claude_version: Option<String>,
-    pub capabilities: Vec<String>,
-    /// Slash commands and skills claude offers, from the initialize response.
-    pub commands: Vec<AgentCommand>,
-    pub mcp_servers: Vec<McpServerStatus>,
     pub cost_usd: f64,
     pub num_turns: u32,
     pub turn_active: bool,
@@ -236,6 +236,92 @@ pub fn new_orchestrator_state(cwd: &str) -> OrchestratorState {
         cwd: cwd.to_string(),
         ..OrchestratorState::default()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities (capabilities.json)
+
+/// The model names claude accepts. There is no control request that lists
+/// models (AGENTS.md, verified fact 3), so unlike everything else in
+/// [`Capabilities`] this one list cannot be asked for and has to be stated.
+pub const ORCHESTRATOR_MODEL_ALIASES: [&str; 5] = ["opus", "sonnet", "haiku", "fable", "opusplan"];
+
+/// What the agent on the other end offers right now:
+/// `orchestrators/<key>/capabilities.json`.
+///
+/// Deliberately not part of [`OrchestratorState`]. Capabilities change while
+/// a session runs — install a skill and claude's command list grows — so
+/// they are asked for ([`OrchestratorCommand::RefreshCapabilities`]) and
+/// rewritten, never snapshotted at handshake time and left to rot. The
+/// console reads this file, shows `fetched_at` as its age, and asks for a
+/// refresh when it goes stale.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Capabilities {
+    /// When the agent last answered, RFC3339.
+    pub fetched_at: String,
+    /// Every tool the agent has, from `system/init` — including the
+    /// `mcp__*` ones, which is how the MCP servers get their tool lists.
+    pub tools: Vec<String>,
+    /// Slash commands and skills, from the `initialize` response.
+    pub commands: Vec<AgentCommand>,
+    pub mcp_servers: Vec<McpServerStatus>,
+    /// Protocol capabilities claude reports (`interrupt_receipt_v1`, …).
+    pub capabilities: Vec<String>,
+    /// Model names to offer, [`ORCHESTRATOR_MODEL_ALIASES`] plus whatever
+    /// the session is actually running.
+    pub models: Vec<String>,
+}
+
+impl Default for Capabilities {
+    fn default() -> Self {
+        Self {
+            fetched_at: String::new(),
+            tools: Vec::new(),
+            commands: Vec::new(),
+            mcp_servers: Vec::new(),
+            capabilities: Vec::new(),
+            models: ORCHESTRATOR_MODEL_ALIASES
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        }
+    }
+}
+
+impl Capabilities {
+    /// How long ago the agent answered, or `None` when it never has or the
+    /// stamp does not parse.
+    #[must_use]
+    pub fn age(&self) -> Option<std::time::Duration> {
+        crate::util::age_of(&self.fetched_at)
+    }
+
+    /// Whether the console should ask for a refresh before showing this.
+    #[must_use]
+    pub fn is_stale(&self, max_age: std::time::Duration) -> bool {
+        self.age().is_none_or(|age| age > max_age)
+    }
+}
+
+/// Read `capabilities.json`, or defaults when it is missing or unparsable —
+/// an unreadable capability file degrades to "nothing known yet", never to
+/// an error.
+#[must_use]
+pub fn read_capabilities(path: &Path) -> Capabilities {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+/// Write `capabilities.json` atomically.
+///
+/// # Errors
+///
+/// Returns `std::io::Error` when serialization or the atomic rename fails.
+pub fn write_capabilities(path: &Path, caps: &Capabilities) -> std::io::Result<()> {
+    crate::util::atomic_write_json(path, caps)
 }
 
 // ---------------------------------------------------------------------------
@@ -604,17 +690,6 @@ mod tests {
         state.pid = Some(4321);
         state.session_id = Some("sess".into());
         state.model = Some("claude-fable-5".into());
-        state.capabilities = vec!["interrupt_receipt_v1".into()];
-        state.commands = vec![AgentCommand {
-            name: "model".into(),
-            description: Some("Set the model".into()),
-            argument_hint: Some("<model>".into()),
-            aliases: None,
-        }];
-        state.mcp_servers = vec![McpServerStatus {
-            name: "fleet".into(),
-            status: "connected".into(),
-        }];
         state.cost_usd = 0.05;
         state.num_turns = 3;
         state.turn_active = true;
@@ -657,6 +732,53 @@ mod tests {
         assert!(line.contains(r#""sessionId":"sess""#), "{line}");
         assert!(line.contains(r#""turnActive":true"#), "{line}");
         assert!(line.contains(r#""requestId":"req_1""#), "{line}");
+    }
+
+    #[test]
+    fn capabilities_round_trip_and_default_to_the_model_aliases() {
+        let caps = Capabilities {
+            fetched_at: now_iso(),
+            tools: vec!["Read".into(), "mcp__fleet__fleet_spawn".into()],
+            commands: vec![AgentCommand {
+                name: "model".into(),
+                description: Some("Set the model".into()),
+                argument_hint: Some("<model>".into()),
+                aliases: None,
+            }],
+            mcp_servers: vec![McpServerStatus {
+                name: "fleet".into(),
+                status: "connected".into(),
+            }],
+            capabilities: vec!["interrupt_receipt_v1".into()],
+            models: vec!["sonnet".into()],
+        };
+        let parsed: Capabilities = round_trip(&caps);
+        assert_eq!(parsed, caps);
+        let line = serde_json::to_string(&caps).unwrap();
+        assert!(line.contains(r#""fetchedAt""#), "{line}");
+        assert!(line.contains(r#""mcpServers""#), "{line}");
+
+        // Never asked: the aliases stand in, and the view reads as stale.
+        let fresh = Capabilities::default();
+        assert_eq!(fresh.models, ORCHESTRATOR_MODEL_ALIASES);
+        assert!(fresh.is_stale(std::time::Duration::from_secs(30)));
+        assert!(fresh.age().is_none());
+
+        // A newer writer's extra field and an older writer's gaps both parse.
+        let foreign: Capabilities =
+            serde_json::from_str(r#"{"futureField":1,"tools":["Read"]}"#).unwrap();
+        assert_eq!(foreign.tools, vec!["Read".to_string()]);
+        assert!(foreign.commands.is_empty());
+    }
+
+    #[test]
+    fn a_just_fetched_capability_view_is_not_stale() {
+        let caps = Capabilities {
+            fetched_at: now_iso(),
+            ..Capabilities::default()
+        };
+        assert!(!caps.is_stale(std::time::Duration::from_secs(30)));
+        assert!(caps.age().is_some());
     }
 
     #[test]

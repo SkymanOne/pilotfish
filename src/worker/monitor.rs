@@ -481,18 +481,7 @@ impl Monitor {
         // brief — so the console can show the worker's real model and commands.
         tokio::time::sleep(Duration::from_millis(PROMPT_DELAY_MS)).await;
         if !self.shared().finished() {
-            self.send(&RpcCommand::GetState {
-                id: Some("fleet-state".to_string()),
-            })
-            .await;
-            self.send(&RpcCommand::GetCommands {
-                id: Some("fleet-commands".to_string()),
-            })
-            .await;
-            self.send(&RpcCommand::GetAvailableModels {
-                id: Some("fleet-models".to_string()),
-            })
-            .await;
+            self.ask_capabilities().await;
             let brief = self.shared().state.task_brief.clone();
             self.write_event(json!({ "type": "task_prompt", "brief": brief }));
             self.send(&RpcCommand::Prompt {
@@ -854,6 +843,9 @@ impl Monitor {
                     }));
                 }
             }
+            Decoded::RefreshCapabilities => {
+                self.ask_capabilities().await;
+            }
             Decoded::Abort => {
                 self.write_event(json!({
                     "type": "abort_requested",
@@ -1109,6 +1101,24 @@ impl Monitor {
     }
 
     /// First abort request: RPC abort. Second: SIGTERM pi. Third: SIGKILL pi.
+    /// Ask pi what it resolved, what it offers and what models it has. Sent
+    /// at boot and again whenever a console asks: pi's command list grows
+    /// when a skill or extension is added, so one answer at boot goes stale.
+    async fn ask_capabilities(self: &Arc<Self>) {
+        self.send(&RpcCommand::GetState {
+            id: Some("fleet-state".to_string()),
+        })
+        .await;
+        self.send(&RpcCommand::GetCommands {
+            id: Some("fleet-commands".to_string()),
+        })
+        .await;
+        self.send(&RpcCommand::GetAvailableModels {
+            id: Some("fleet-models".to_string()),
+        })
+        .await;
+    }
+
     async fn request_abort(self: &Arc<Self>) {
         let request = {
             let mut sh = self.shared();

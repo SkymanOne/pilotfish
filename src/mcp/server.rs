@@ -505,14 +505,25 @@ fn spawn_status_tools() -> Vec<Tool> {
                 ),
             ]),
             &[],
-            Some(object_schema([(
-                "runs",
-                json_schema(json!({
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": "One derived run state per run, newest first",
-                })),
-            )])),
+            Some(object_schema([
+                (
+                    "runs",
+                    json_schema(json!({
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "One derived run state per run, newest first",
+                    })),
+                ),
+                (
+                    "models",
+                    json_schema(json!({
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description":
+                            "The models pi has configured, to choose from when spawning",
+                    })),
+                ),
+            ])),
         ),
     ]
 }

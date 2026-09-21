@@ -122,6 +122,9 @@ struct Restart {
 /// the guard across an await: every mutation and write here is synchronous.
 struct Shared {
     state: OrchestratorState,
+    /// What the agent currently offers. Kept beside the state but written to
+    /// its own file, because it is asked for rather than accumulated.
+    caps: records::Capabilities,
     /// The working copy of this monitor's session record; [`Monitor::save_record`]
     /// merges it into a fresh read of `fleet.json` and persists the store,
     /// so the two only ever differ between a mutation and the next flush.
@@ -233,6 +236,7 @@ impl Monitor {
             .unwrap_or_else(|| "default".to_string());
         state.remote_control = launch.remote_control.clone();
         let events_path = paths.orchestrator_events(&key);
+        let caps_path = paths.orchestrator_capabilities(&key);
 
         let monitor = Arc::new(Self {
             fleet_dir: fleet_dir.to_path_buf(),
@@ -246,6 +250,7 @@ impl Monitor {
             paths,
             shared: Mutex::new(Shared {
                 state,
+                caps: records::read_capabilities(&caps_path),
                 record,
                 transcript: records::Transcript::new(events_path),
                 pending: HashMap::new(),
@@ -362,9 +367,12 @@ impl Monitor {
                 ProcEvent::TextDelta(delta) => self.on_text_delta(&delta),
                 ProcEvent::Init(init) => self.on_init(&init),
                 ProcEvent::Commands(commands) => {
-                    let mut sh = self.shared();
-                    sh.state.commands = commands;
-                    sh.dirty = true;
+                    {
+                        let mut sh = self.shared();
+                        sh.caps.commands = commands;
+                        sh.caps.fetched_at = now_iso();
+                    }
+                    self.flush_capabilities();
                 }
                 ProcEvent::PermissionRequest(request) => self.on_permission_request(&request),
                 ProcEvent::Result(_) => self.on_result(),
@@ -483,8 +491,15 @@ impl Monitor {
             if init.claude_code_version.is_some() {
                 sh.state.claude_version = init.claude_code_version.clone();
             }
-            sh.state.capabilities = init.capabilities.clone();
-            sh.state.mcp_servers = init.mcp_servers.clone();
+            sh.caps.capabilities = init.capabilities.clone();
+            sh.caps.mcp_servers = init.mcp_servers.clone();
+            sh.caps.tools = init.tools.clone();
+            if let Some(model) = sh.state.model.clone()
+                && !sh.caps.models.contains(&model)
+            {
+                sh.caps.models.push(model);
+            }
+            sh.caps.fetched_at = now_iso();
             sh.record.session_id = Some(init.session_id.clone());
             sh.record.pid = Some(self.pid);
             sh.record.model = sh.state.model.clone();
@@ -493,6 +508,7 @@ impl Monitor {
         }
         self.save_record();
         self.flush_state();
+        self.flush_capabilities();
     }
 
     fn on_permission_request(&self, request: &PermissionRequest) {
@@ -754,6 +770,9 @@ impl Monitor {
                 self.flush_state();
                 proc.send(text);
             }
+            OrchestratorCommand::RefreshCapabilities => {
+                OrchestratorProcess::request_commands(&proc);
+            }
             OrchestratorCommand::Permission {
                 request_id,
                 decision,
@@ -930,6 +949,14 @@ impl Monitor {
         if atomic_write_json(&self.paths.orchestrator_state(&self.key), &sh.state).is_err() {
             sh.dirty = true; // the periodic flush will try again
         }
+    }
+
+    /// Write `capabilities.json`. Best effort: a lost write only means the
+    /// console offers a slightly older command list until the next refresh.
+    fn flush_capabilities(&self) {
+        let sh = self.shared();
+        let _ =
+            records::write_capabilities(&self.paths.orchestrator_capabilities(&self.key), &sh.caps);
     }
 
     /// Persist the session record (id, pid, model, launch flags, heartbeat

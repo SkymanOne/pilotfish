@@ -128,6 +128,12 @@ fn state_of(fleet_dir: &Path) -> Option<parl::orch::records::OrchestratorState> 
     load_orchestrator_state(fleet_dir, &session_key(fleet_dir))
 }
 
+fn caps_of(fleet_dir: &Path) -> parl::orch::records::Capabilities {
+    parl::orch::records::read_capabilities(
+        &FleetPaths::new(fleet_dir).orchestrator_capabilities(&session_key(fleet_dir)),
+    )
+}
+
 fn monitor_pid(fleet_dir: &Path) -> Option<i32> {
     state_of(fleet_dir).and_then(|state| state.pid)
 }
@@ -203,8 +209,10 @@ async fn the_monitor_owns_the_claude_session_and_consoles_come_and_go() {
     assert_eq!(state.model.as_deref(), Some("fake-model"));
     let monitor = state.pid.expect("a monitor pid");
     assert!(is_alive(Some(monitor)), "a monitor is running");
-    let names: Vec<&str> = state.commands.iter().map(|c| c.name.as_str()).collect();
+    let caps = caps_of(&fixture.fleet_dir);
+    let names: Vec<&str> = caps.commands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(names, vec!["model", "usage", "research"]);
+    assert!(!caps.fetched_at.is_empty(), "the answer is stamped");
     wait(Duration::from_secs(5), || {
         transcript_of(&fixture.fleet_dir)
             .iter()
@@ -417,4 +425,58 @@ async fn the_model_command_switches_the_session_and_shutdown_ends_the_monitor() 
     wait(WAIT, || after.running()).await;
     after.stop();
     stop_monitor(&fixture.fleet_dir).await;
+}
+
+/// Capabilities are asked for, not snapshotted: a skill installed after the
+/// handshake shows up on the next refresh, and `state.json` never carries
+/// the command list at all.
+#[tokio::test]
+async fn refreshing_capabilities_picks_up_a_command_installed_later() {
+    if !node_available() {
+        eprintln!("skipping: node is not available");
+        return;
+    }
+    let fixture = Fixture::new("sess-caps01");
+    let client = fixture.client(true);
+    let mut rx = client.subscribe();
+    client.start().unwrap();
+    wait(WAIT, || client.running()).await;
+    client.send("hello").await.unwrap();
+    wait_event(
+        &mut rx,
+        WAIT,
+        |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
+    )
+    .await;
+
+    // The handshake's answer, and nothing about it in state.json.
+    wait(WAIT, || !caps_of(&fixture.fleet_dir).commands.is_empty()).await;
+    let first = caps_of(&fixture.fleet_dir);
+    let names: Vec<&str> = first.commands.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, vec!["model", "usage", "research"]);
+    assert!(
+        first.tools.iter().any(|t| t == "Bash"),
+        "init's tool list is kept, not dropped: {:?}",
+        first.tools
+    );
+    let raw = std::fs::read_to_string(
+        FleetPaths::new(&fixture.fleet_dir).orchestrator_state(&session_key(&fixture.fleet_dir)),
+    )
+    .unwrap();
+    assert!(
+        !raw.contains("\"commands\""),
+        "state.json no longer snapshots the command list: {raw}"
+    );
+
+    // Ask again; the fake answers the second initialize with one more command.
+    client.refresh_capabilities().await.unwrap();
+    wait(WAIT, || {
+        caps_of(&fixture.fleet_dir)
+            .commands
+            .iter()
+            .any(|c| c.name == "late-skill")
+    })
+    .await;
+
+    client.shutdown().await.unwrap();
 }

@@ -32,6 +32,7 @@ if (process.env.FAKE_PI_ARGV_FILE) {
 const send = (obj) => process.stdout.write(JSON.stringify(obj) + "\n");
 const steers = [];
 let taskStarted = false;
+let commandsAsked = 0;
 let answerText = null;
 let dialogResult = null;
 let model = {
@@ -288,6 +289,9 @@ process.stdin.on("data", (chunk) => {
         data: { models: ids.map((id) => ({ id, name: id, provider: process.env.FAKE_PI_PROVIDER || "fakeprovider" })) },
       });
     } else if (msg.type === "get_commands") {
+      // The second and later answers carry one more command, so a test can
+      // tell a fresh answer from the one cached at boot.
+      commandsAsked += 1;
       send({
         id: msg.id,
         type: "response",
@@ -298,6 +302,7 @@ process.stdin.on("data", (chunk) => {
             { name: "skill:fleet-worker-report", description: "How to write the fleet report", source: "skill" },
             { name: "compact-notes", description: "Summarize the session", source: "prompt" },
             { name: "session-name", description: "Set the session name", source: "extension" },
+            ...(commandsAsked > 1 ? [{ name: "late-skill", description: "Installed later", source: "skill" }] : []),
           ],
         },
       });

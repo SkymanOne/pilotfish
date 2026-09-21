@@ -180,6 +180,10 @@ pub struct WorkerModel {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PiCache {
+    /// When pi last answered, RFC3339. The console shows the age and asks a
+    /// live worker to refresh a stale catalogue rather than trusting a copy
+    /// taken at some earlier worker's boot.
+    pub fetched_at: String,
     /// The models pi has configured, for the console's model switcher.
     pub available_models: Vec<WorkerModel>,
     /// Commands, skills and prompt templates this worker offers
@@ -409,7 +413,11 @@ pub fn read_pi_cache(fleet_dir: &Path) -> Option<PiCache> {
 ///
 /// Returns `std::io::Error` when serialization or the atomic rename fails.
 pub fn write_pi_cache(fleet_dir: &Path, cache: &PiCache) -> std::io::Result<()> {
-    atomic_write_json(&pi_cache_json_path(fleet_dir), cache)
+    let stamped = PiCache {
+        fetched_at: crate::util::now_iso(),
+        ..cache.clone()
+    };
+    atomic_write_json(&pi_cache_json_path(fleet_dir), &stamped)
 }
 
 /// The read path for the pi catalogue: the fleet cache when it reads and
@@ -944,9 +952,13 @@ mod tests {
                 description: "Summarize the session".into(),
                 source: "prompt".into(),
             }],
+            ..PiCache::default()
         };
         write_pi_cache(&fleet, &cache).unwrap();
-        assert_eq!(read_pi_cache(&fleet), Some(cache.clone()));
+        let written = read_pi_cache(&fleet).expect("the cache reads back");
+        assert_eq!(written.available_models, cache.available_models);
+        assert_eq!(written.commands, cache.commands);
+        assert!(!written.fetched_at.is_empty(), "the answer is stamped");
         let state = load_state(&run_dir).unwrap();
         assert_eq!(state.available_models, cache.available_models);
         assert_eq!(state.commands, cache.commands);

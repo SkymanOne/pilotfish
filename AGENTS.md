@@ -105,17 +105,21 @@ git is the git CLI, not `git2`: everything goes through `git_raw`, which trusts 
   fleet.json.lock       lock sidecar for store mutations — the store is written by atomic rename, so
                         flocking the store file itself would lock a fresh inode every write
   console.lock          single-instance lock for the TUI
+  pi-cache.json         the fleet-level pi catalogue (models + commands) with `fetchedAt`; a property of
+                        the pi installation, so it lives here once instead of in every run.json
   orchestrators/        one directory per session; the per-session dirs are created lazily
   orchestrators/<alias|-default>-<short-uuid>/
-    state.json          monitor pid, session id, model, commands, cost, turns, activity, pending permission
+    state.json          monitor pid, session id, model, cost, turns, activity, pending permission
+    capabilities.json   what the agent offers now: tools, commands, mcp servers, models, with `fetchedAt`
     events.jsonl        the orchestrator transcript
-    inbox.jsonl         console -> monitor: messages, permission answers, interrupts, thinking and model changes, stop
+    inbox.jsonl         console -> monitor: messages, permission answers, interrupts, thinking and model
+                        changes, capability refreshes, stop
     claude.log          raw protocol both directions, plus the monitor's own diagnostics
     prompt.md           the rendered prompt the orchestrator was started with
   runs/<name>-<short-uuid>/
     run.json            status, worktree, branch, base commit, last tool/activity, steering log, pending question or dialog
     events.jsonl        selected pi RPC events plus fleet events (steering_delivered, worker_question, worker_progress, answer_delivered, ...)
-    inbox.jsonl         steer/follow_up/command/thinking/abort/answer/model            (created lazily)
+    inbox.jsonl         steer/follow_up/command/thinking/abort/answer/model/refresh_capabilities  (lazy)
     outbox.jsonl        question/progress/question_resolved                            (created lazily)
     report.md · pi.log · session/   final report; raw pi RPC stream + monitor diagnostics; pi session files (lazy)
   pi/
@@ -124,6 +128,16 @@ git is the git CLI, not `git2`: everything goes through `git_raw`, which trusts 
 ```
 
 `inbox.jsonl`, `outbox.jsonl` and `session/` appear only on first use, so a run that is never steered has no `inbox.jsonl` on disk. Status is derived, never stored: a run whose monitor is gone reads as `dead`, a running worker waiting on `fleet_ask` or a pi dialog reads as `blocked`. Gone for good: top-level `reports/`, `orchestrator.json`, per-run `monitor.log`, `tui.lock` — no migration, and an old `.pi-fleet` is simply ignored.
+
+## Capabilities
+
+What an agent offers is **asked for, never snapshotted**. A session's command list grows when a skill is installed, so a copy taken at handshake time is wrong by the time it matters.
+
+- The orchestrator's tools, commands, MCP servers and model names live in `orchestrators/<key>/capabilities.json`, not in `state.json`. The monitor fills it from `system/init` (which is where the `tools` list comes from) and from the `initialize` control response, and rewrites it whenever either arrives.
+- pi's catalogue lives in the fleet-level `pi-cache.json`, because models and commands describe the pi *installation*, not one run — a per-run copy is what once made a single `run.json` reach 128 KB. `available_thinking_levels` stays on `run.json`, since the level map is per-model and therefore per-run.
+- Both files carry `fetchedAt`. The console refreshes anything older than 30 s when the palette opens or an unknown `/command` is typed: `OrchestratorCommand::RefreshCapabilities` re-issues the `initialize` request, and the `refresh_capabilities` envelope makes a live worker monitor re-ask pi (`get_state`, `get_commands`, `get_available_models`). With no worker running there is nobody to ask, and the last answer stands.
+- The one thing that cannot be asked for is claude's model list — no control request lists it (verified fact 3) — so `ORCHESTRATOR_MODEL_ALIASES` in `src/orch/records.rs` seeds `capabilities.models` and the session's own resolved model is appended.
+- `fleet_status` reports the pi catalogue alongside the runs, so the orchestrator can see what it is choosing between.
 
 ## Sessions, user config, and limits
 

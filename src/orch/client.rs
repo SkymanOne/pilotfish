@@ -350,6 +350,18 @@ impl OrchestratorClient {
         self.command(&OrchestratorCommand::Interrupt).await
     }
 
+    /// Ask the agent what it currently offers; the monitor rewrites
+    /// `capabilities.json` with the answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command cannot be written to the
+    /// orchestrator's inbox.
+    pub async fn refresh_capabilities(&self) -> anyhow::Result<()> {
+        self.command(&OrchestratorCommand::RefreshCapabilities)
+            .await
+    }
+
     /// # Errors
     ///
     /// Returns an error when the command cannot be written to the

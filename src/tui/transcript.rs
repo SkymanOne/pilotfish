@@ -116,9 +116,6 @@ pub struct Transcript {
     cost_usd: f64,
     num_turns: u32,
     exited: bool,
-    /// Claude's full tool list from the system init message (`mcp__server__tool`
-    /// entries included), so the palette can group tools by server.
-    orchestrator_tools: Vec<String>,
 }
 
 impl Transcript {
@@ -184,12 +181,6 @@ impl Transcript {
     #[must_use]
     pub const fn exited(&self) -> bool {
         self.exited
-    }
-
-    /// Tool names claude reported at init (`mcp__server__tool` included).
-    #[must_use]
-    pub fn orchestrator_tools(&self) -> &[String] {
-        &self.orchestrator_tools
     }
 
     // -----------------------------------------------------------------------
@@ -320,16 +311,6 @@ impl Transcript {
                         })
                         .collect()
                 });
-            self.orchestrator_tools = msg
-                .get("tools")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
             if fresh {
                 let servers = servers
                     .iter()
@@ -1297,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn system_init_records_the_session_model_and_tools() {
+    fn system_init_records_the_session_and_model() {
         let mut t = Transcript::new();
         let init = serde_json::json!({
             "type": "system", "subtype": "init",
@@ -1309,7 +1290,6 @@ mod tests {
         t.apply_claude_message(&init);
         assert_eq!(t.session_id(), Some("sess-abcdef12-3456"));
         assert_eq!(t.model(), Some("fake-model"));
-        assert_eq!(t.orchestrator_tools().len(), 2);
         assert!(t.blocks()[0].text.contains("mcp fleet:connected"));
         // a re-init (new session id) does not repeat the banner
         let init2 = serde_json::json!({
