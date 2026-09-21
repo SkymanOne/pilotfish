@@ -34,6 +34,8 @@ pub struct SpawnRequest {
     pub session: Option<String>,
     pub tools: Option<String>,
     pub exclude_tools: Option<String>,
+    /// Override `[routing] enabled` for this spawn: `--route` / `--no-route`.
+    pub route: Option<bool>,
 }
 
 /// What [`spawn_core`] did, for programmatic callers.
@@ -141,6 +143,10 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
             )],
         ));
     }
+    // Routing happens before validation, because what it picks is what has
+    // to be valid; an explicit `--model` is never second-guessed.
+    let mut request = request;
+    let routing = route_request(&mut request, &config, &fleet_dir, &live).await;
     // The resolved model is the one the monitor will actually run, so a bad
     // name from the config is refused here too — before a worktree exists.
     let model = config.worker_model(request.model.as_deref());
@@ -148,7 +154,11 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
     if let Some(bad) = check_model(&pi_bin, model).await? {
         return Ok(fail(ExitCode::NoReport, vec![format!("spawn: {bad}")]));
     }
-    let created = create_run_with_env(&request, parl_dir, user_config_dir).await?;
+    let mut created = create_run_with_env(&request, parl_dir, user_config_dir).await?;
+    if let Some(routing) = routing.clone() {
+        created.state.routing = Some(routing);
+        run::save_state(&created.run_dir, &created.state)?;
+    }
     let mut err: Vec<String> = Vec::new();
     if !created.state.is_git && request.worktree {
         err.push("warning: target is not a git repo — running in place without a worktree".into());
@@ -167,6 +177,15 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
     if let Some(branch) = &created.state.branch {
         out.push(format!("  branch:   {branch}"));
     }
+    if let Some(routing) = &routing {
+        out.push(format!("  routing:  {}", routing.note));
+        if routing.parallel_safe == Some(false) {
+            err.push(
+                "warning: this brief may touch the same files as a worker already running"
+                    .to_string(),
+            );
+        }
+    }
     let data = SpawnData {
         run_id: created.run_id,
         run_dir,
@@ -183,6 +202,62 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
         err,
         data,
     })
+}
+
+/// Ask Jev which model, thinking level and worktree this brief wants, and
+/// fold the answer into the request. Anything the caller pinned explicitly
+/// wins: routing fills gaps, it never overrides a decision already made.
+///
+/// Returns what was decided, for the run record and the spawn's output.
+/// `None` means routing did not run — off, unkeyed, or nothing to choose
+/// between — and the spawn proceeds exactly as it always did.
+async fn route_request(
+    request: &mut SpawnRequest,
+    config: &crate::paths::UserConfig,
+    fleet_dir: &Path,
+    in_flight: &[RunState],
+) -> Option<crate::route::Routing> {
+    let mut routing_config = config.routing.clone();
+    if let Some(explicit) = request.route {
+        routing_config.enabled = explicit;
+    }
+    // Nothing to decide when the caller already decided everything.
+    if request.model.is_some() && request.thinking.is_some() {
+        return None;
+    }
+    let candidates = run::read_pi_cache(fleet_dir)
+        .map(|cache| cache.available_models)
+        .unwrap_or_default();
+    let repo_root = fleet_dir.parent().unwrap_or(fleet_dir).to_path_buf();
+    let brief = crate::route::Brief {
+        name: &request.name,
+        brief: &request.brief,
+        repo_root: &repo_root,
+        in_flight,
+        candidates: &candidates,
+    };
+    let routing =
+        crate::route::route(&brief, &routing_config, crate::route::api_key().as_deref()).await?;
+    if request.model.is_none()
+        && let Some(model) = &routing.model
+    {
+        request.model = Some(model.clone());
+        request.provider = request
+            .provider
+            .clone()
+            .or_else(|| routing.provider.clone());
+    }
+    if request.thinking.is_none()
+        && let Some(thinking) = &routing.thinking
+    {
+        request.thinking = Some(thinking.clone());
+    }
+    // A read-only brief needs no branch of its own; a `--no-worktree` the
+    // caller asked for is never overridden the other way.
+    if request.worktree && routing.worktree == Some(false) {
+        request.worktree = false;
+    }
+    Some(routing)
 }
 
 /// Create the run: sanitise the name, stamp the run id, cut the worktree on
@@ -442,7 +517,48 @@ mod tests {
             session: None,
             tools: None,
             exclude_tools: None,
+            route: None,
         }
+    }
+
+    #[tokio::test]
+    async fn routing_off_is_the_spawn_that_was_always_there() {
+        let root = init_repo("parl-route-off-");
+        let created = create_run_with_retry(&request("plain", "do a thing", &root, true), None)
+            .await
+            .unwrap();
+        assert_eq!(created.state.routing, None);
+        let raw = std::fs::read_to_string(created.paths.run_json(&created.run_id)).unwrap();
+        assert!(
+            !raw.contains("\"routing\""),
+            "an unrouted run.json is byte-identical to before: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pinned_model_and_thinking_level_are_never_routed() {
+        let root = init_repo("parl-route-pinned-");
+        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        let mut req = request("pinned", "do a thing", &root, true);
+        req.model = Some("claude-opus-5".into());
+        req.thinking = Some("high".into());
+        // `--route` on, and an endpoint that would refuse: nothing is asked,
+        // because there is nothing left to decide
+        let mut with_route = req.clone();
+        with_route.route = Some(true);
+        let config = crate::paths::UserConfig {
+            routing: crate::paths::RoutingConfig {
+                enabled: true,
+                endpoint: Some("http://127.0.0.1:1/v1/systemone".into()),
+                ..crate::paths::RoutingConfig::default()
+            },
+            ..crate::paths::UserConfig::default()
+        };
+        let decided = route_request(&mut with_route, &config, &fleet_dir, &[]).await;
+        assert_eq!(decided, None, "nothing to route");
+        assert_eq!(with_route.model.as_deref(), Some("claude-opus-5"));
+        assert_eq!(with_route.thinking.as_deref(), Some("high"));
     }
 
     #[tokio::test]

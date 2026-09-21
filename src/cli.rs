@@ -138,6 +138,13 @@ pub enum Command {
         /// pi tool denylist.
         #[arg(long, value_name = "LIST")]
         exclude_tools: Option<String>,
+        /// Let Jev choose the model, thinking level and worktree from the
+        /// brief, overriding `[routing] enabled`.
+        #[arg(long, overrides_with = "no_route")]
+        route: bool,
+        /// Choose nothing; spawn with the configured defaults.
+        #[arg(long, overrides_with = "route")]
+        no_route: bool,
     },
 
     /// fleet table, or one run's full state as JSON

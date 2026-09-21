@@ -299,7 +299,7 @@ pub fn user_dir_with_env(parl_home: Option<&str>, home: Option<&Path>) -> Option
 /// missing file, an empty file, or a file with only some keys all read as
 /// defaults — but a malformed file is an error, because silently ignoring a
 /// config the user wrote is worse than failing.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
 #[serde(default)]
 pub struct UserConfig {
     /// Defaults for the orchestrator.
@@ -308,6 +308,8 @@ pub struct UserConfig {
     pub worker: WorkerConfig,
     /// How a long orchestrator session keeps itself small.
     pub session: SessionConfig,
+    /// Whether a brief's model is chosen for it, and how.
+    pub routing: RoutingConfig,
     /// Fleet-wide limits.
     pub limits: LimitsConfig,
 }
@@ -356,6 +358,48 @@ impl SessionConfig {
             Some(turns) => Some(turns),
             None => Some(DEFAULT_AUTO_COMPACT_TURNS),
         }
+    }
+}
+
+/// How sure the judgment has to be before it is acted on, when
+/// `[routing] confidence_threshold` is absent. Below it the spawn keeps the
+/// configured default rather than a guess.
+pub const DEFAULT_ROUTING_CONFIDENCE: f64 = 0.6;
+
+/// The `[routing]` section: choosing a worker's model, thinking level and
+/// worktree from the brief, with TypeSafe's System One. Off unless asked
+/// for, and inert without an API key either way.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[serde(default)]
+pub struct RoutingConfig {
+    /// Route at all. `--route` / `--no-route` override it per spawn.
+    pub enabled: bool,
+    /// The System One model to ask.
+    pub model: String,
+    /// How sure the choice has to be; see [`DEFAULT_ROUTING_CONFIDENCE`].
+    pub confidence_threshold: Option<f64>,
+    /// A different endpoint, for a proxy or a test stub.
+    pub endpoint: Option<String>,
+}
+
+impl Default for RoutingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            model: "jev-latest".to_string(),
+            confidence_threshold: None,
+            endpoint: None,
+        }
+    }
+}
+
+impl RoutingConfig {
+    /// The confidence a judgment needs before it is acted on.
+    #[must_use]
+    pub fn confidence_threshold(&self) -> f64 {
+        self.confidence_threshold
+            .filter(|t| (0.0..=1.0).contains(t))
+            .unwrap_or(DEFAULT_ROUTING_CONFIDENCE)
     }
 }
 
@@ -783,6 +827,7 @@ mod tests {
                 provider: Some("opencode-go".into()),
             },
             session: SessionConfig::default(),
+            routing: RoutingConfig::default(),
             limits: LimitsConfig {
                 max_workers_per_session: Some(4),
             },

@@ -242,6 +242,11 @@ pub struct RunState {
     pub exclude_tools: Option<String>,
     #[serde(default)]
     pub task_brief: String,
+    /// What the brief was routed to, when it was routed at all. Recorded so
+    /// the choice of model, thinking level and worktree can be read back
+    /// rather than guessed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<crate::route::Routing>,
     pub fleet_dir: String,
     #[serde(default)]
     pub repo_root: Option<String>,
@@ -335,6 +340,7 @@ impl RunState {
             // a specific uuid overwrites it right after construction.
             uuid: Uuid::new_v4(),
             orchestrator_id: None,
+            routing: None,
             status: RunStatus::Starting,
             cwd: cwd.to_string(),
             worktree,

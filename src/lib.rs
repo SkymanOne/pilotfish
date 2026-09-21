@@ -14,6 +14,7 @@ pub mod mcp;
 pub mod ops;
 pub mod orch;
 pub mod paths;
+pub mod route;
 pub mod tui;
 pub mod util;
 pub mod worker;

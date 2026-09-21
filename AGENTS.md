@@ -27,6 +27,7 @@ Single crate `parl`, lib + bin. The library is the contract, and the binary only
 | `src/fleet/report.rs` | reading `runs/<id>/report.md` with the steering appendix, falling back to last assistant text. |
 | `src/worker/` | the detached worker monitor (`monitor.rs`), pi RPC message types (`rpc.rs`), `pi --list-models` and model checking (`models.rs`). The monitor also materialises the embedded pi extension and skill into `.parl/pi/` at boot. |
 | `src/orch/` | the claude side: stream-json wire types (`protocol.rs`), argv builder (`args.rs`), child process (`process.rs`), detached monitor (`monitor.rs`), transcript records (`records.rs`), console-side client (`client.rs`), embedded prompt (`prompt.rs`), the `.mcp.json` (`mcp_config.rs`), health and the orphan reaper (`health.rs`), the run-state watcher that turns state into fleet events (`watcher.rs`), and the session store for `fleet.json` (`session.rs`). |
+| `src/route.rs` | choosing a worker's model, thinking level and worktree from its brief with TypeSafe's System One (Jev). Off by default; a judgment that cannot be had is no judgment, never an error. |
 | `src/ops/` | the shared operation layer both the CLI and the MCP tools call: `spawn.rs`, `query.rs` (status/output/logs/report/wait/attach), `steer.rs` (send/followup/answer/stop), `integrate.rs` (diff/merge/cleanup). The CLI-shaped signatures live beside `_core` variants that take a `Party` source, so the console and MCP can attribute actions honestly. |
 | `src/mcp/` | the stdio MCP server (`server.rs`), one tool per op, built on `rmcp`. Server name stays `fleet` so tools stay `mcp__fleet__*`. |
 | `src/tui/` | the console: app state and update loop (`app.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
@@ -72,6 +73,7 @@ Single crate `parl`, lib + bin, edition 2024, version 0.2.0. `Cargo.lock` is com
 | Errors | `thiserror` in the library, `anyhow` at the binary edges | |
 | Console | `nucleo-matcher` (palette ranking), `pulldown-cmark` (transcript markdown) | wrapping is hand-rolled in `markdown.rs` and `view/overlay.rs` |
 | Process | `nix` (`signal`, `process`) | `unsafe_code = "forbid"` rules out `libc::kill`, so pid liveness is `nix::sys::signal::kill`, where EPERM counts as alive |
+| Routing | `reqwest` (`json`, `rustls-tls`, no default features) | the only HTTP in the tree: `src/route.rs` calls TypeSafe's System One, since it has no Rust SDK |
 | Misc | `regex`, `dirs` (home lookup for the `~/.parl` user dir), `rand`, `toml` (user config), `futures` | `StreamExt` over the crossterm event stream |
 
 git is the git CLI, not `git2`: everything goes through `git_raw`, which trusts the real exit code, because merge conflicts print to stdout and sniffing stderr gets it wrong. The two agents are subprocesses, not libraries: `claude -p` over stream-json, `pi --mode rpc` over its own RPC; neither SDK is linked in.
@@ -160,11 +162,21 @@ A token reaches the screen through three intervals, and all three are named cons
 
 ## Sessions, user config, and limits
 
-- **`~/.parl/config.toml`** is the user-level config: `[orchestrator] model`, `[worker] model`/`provider`, `[session] auto_compact_turns`, `[limits] max_workers_per_session`. Resolution is most-specific-wins: explicit flag/argument → project `fleet.json` launch record → user config → built-in default. `$PARL_HOME` overrides the directory wholesale, mirroring `$PARL_DIR` for a fleet. A malformed file is a hard error naming the path, never a silent fallback; a missing or empty file reads as defaults.
+- **`~/.parl/config.toml`** is the user-level config: `[orchestrator] model`, `[worker] model`/`provider`, `[session] auto_compact_turns`, `[routing] enabled`/`model`/`confidence_threshold`/`endpoint`, `[limits] max_workers_per_session`. Resolution is most-specific-wins: explicit flag/argument → project `fleet.json` launch record → user config → built-in default. `$PARL_HOME` overrides the directory wholesale, mirroring `$PARL_DIR` for a fleet. A malformed file is a hard error naming the path, never a silent fallback; a missing or empty file reads as defaults.
 - **The worker cap is enforced, not advice.** Once a session's live runs reach `max_workers_per_session` (default 3; 0 means "no spawning allowed"), `spawn` refuses with exit 1, naming the cap and the runs holding slots. The prompt's `{{MAX_WORKERS}}` resolves through the same config value, so advice and enforcement cannot drift.
 - **Session isolation.** Each monitor is pinned with `--session <uuid>`, and the watcher filters through `list_runs_for_owner`, so a worker settling in one session never appears in another's transcript. `tests/orch_multi_session.rs` proves it with two live sessions on one fleet.
 - **Per-session shutdown.** Removing `orchestrators/<key>/` stops exactly that monitor within `MISSING_DIR_POLLS` polls; deleting `.parl` stops them all.
 - **Monitor health.** `last_heartbeat` is stamped on a 5 s cadence (`HEARTBEAT_WRITE_MS`); `monitor_health` derives Running / Wedged / Stopped from heartbeat freshness (`HEARTBEAT_GRACE_MS` 15 s) plus pid liveness — a live pid with a stale heartbeat is a wedged monitor.
+
+## Routing a brief (Jev)
+
+`src/route.rs` asks TypeSafe's System One which model should carry a brief, how hard it should think, and whether it needs a worktree. **Off by default**, and inert without an API key however the config reads.
+
+- **One request, four questions**, because they do not depend on one another: a Choice over pi's real catalogue, a Score for effort, and two Nouls (`needs_worktree`, `parallel_safe`). `POST /v1/systemone`, `Authorization: Bearer …`, `{state, model, questions}` in and `{answers}` out — there is no Rust SDK, so this speaks the documented API directly (`reqwest`, rustls, JSON).
+- **Code owns the policy.** Below `[routing] confidence_threshold` (0.6) the configured default stands; a model the fleet does not have is refused; the effort Score is mapped onto an ordered scale and then clamped, because pi accepts a level its model lacks and silently ignores it (verified fact 5). A brief the caller pinned a `model` *and* a `thinking` on is never routed at all.
+- **A judgment that cannot be had is not an error.** No network, a refused key, an unparsable body: `route` returns `None`, the spawn goes ahead on the configured default, and the 10 s timeout bounds the wait.
+- **The seam** is `route_request` in `src/ops/spawn.rs`, called before `check_model` so what is chosen is what gets validated. What it decided is written to `run.json` as `routing` and printed by the spawn; `parallel_safe: false` is a warning on stderr, not a refusal.
+- **Config:** `[routing] enabled`, `model` (`jev-latest`), `confidence_threshold`, `endpoint`. Key from `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`; `$PARL_TYPESAFE_URL` or the config's `endpoint` points it elsewhere, which is how the tests reach a local stub. `--route` / `--no-route` and `fleet_spawn`'s `route` override the config per spawn.
 
 ## Known issues
 
@@ -218,6 +230,8 @@ Knobs, all derived from `ENV_PREFIX`:
 | `PARL_PROMPT` | the orchestrator prompt override (set-but-missing is an error) |
 | `PARL_ASK_TIMEOUT_MS`, `PARL_ASK_POLL_MS` | shorten a worker's `fleet_ask` wait and its poll interval |
 | `PARL_RUN` | the run a worker's extension reports into |
+| `PARL_TYPESAFE_API_KEY`, `TYPESAFE_API_KEY` | the routing key; neither set means routing is inert |
+| `PARL_TYPESAFE_URL` | points routing at another endpoint (a proxy, or a test stub) |
 
 Run the full suite the sanctioned way, into a throwaway fleet dir, and check it stayed empty:
 

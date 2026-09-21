@@ -8,6 +8,16 @@ use clap::Parser as _;
 use parl::cli::{Cli, Command, ExitCode};
 use parl::{mcp, ops, orch, tui, worker};
 
+/// `--route` / `--no-route` as an override, or `None` for "whatever the
+/// config says". clap's `overrides_with` means at most one is set.
+const fn route_override(route: bool, no_route: bool) -> Option<bool> {
+    match (route, no_route) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
 fn main() -> std::process::ExitCode {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
@@ -84,6 +94,8 @@ async fn dispatch(cli: Cli) -> std::process::ExitCode {
             session,
             tools,
             exclude_tools,
+            route,
+            no_route,
         }) => finish(
             ops::spawn::spawn_run(ops::spawn::SpawnRequest {
                 name,
@@ -99,6 +111,7 @@ async fn dispatch(cli: Cli) -> std::process::ExitCode {
                 session,
                 tools,
                 exclude_tools,
+                route: route_override(route, no_route),
             })
             .await,
         ),

@@ -184,6 +184,7 @@ impl FleetServer {
             session: opt_str(args, "session")?,
             tools: opt_str(args, "tools")?,
             exclude_tools: opt_str(args, "excludeTools")?,
+            route: opt_bool(args, "route")?,
         };
         match spawn_core_with_env(request, self.parl_dir().as_deref()).await {
             Ok(r) => {
@@ -475,6 +476,12 @@ fn spawn_status_tools() -> Vec<Tool> {
                 (
                     "excludeTools",
                     string_prop("pi tool denylist (comma-separated)"),
+                ),
+                (
+                    "route",
+                    bool_prop(
+                        "Choose the model, thinking level and worktree from the brief (overrides the configured default)",
+                    ),
                 ),
             ]),
             &["name", "brief"],

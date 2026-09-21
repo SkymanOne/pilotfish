@@ -97,21 +97,23 @@ async fn wait(timeout: Duration, mut check: impl FnMut() -> bool) {
     }
 }
 
-fn session_key(fleet_dir: &Path) -> parl::paths::SessionKey {
-    parl::orch::session::resolve_session(fleet_dir)
-        .expect("the monitor writes a session row")
-        .key()
+/// The session row, or `None` before the monitor has written one — the
+/// polling helpers below run from the moment the monitor starts, so a
+/// missing row is "not yet", not a failure.
+fn session_key(fleet_dir: &Path) -> Option<parl::paths::SessionKey> {
+    Some(parl::orch::session::resolve_session(fleet_dir)?.key())
 }
 
 fn monitor_pid(fleet_dir: &Path) -> Option<i32> {
-    load_orchestrator_state(fleet_dir, &session_key(fleet_dir)).and_then(|state| state.pid)
+    load_orchestrator_state(fleet_dir, &session_key(fleet_dir)?).and_then(|state| state.pid)
 }
 
 fn count_results(fleet_dir: &Path) -> usize {
-    let raw = std::fs::read_to_string(
-        FleetPaths::new(fleet_dir).orchestrator_events(&session_key(fleet_dir)),
-    )
-    .unwrap_or_default();
+    let Some(key) = session_key(fleet_dir) else {
+        return 0;
+    };
+    let raw = std::fs::read_to_string(FleetPaths::new(fleet_dir).orchestrator_events(&key))
+        .unwrap_or_default();
     raw.lines()
         .filter_map(|line| serde_json::from_str::<EventRecord>(line).ok())
         .filter(|record| record.kind == "result")
@@ -123,7 +125,7 @@ fn count_results(fleet_dir: &Path) -> usize {
 /// before the fleet directory is deleted, since the log goes with it.
 fn claude_pid(fleet_dir: &Path) -> Option<i32> {
     let log =
-        std::fs::read_to_string(FleetPaths::new(fleet_dir).claude_log(&session_key(fleet_dir)))
+        std::fs::read_to_string(FleetPaths::new(fleet_dir).claude_log(&session_key(fleet_dir)?))
             .ok()?;
     let line = log
         .lines()
@@ -150,12 +152,27 @@ async fn deleting_the_fleet_directory_ends_the_monitor_and_its_claude_child() {
     client.send("hello").await.unwrap();
     wait(WAIT, || count_results(&fixture.fleet_dir) >= 1).await;
 
+    wait(WAIT, || monitor_pid(&fixture.fleet_dir).is_some()).await;
     let monitor_pid = monitor_pid(&fixture.fleet_dir).expect("a monitor is running");
+    wait(WAIT, || claude_pid(&fixture.fleet_dir).is_some()).await;
     let claude_pid = claude_pid(&fixture.fleet_dir).expect("the fake claude spawn line");
     wait(Duration::from_secs(5), || is_alive(Some(claude_pid))).await;
 
-    // delete the fleet directory out from under the running monitor
-    std::fs::remove_dir_all(&fixture.fleet_dir).unwrap();
+    // Delete the fleet directory out from under the running monitor. The
+    // monitor is still writing into it, and a file created between the walk
+    // and the rmdir makes the removal fail with ENOTEMPTY — retry until the
+    // directory is actually gone, which is the state the test is about.
+    let deadline = Instant::now() + WAIT;
+    while fixture.fleet_dir.exists() {
+        if std::fs::remove_dir_all(&fixture.fleet_dir).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "could not remove the fleet directory"
+        );
+        tokio::time::sleep(POLL).await;
+    }
 
     // the monitor notices and exits within the bound …
     wait(WAIT, || !is_alive(Some(monitor_pid))).await;
