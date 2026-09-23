@@ -476,7 +476,7 @@ impl OrchestratorClient {
     /// monitor caps the file on its own while it runs; this is the harder
     /// cap applied when a dead monitor is being replaced.
     fn trim_transcript(events_path: &std::path::Path) {
-        crate::orch::records::trim_events_file(events_path, MAX_RESTORED_LINES);
+        crate::orch::records::trim_events_file(events_path, MAX_RESTORED_LINES, MAX_RESTORED_LINES);
     }
 
     /// Spawn the detached monitor. Detached, like the TypeScript `detached:

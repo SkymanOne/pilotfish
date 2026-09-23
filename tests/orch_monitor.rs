@@ -493,7 +493,7 @@ async fn refreshing_capabilities_picks_up_a_command_installed_later() {
     })
     .await;
 
-    client.shutdown().await.unwrap();
+    stop_and_wait(&client, &fixture.fleet_dir).await;
 }
 
 /// A long session keeps itself small: the monitor compacts claude's context
@@ -542,6 +542,24 @@ async fn a_session_past_its_turn_threshold_compacts_itself() {
                 && format!("{:?}", record.body).contains("compacting")),
         "the seam is marked in the transcript"
     );
+    // the compaction's own result must not count toward the next one: with a
+    // threshold of one that would compact forever, a turn at a time
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let compactions = std::fs::read_to_string(&stdin_log)
+        .unwrap()
+        .matches("/compact")
+        .count();
+    assert_eq!(compactions, 1, "one compaction, not a loop");
 
+    stop_and_wait(&client, &fixture.fleet_dir).await;
+}
+
+/// Shut the monitor down and wait for it to be gone. A test that returns
+/// while its monitor still runs drops a temp dir the monitor is writing
+/// into; the removal can then fail half-way, and a monitor whose directory
+/// survives never learns it should stop.
+async fn stop_and_wait(client: &OrchestratorClient, fleet_dir: &Path) {
+    let pid = monitor_pid(fleet_dir);
     client.shutdown().await.unwrap();
+    wait(WAIT, || !is_alive(pid)).await;
 }

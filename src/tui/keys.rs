@@ -11,7 +11,6 @@
 //! cannot drift.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
-use std::fmt::Write as _;
 
 /// What a keypress means. The app interprets it; the map only translates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,15 +183,15 @@ pub struct HelpSection {
 pub const COMPOSE_KEYS: &[KeyHelp] = &[
     KeyHelp {
         keys: "type + enter",
-        what: "message the orchestrator, or steer the selected worker",
+        what: "message the orchestrator or worker",
     },
     KeyHelp {
         keys: "shift-enter",
-        what: "newline (alt-enter or ctrl-j where the terminal cannot)",
+        what: "newline (or alt-enter, ctrl-j)",
     },
     KeyHelp {
         keys: "/",
-        what: "console commands, and the agent's own",
+        what: "commands, yours and the agent's",
     },
     KeyHelp {
         keys: "@",
@@ -200,15 +199,15 @@ pub const COMPOSE_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "tab",
-        what: "accept the highlighted suggestion",
+        what: "accept the suggestion",
     },
     KeyHelp {
         keys: "up / down",
-        what: "move through suggestions, or recall what you sent",
+        what: "suggestions, or earlier messages",
     },
     KeyHelp {
         keys: "esc",
-        what: "close what is open, else clear the line, else stop the turn",
+        what: "close, clear the line, stop the turn",
     },
 ];
 
@@ -216,7 +215,7 @@ pub const COMPOSE_KEYS: &[KeyHelp] = &[
 pub const CHORD_KEYS: &[KeyHelp] = &[
     KeyHelp {
         keys: "ctrl-f",
-        what: "the fleet: every session, and what you can do to one",
+        what: "the fleet: every session",
     },
     KeyHelp {
         keys: "ctrl-k",
@@ -224,23 +223,23 @@ pub const CHORD_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "ctrl-r",
-        what: "search this session; again steps to the next match",
+        what: "search; again for the next match",
     },
     KeyHelp {
         keys: "ctrl-y",
-        what: "release the mouse so you can select and copy; again takes it back",
+        what: "free the mouse to select and copy",
     },
     KeyHelp {
         keys: "ctrl-o",
-        what: "unfold an older turn's reasoning and tool output",
+        what: "unfold older reasoning and tools",
     },
     KeyHelp {
         keys: "pgup / pgdn",
-        what: "scroll the transcript (the wheel does too)",
+        what: "scroll (the wheel does too)",
     },
     KeyHelp {
-        keys: "ctrl-home / ctrl-end",
-        what: "the top / the tail of the transcript",
+        keys: "ctrl-home/end",
+        what: "top / back to the tail",
     },
 ];
 
@@ -260,11 +259,11 @@ pub const FLEET_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "enter",
-        what: "open that session's conversation",
+        what: "show that conversation",
     },
     KeyHelp {
         keys: "a",
-        what: "answer the pending question or dialog",
+        what: "answer its question or dialog",
     },
     KeyHelp {
         keys: "s",
@@ -272,7 +271,7 @@ pub const FLEET_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "x",
-        what: "remove the selected worker (asks first)",
+        what: "remove the worker (asks first)",
     },
     KeyHelp {
         keys: "t",
@@ -280,15 +279,15 @@ pub const FLEET_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "m",
-        what: "switch the model (palette)",
+        what: "switch the model",
     },
     KeyHelp {
         keys: "p",
-        what: "permission mode (orchestrator only)",
+        what: "permission mode (orchestrator)",
     },
     KeyHelp {
         keys: "b",
-        what: "the selected session's full brief",
+        what: "the full brief",
     },
     KeyHelp {
         keys: "?",
@@ -317,66 +316,6 @@ pub fn help_sections() -> Vec<HelpSection> {
             rows: FLEET_KEYS,
         },
     ]
-}
-
-/// The help as one string, for tests and for narrow renderers.
-#[must_use]
-pub fn help_text() -> String {
-    let mut out = String::new();
-    for section in help_sections() {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&render_section(&section));
-    }
-    out
-}
-
-fn render_section(section: &HelpSection) -> String {
-    let mut out = String::from(section.title);
-    out.push(':');
-    for row in section.rows {
-        let _ = write!(out, "\n  {:18} {}", row.keys, row.what);
-    }
-    out
-}
-
-/// The help as lines that fit `width`, capped at `maxRows`. What does not fit
-/// is counted rather than silently cut off the bottom.
-#[must_use]
-pub fn help_lines(width: usize, max_rows: usize) -> Vec<String> {
-    use unicode_width::UnicodeWidthStr;
-    let mut lines = Vec::new();
-    for section in help_sections() {
-        if !lines.is_empty() {
-            lines.push(String::new());
-        }
-        lines.extend(render_section(&section).split('\n').map(str::to_string));
-    }
-    let rows = |line: &str| -> usize {
-        let w = line.width();
-        if w == 0 { 1 } else { w.div_ceil(width.max(1)) }
-    };
-    let mut shown = Vec::new();
-    let mut used = 0;
-    for line in &lines {
-        // keep a row for the notice when there is more after this one
-        if used + rows(line) > max_rows.saturating_sub(1)
-            && !shown.is_empty()
-            && shown.len() < lines.len()
-        {
-            break;
-        }
-        shown.push(line.clone());
-        used += rows(line);
-    }
-    let hidden = lines.len() - shown.len();
-    if hidden > 0 {
-        shown.push(format!(
-            "… {hidden} more lines — a taller window shows them all"
-        ));
-    }
-    shown
 }
 
 #[cfg(test)]
@@ -495,17 +434,17 @@ mod tests {
     }
 
     #[test]
-    fn the_help_is_built_from_the_bindings_and_fits_its_pane() {
-        let text = help_text();
-        for section in ["Typing:", "Chords:", "Fleet (ctrl-f):"] {
-            assert!(text.contains(section), "{text}");
+    fn the_help_names_every_chord_and_the_fleet_letters() {
+        let sections = help_sections();
+        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
+        assert_eq!(titles, vec!["Typing", "Chords", "Fleet (ctrl-f)"]);
+        let keys: Vec<&str> = sections
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .map(|row| row.keys)
+            .collect();
+        for chord in ["ctrl-f", "ctrl-k", "ctrl-r", "ctrl-o", "ctrl-y"] {
+            assert!(keys.contains(&chord), "{chord} is documented: {keys:?}");
         }
-        assert!(text.contains("ctrl-f"), "{text}");
-        let lines = help_lines(80, 8);
-        assert!(lines.len() <= 8, "{lines:?}");
-        assert!(
-            lines.last().is_some_and(|l| l.contains("more lines")),
-            "what does not fit is counted: {lines:?}"
-        );
     }
 }

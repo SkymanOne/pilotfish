@@ -16,9 +16,11 @@ use crate::tui::completions::resolve_command;
 use crate::tui::keys::KeyAction;
 use crate::tui::palette::{PaletteAction, PaletteScope};
 
+use crate::secrets::Secret;
+
 use super::{
-    AskQuestion, BriefState, ConfirmAction, ConfirmState, Console, Effect, Overlay, PaletteState,
-    PermissionOverlay, SearchState, SessionTarget, questions_of,
+    AskQuestion, BriefState, ConfirmAction, ConfirmState, Console, Effect, KeyState, Overlay,
+    PaletteState, PermissionOverlay, RoutingPanel, SearchState, SessionTarget, questions_of,
 };
 
 impl Console {
@@ -40,6 +42,7 @@ impl Console {
             Overlay::Palette(state) => self.handle_palette(state, action),
             Overlay::Search(state) => self.handle_search(state, action),
             Overlay::Brief(state) => self.handle_brief(state, action),
+            Overlay::Routing(panel) => self.handle_routing(panel, action),
         }
     }
 
@@ -119,6 +122,12 @@ impl Console {
             self.overlay = None;
             return Vec::new();
         };
+        // the prompt raised itself a moment ago: a key this soon was typed at
+        // the composer, and must not answer a question nobody has read yet
+        if self.within_raise_grace() && !matches!(action, KeyAction::Escape) {
+            self.overlay = Some(Overlay::Permission(state));
+            return Vec::new();
+        }
         let is_question = crate::orch::protocol::is_ask_user_question(&request.request);
         let questions = questions_of(&request.request.input);
 
@@ -374,10 +383,18 @@ impl Console {
             KeyAction::InsertBackspace => {
                 state.query.pop();
             }
-            KeyAction::Send | KeyAction::Open | KeyAction::Escape => {
-                // keep the matches found so far
+            // esc cancels: nothing is kept, so the next ctrl-r opens a fresh box
+            KeyAction::Escape => {
+                self.search = None;
+                self.overlay = None;
+                return Vec::new();
+            }
+            KeyAction::Send | KeyAction::Open => {
                 self.apply_search(state.query.clone());
                 self.overlay = None;
+                if self.search.as_ref().is_some_and(|s| s.matches.is_empty()) {
+                    self.toast(format!("· no match for \"{}\"", state.query), false);
+                }
                 return Vec::new();
             }
             _ => {}
@@ -387,6 +404,69 @@ impl Console {
         state.current = state.matches.first().copied();
         self.overlay = Some(Overlay::Search(state));
         Vec::new()
+    }
+
+    /// The `/routing` panel. Single letters act while nothing is being typed;
+    /// while a key is being entered, every key is part of it except enter
+    /// (save) and esc (cancel).
+    fn handle_routing(&mut self, mut panel: RoutingPanel, action: KeyAction) -> Vec<Effect> {
+        if let Some(key) = panel.entering.as_mut() {
+            match action {
+                KeyAction::InsertChar(ch) => key.push(ch),
+                KeyAction::InsertBackspace => key.pop(),
+                KeyAction::Escape => panel.entering = None,
+                KeyAction::Send => {
+                    let key = key.finished();
+                    panel.entering = None;
+                    self.overlay = Some(Overlay::Routing(panel));
+                    if key.is_empty() {
+                        return Vec::new();
+                    }
+                    return vec![Effect::SaveTypesafeKey(key)];
+                }
+                _ => {}
+            }
+            self.overlay = Some(Overlay::Routing(panel));
+            return Vec::new();
+        }
+        if panel.confirm_delete {
+            panel.confirm_delete = false;
+            let delete = matches!(action, KeyAction::InsertChar('y' | 'Y'));
+            self.overlay = Some(Overlay::Routing(panel));
+            return if delete {
+                vec![Effect::DeleteTypesafeKey]
+            } else {
+                Vec::new()
+            };
+        }
+        match action {
+            KeyAction::Escape | KeyAction::Send => {
+                self.overlay = None;
+                Vec::new()
+            }
+            KeyAction::InsertChar('s') => {
+                panel.entering = Some(Secret::default());
+                self.overlay = Some(Overlay::Routing(panel));
+                Vec::new()
+            }
+            KeyAction::InsertChar('r') => {
+                let Some(status) = &panel.status else {
+                    return Vec::new();
+                };
+                vec![Effect::SetRouting(!status.enabled)]
+            }
+            KeyAction::InsertChar('d') => {
+                if matches!(
+                    panel.status.as_ref().map(|s| &s.key),
+                    Some(KeyState::Store { .. })
+                ) {
+                    panel.confirm_delete = true;
+                    self.overlay = Some(Overlay::Routing(panel));
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
     }
 
     /// `b`: pop the selected session's full brief; the composer keeps its
@@ -446,7 +526,7 @@ impl Console {
     }
 
     /// Case-insensitive matches over the open session's transcript blocks.
-    fn search_matches(&self, query: &str) -> Vec<usize> {
+    pub(super) fn search_matches(&self, query: &str) -> Vec<usize> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -466,9 +546,18 @@ impl Console {
             .collect()
     }
 
+    /// Keep a search with its matches, pinning the view at the first. A
+    /// search that found nothing is not kept: there is nothing to step
+    /// through, and a kept empty search would make the next `ctrl-r` step
+    /// through nothing instead of opening the box again.
     pub(super) fn apply_search(&mut self, query: String) {
         let matches = self.search_matches(&query);
+        if matches.is_empty() {
+            self.search = None;
+            return;
+        }
         let current = matches.first().copied();
+        self.scroll = current;
         self.search = Some(SearchState {
             query,
             matches,

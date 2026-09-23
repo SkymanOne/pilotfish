@@ -48,6 +48,9 @@ const STREAM_FLUSH_MS: u64 = 50;
 /// is the console's replay source, so it has to stay readable in one gulp;
 /// past this the head is dropped and the console replays what is left.
 const MAX_EVENT_LINES: usize = 5_000;
+/// What `/trim` cuts the transcript down to: enough to restore the recent
+/// conversation, nothing older.
+const TRIM_TO_LINES: usize = 2_000;
 /// Consecutive polls with the fleet directory missing before the monitor
 /// accepts that it was deleted or moved out from under it: a single
 /// transient `NotFound` under load is not a deletion.
@@ -151,9 +154,11 @@ struct Shared {
     dir_missing_polls: u32,
     /// Epoch ms of the last heartbeat write; the first poll writes at once.
     last_heartbeat_written: Option<i64>,
-    /// Turn count at the last compaction, so the threshold measures turns
-    /// *since* one rather than turns in total.
-    compacted_at_turn: u32,
+    /// Turns since the last compaction, counted here because claude's own
+    /// count restarts with every query.
+    turns_since_compact: u32,
+    /// A `/compact` was sent and its result has not come back yet.
+    compacting: bool,
     /// Set once the fleet directory loss (or an answering stop) ends the
     /// session; blocks a flag-change restart from respawning a child into a
     /// directory that no longer exists.
@@ -274,7 +279,8 @@ impl Monitor {
                 control_offset: 0,
                 dir_missing_polls: 0,
                 last_heartbeat_written: None,
-                compacted_at_turn: 0,
+                turns_since_compact: 0,
+                compacting: false,
                 shutting_down: false,
             }),
         });
@@ -554,7 +560,18 @@ impl Monitor {
             let mut sh = self.shared();
             let _ = sh.transcript.flush_text();
             sh.state.cost_usd = proc.cost_usd();
-            sh.state.num_turns = proc.num_turns();
+            // claude's own `num_turns` is per query — every result of a
+            // stream-json session says 1 (verified fact 6) — so the session's
+            // count is kept here, one per result
+            sh.state.num_turns = sh.state.num_turns.saturating_add(1);
+            // the `/compact` turn itself starts the new window at zero: were it
+            // counted, a threshold of one would compact after every compaction,
+            // forever, spending a turn each time
+            if std::mem::take(&mut sh.compacting) {
+                sh.turns_since_compact = 0;
+            } else {
+                sh.turns_since_compact = sh.turns_since_compact.saturating_add(1);
+            }
             sh.state.turn_active = false;
             sh.state.activity = None;
             sh.dirty = true;
@@ -562,8 +579,25 @@ impl Monitor {
         self.flush_state();
         // a turn is the only moment either of these is safe: the child is
         // idle, and the transcript has just been flushed
-        records::trim_events_file(&self.paths.orchestrator_events(&self.key), MAX_EVENT_LINES);
+        self.trim_transcript(MAX_EVENT_LINES, MAX_EVENT_LINES / 2);
         self.maybe_compact(&proc);
+    }
+
+    /// Cut `events.jsonl` down to its last `keep` lines once it passes
+    /// `over`. The gap between the two is what keeps this rare: trimming to
+    /// the cap itself would rewrite the file after every turn from then on,
+    /// and every rewrite makes the console replay the transcript.
+    ///
+    /// Held under the shared lock, so none of this monitor's own appends can
+    /// land between the read and the rename — and the monitor is the only
+    /// writer of this file, `/trim` included, which asks it rather than
+    /// rewriting the file from the console.
+    fn trim_transcript(&self, over: usize, keep: usize) -> bool {
+        let sh = self.shared();
+        let trimmed =
+            records::trim_events_file(&self.paths.orchestrator_events(&self.key), over, keep);
+        drop(sh);
+        trimmed
     }
 
     /// Compact the session's context once it has run far enough since the
@@ -573,17 +607,23 @@ impl Monitor {
         let Some(threshold) = self.auto_compact_turns else {
             return;
         };
-        let (turns, compacted_at) = {
+        let (since, stopping) = {
             let sh = self.shared();
-            (sh.state.num_turns, sh.compacted_at_turn)
+            (
+                sh.turns_since_compact,
+                sh.shutting_down || sh.restart.is_some(),
+            )
         };
-        let since = turns.saturating_sub(compacted_at);
-        if since < threshold {
+        if since < threshold || stopping {
             return;
         }
-        // recorded before sending: `/compact` is itself a turn, and a second
-        // one must not be triggered by the first one's result
-        self.shared().compacted_at_turn = turns;
+        // marked before sending: `/compact` is itself a turn, and its result
+        // must open the next window rather than count toward it
+        {
+            let mut sh = self.shared();
+            sh.turns_since_compact = 0;
+            sh.compacting = true;
+        }
         self.write_notice(
             format!("· compacting the session's context after {since} turns"),
             None,
@@ -824,6 +864,12 @@ impl Monitor {
             OrchestratorCommand::RefreshCapabilities => {
                 OrchestratorProcess::request_commands(&proc);
             }
+            OrchestratorCommand::TrimTranscript => {
+                let trimmed = self.trim_transcript(TRIM_TO_LINES, TRIM_TO_LINES);
+                if !trimmed {
+                    self.write_notice("· the transcript is already short".to_string(), None);
+                }
+            }
             OrchestratorCommand::Permission {
                 request_id,
                 decision,
@@ -952,7 +998,13 @@ impl Monitor {
             }
             OrchestratorCommand::Stop => {
                 self.write_notice("· shutting down".into(), None);
-                self.shared().restart = None;
+                {
+                    let mut sh = self.shared();
+                    sh.restart = None;
+                    // nothing may start a turn after this — a compaction
+                    // triggered by the result of the turn being stopped included
+                    sh.shutting_down = true;
+                }
                 proc.stop().await;
             }
         }

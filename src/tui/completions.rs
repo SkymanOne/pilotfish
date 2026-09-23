@@ -130,6 +130,13 @@ pub const COMMANDS: &[CommandSpec] = &[
         aliases: &[],
     },
     CommandSpec {
+        name: "/routing",
+        detail: "model routing: switch it on or off, and set the TypeSafe key it uses",
+        takes_argument: false,
+        worker_only: false,
+        aliases: &["/jev"],
+    },
+    CommandSpec {
         name: "/verbose",
         detail: "show an older turn's reasoning and tool output in full, or fold it again",
         takes_argument: false,
@@ -277,7 +284,7 @@ pub struct CompletionContext {
 }
 
 /// The console's own commands must all fit, with room for the agent's.
-pub const MAX_SUGGESTIONS: usize = 16;
+pub const MAX_SUGGESTIONS: usize = 24;
 
 /// What to offer for the current input, or `None` when nothing applies.
 #[must_use]
@@ -307,6 +314,8 @@ pub fn completions_for(input: &str, ctx: &CompletionContext) -> Option<Completio
         // skills, pi's skills, prompt templates and extension commands
         let agent_items: Vec<Suggestion> = rank(&ctx.agent_commands, query, |c| c.name.clone())
             .into_iter()
+            // a console command of the same name is the one that runs
+            .filter(|c| resolve_command(&format!("/{}", c.name)).is_none())
             .map(|c| Suggestion {
                 value: if c.argument_hint.is_some() {
                     format!("/{} ", c.name)

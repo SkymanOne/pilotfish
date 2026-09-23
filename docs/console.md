@@ -35,9 +35,11 @@ The composer always has focus, so there is no mode to be in and no letter that a
 | `@` | workers and repository files |
 | `tab` | accept the highlighted suggestion |
 | `up` / `down` | move through suggestions, or recall what you sent that session before |
-| `esc` | close what is open, else clear the line, else stop the running turn |
+| `esc` | close what is open, else clear the line, else stop the orchestrator's turn |
 
-`esc` walks outwards one step at a time: a suggestion popup, then an answer you were composing, then the line itself. With nothing left to clear it interrupts the turn — the orchestrator's, or the selected worker's.
+`esc` walks outwards one step at a time: a suggestion popup, then an answer you were composing, then the line itself, then a search highlight. With nothing left to clear it interrupts the orchestrator's turn, which claude resumes from. It never stops a worker — that is `/stop`, or `s` in the fleet — because a key you press reflexively to close things must not be one that throws work away.
+
+Pasting works the way you expect: a multi-line brief pasted into the composer stays one message until you press `enter`, rather than being sent a line at a time.
 
 ## The chords
 
@@ -52,6 +54,8 @@ Everything in the conversation that is not text is a `ctrl` chord, and there are
 | `ctrl-y` | release the mouse so you can select and copy; again takes it back |
 | `pgup` / `pgdn` | scroll the transcript (so does the wheel, half a page a notch) |
 | `ctrl-home` / `ctrl-end` | the top of the transcript / back to the tail |
+
+`/help` shows all of this in a panel sized to your terminal.
 
 ## The fleet
 
@@ -118,6 +122,7 @@ With the orchestrator selected the composer is a normal message. With a worker s
 | `/thinking <level>` | `/t` | sets the reasoning level: pi's `off…max` for a worker, claude's `low…max` for the orchestrator |
 | `/model <model>` | | switches its model, live |
 | `/permissions <mode>` | `/perm` | how the orchestrator's tool use is approved. With no argument it says what is in force |
+| `/routing` | `/jev` | model routing: switch it on or off, and set the TypeSafe key it uses (see below) |
 | `/verbose` | | unfold an older turn's reasoning and tool output, or fold it again |
 | `/clear` | | forget this session's transcript in the console; the file on disk is untouched |
 | `/trim` | | cut the orchestrator's transcript file down to its recent tail |
@@ -138,9 +143,27 @@ Most terminals also let you bypass mouse capture by holding a modifier while dra
 
 `/model` and `/thinking` change a running session without restarting it and without spending a turn, on either side. For the orchestrator, claude validates the model name itself, so an unknown one shows claude's own error rather than a list of ours. For a worker the console resolves the id against the models pi reported. An ambiguous or unknown id sends nothing and says so, while an explicit `provider:model` passes straight through.
 
+## Model routing
+
+`/routing` opens a small panel: whether routing is on, where its key comes from, and what it has to choose between. With routing on, a worker spawned without a model has one picked for it from its brief — see [the CLI](cli.md#choosing-a-model-for-a-brief) for how it decides.
+
+```text
+╭ model routing ─────────────────────────────────────────────────╮
+│ routing   on                                                   │
+│ api key   ••••cdef, in the macOS Keychain                       │
+│ choosing  between 12 models                                    │
+│                                                                │
+│ r routing on/off · s set key · d delete key · esc close        │
+╰────────────────────────────────────────────────────────────────╯
+```
+
+`s` asks for your TypeSafe API key; paste it or type it, and it is drawn as dots, never as text. `enter` saves it to your operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.parl`, not the transcript, not your history. The panel only ever shows its last four characters. `r` switches routing on or off in `~/.parl/config.toml`, leaving the rest of that file as you wrote it.
+
+A key in `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` wins over the stored one, and the panel says so. On a machine with no credential store (a headless Linux box without a Secret Service) the environment variable is the way — the key is never written to a file instead. On macOS the first time a newly built `parl` reads the key, the system may ask whether to allow it.
+
 ## Permissions
 
-When the orchestrator wants to run something outside its allowlist, or asks you a question, an overlay appears on its own — it is blocking the orchestrator, so it does not wait to be found. `y` allows once, `a` allows it for the session, `n` denies with a reason, and questions get an option picker. Dismissing one with `esc` leaves it pending; the status line keeps counting it, and `a` in the fleet overlay brings it back.
+When the orchestrator wants to run something outside its allowlist, or asks you a question, an overlay appears on its own — it is blocking the orchestrator, so it does not wait to be found. It never pops up under your fingers, though: while you are typing it waits for you to finish, so a keystroke meant for your message cannot answer it. `y` allows once, `a` allows it for the session, `n` denies with a reason, and questions get an option picker. Dismissing one with `esc` leaves it pending; the status line keeps counting it, and `a` in the fleet overlay brings it back.
 
 How often that happens is up to you:
 

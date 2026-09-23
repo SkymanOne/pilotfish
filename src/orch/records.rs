@@ -118,6 +118,9 @@ pub enum OrchestratorCommand {
     Model {
         name: String,
     },
+    /// Cut `events.jsonl` to its recent tail. Sent to the monitor rather than
+    /// done by the console, because the monitor is the file's only writer.
+    TrimTranscript,
     /// Ask the agent what it currently offers and rewrite
     /// `capabilities.json`. The console sends this instead of trusting a
     /// snapshot taken at handshake time.
@@ -591,22 +594,30 @@ impl Transcript {
     }
 }
 
-/// Keep a transcript file to its last `max_lines` lines, rewriting it in
-/// place. The one bound on a file that otherwise grows for the life of a
-/// session; the console notices the file shrank and replays what is left.
+/// Once a transcript file holds more than `over` lines, cut it to its last
+/// `keep`. The rewrite goes to a temporary file that is renamed over the
+/// original, so a reader never sees a half-written file, and the new inode
+/// is how a reader tailing by offset knows to start again.
 ///
 /// Best effort: an unreadable or unwritable file is left alone, because a
 /// transcript that cannot be trimmed is better than one that is lost.
-pub fn trim_events_file(events_path: &Path, max_lines: usize) -> bool {
+/// Returns whether the file was trimmed.
+pub fn trim_events_file(events_path: &Path, over: usize, keep: usize) -> bool {
     let Ok(raw) = std::fs::read_to_string(events_path) else {
         return false;
     };
     let lines: Vec<&str> = raw.split('\n').filter(|l| !l.is_empty()).collect();
-    if lines.len() <= max_lines {
+    if lines.len() <= over {
         return false;
     }
-    let trimmed = format!("{}\n", lines[lines.len() - max_lines..].join("\n"));
-    std::fs::write(events_path, trimmed).is_ok()
+    let keep = keep.min(lines.len());
+    let trimmed = format!("{}\n", lines[lines.len() - keep..].join("\n"));
+    let tmp = events_path.with_extension("jsonl.trim");
+    if std::fs::write(&tmp, trimmed).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
+    }
+    std::fs::rename(&tmp, events_path).is_ok()
 }
 
 /// Pending requests ordered by arrival, newest last — what `state.json` holds.
@@ -793,10 +804,13 @@ mod tests {
         let body: String = (0..10).map(|i| format!("{}\n", line(i))).collect();
         std::fs::write(&path, &body).unwrap();
 
-        assert!(!trim_events_file(&path, 10), "exactly at the cap is fine");
+        assert!(
+            !trim_events_file(&path, 10, 4),
+            "exactly at the cap is fine"
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
 
-        assert!(trim_events_file(&path, 4));
+        assert!(trim_events_file(&path, 8, 4));
         let kept = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = kept.lines().collect();
         assert_eq!(lines.len(), 4, "{kept}");
@@ -805,7 +819,9 @@ mod tests {
         assert!(kept.ends_with('\n'), "still a well-framed JSONL file");
 
         // a file that is not there is not an error
-        assert!(!trim_events_file(&tmp.path().join("missing.jsonl"), 1));
+        assert!(!trim_events_file(&tmp.path().join("missing.jsonl"), 1, 1));
+        // and no temporary file is left behind
+        assert!(!tmp.path().join("events.jsonl.trim").exists());
     }
 
     #[test]

@@ -6,12 +6,15 @@
 //! this speaks the documented API directly: `POST /v1/systemone` with
 //! `{state, model, questions}`, answering `{answers: {id: …}}`.
 //!
-//! Code owns the workflow, which is what the model is for. The candidate
-//! models come from pi's own catalogue, the thinking levels are clamped to
-//! the ones the chosen model actually has, and an answer the model is not
-//! confident about falls back to the configured default rather than being
-//! acted on. Nothing here is required: with routing off, or no API key, the
-//! caller gets `None` and spawns exactly as it always did.
+//! Code owns the workflow, which is what the model is for. The candidates
+//! come from pi's own catalogue, narrowed to what the user allowed; each is
+//! named `provider:id`, because most ids are served by several providers
+//! and they do not behave alike (verified fact 4). The thinking level is
+//! clamped to the levels the model that will actually run has, a worktree is
+//! only dropped on a confident "read-only", and a model choice the judgment
+//! is not sure of falls back to the configured default. Nothing here is
+//! required: with routing off, or no API key, the caller gets `None` and
+//! spawns exactly as it always did.
 
 use std::path::Path;
 use std::time::Duration;
@@ -35,6 +38,16 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// [`THINKING_LEVELS`]: crate::fleet::run::THINKING_LEVELS
 const EFFORT_SCALE: [&str; 5] = ["off", "low", "medium", "high", "max"];
+
+/// The most options one Choice question takes (TypeSafe's documented limit).
+/// pi's catalogue can run to hundreds; past this, routing declines and says
+/// how to narrow it, rather than sending a question that cannot be asked.
+const MAX_CHOICES: usize = 255;
+
+/// A worktree is only dropped when the brief is this surely read-only. Being
+/// wrong the other way puts a worker's edits straight into the human's
+/// checkout, with no branch to diff or merge, so a coin flip keeps it.
+const READ_ONLY_BELOW: f64 = 0.1;
 
 /// The questions, as their own constants: a multi-line string literal inside
 /// `json!` is reindented by rustfmt, and the indent lands *in the prompt*.
@@ -85,29 +98,63 @@ pub struct Brief<'a> {
     /// What the orchestrator already has running, so concurrency can be
     /// judged rather than assumed.
     pub in_flight: &'a [RunState],
-    /// The models pi has configured. An empty catalogue means there is
-    /// nothing to choose between, and routing declines.
-    pub candidates: &'a [WorkerModel],
+    /// pi's whole catalogue; [`candidates`] narrows it to what routing may
+    /// choose between.
+    pub catalogue: &'a [WorkerModel],
+    /// The provider the spawn is pinned to — an explicit `--provider` or the
+    /// configured `[worker] provider`. Only that provider's models are
+    /// candidates, so a choice can never contradict it.
+    pub provider: Option<&'a str>,
+    /// The model that runs when routing does not pick one: the caller's
+    /// pinned model or the configured default. A thinking level is clamped to
+    /// *its* levels then, not to the unchosen model's.
+    pub fallback_model: Option<&'a str>,
 }
 
-/// The API key, from `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`.
-/// Neither set means routing is off, however the config reads.
+/// pi's catalogue narrowed to one provider, when one is pinned, and to an
+/// allowlist of `provider:id` or bare-id entries, when one is set. The one
+/// definition of "the models that matter here", shared by routing and by
+/// `fleet_status`.
 #[must_use]
-pub fn api_key() -> Option<String> {
-    api_key_from(
-        std::env::var(env_var("TYPESAFE_API_KEY")).ok().as_deref(),
-        std::env::var("TYPESAFE_API_KEY").ok().as_deref(),
-    )
+pub fn narrow(
+    catalogue: &[WorkerModel],
+    provider: Option<&str>,
+    allow: &[String],
+) -> Vec<WorkerModel> {
+    catalogue
+        .iter()
+        .filter(|m| provider.is_none_or(|p| m.provider == p))
+        .filter(|m| allow.is_empty() || allow.iter().any(|want| *want == m.key() || *want == m.id))
+        .cloned()
+        .collect()
 }
 
-/// [`api_key`] with both values injected, so tests never read the ambient
-/// environment.
-#[must_use]
-pub fn api_key_from(ours: Option<&str>, theirs: Option<&str>) -> Option<String> {
-    ours.or(theirs)
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(ToString::to_string)
+/// The models routing may choose between: the catalogue, narrowed to the
+/// `[routing] models` allowlist when one is set and to the pinned provider
+/// when there is one.
+///
+/// # Errors
+///
+/// A one-line reason when nothing is left to choose from, or too much to put
+/// in one question.
+pub fn candidates(brief: &Brief<'_>, config: &RoutingConfig) -> Result<Vec<WorkerModel>, String> {
+    let list = narrow(brief.catalogue, brief.provider, &config.models);
+    if list.is_empty() {
+        return Err(if brief.catalogue.is_empty() {
+            "no pi catalogue yet — it is written when a worker first starts".to_string()
+        } else {
+            "no model in pi's catalogue matches [routing] models and the pinned provider"
+                .to_string()
+        });
+    }
+    if list.len() > MAX_CHOICES {
+        return Err(format!(
+            "pi offers {} models here, more than one judgment can weigh ({MAX_CHOICES}) — \
+list the ones routing may choose under [routing] models, or pin a [worker] provider",
+            list.len()
+        ));
+    }
+    Ok(list)
 }
 
 /// The endpoint to call: `$PARL_TYPESAFE_URL`, else the config's, else the
@@ -137,17 +184,30 @@ pub async fn route(
         return None;
     }
     let key = key?;
-    if brief.candidates.is_empty() {
-        return None;
-    }
-    let body = request_body(brief, config);
-    let answers = post(&endpoint(config), key, &body).await?;
-    Some(decide(brief, config, &answers))
+    // a decline the user can act on is said, not swallowed: routing is on,
+    // and a spawn that quietly did not route would look like a broken one
+    let candidates = match candidates(brief, config) {
+        Ok(list) => list,
+        Err(reason) => {
+            return Some(Routing {
+                note: format!("not routed: {reason}"),
+                ..Routing::default()
+            });
+        }
+    };
+    let body = request_body(brief, &candidates, config);
+    let Some(answers) = post(&endpoint(config), key, &body).await else {
+        return Some(Routing {
+            note: "not routed: jev did not answer; kept the configured defaults".to_string(),
+            ..Routing::default()
+        });
+    };
+    Some(decide(brief, &candidates, config, &answers))
 }
 
 /// The request body: the state to judge against, and four questions that do
 /// not depend on one another, so they answer in one round trip.
-fn request_body(brief: &Brief<'_>, config: &RoutingConfig) -> Value {
+fn request_body(brief: &Brief<'_>, candidates: &[WorkerModel], config: &RoutingConfig) -> Value {
     let in_flight: Vec<Value> = brief
         .in_flight
         .iter()
@@ -159,16 +219,9 @@ fn request_body(brief: &Brief<'_>, config: &RoutingConfig) -> Value {
             })
         })
         .collect();
-    let criteria: serde_json::Map<String, Value> = brief
-        .candidates
+    let criteria: serde_json::Map<String, Value> = candidates
         .iter()
-        .map(|m| {
-            let label = m.name.clone().unwrap_or_else(|| m.id.clone());
-            (
-                m.id.clone(),
-                Value::String(format!("{label}, served by {}", m.provider)),
-            )
-        })
+        .map(|m| (m.key(), Value::String(describe(m))))
         .collect();
     json!({
         "model": config.model,
@@ -192,6 +245,29 @@ fn request_body(brief: &Brief<'_>, config: &RoutingConfig) -> Value {
             "parallel_safe": {"type": "noul", "instructions": PARALLEL_QUESTION},
         },
     })
+}
+
+/// One model as the judgment sees it: what it is, who serves it, how much it
+/// can hold and what it costs — the last being what "prefer the smallest
+/// model that can finish it well" is weighed against.
+fn describe(model: &WorkerModel) -> String {
+    let mut out = model.name.clone().unwrap_or_else(|| model.id.clone());
+    out.push_str(&format!(", served by {}", model.provider));
+    if let Some(window) = model.context_window {
+        out.push_str(&format!(", {}k context", window / 1000));
+    }
+    if let Some(cost) = model.cost {
+        out.push_str(&format!(
+            ", ${:.2} in / ${:.2} out per million tokens",
+            cost.input, cost.output
+        ));
+    }
+    if model.thinking_levels.is_empty() {
+        out.push_str(", no reasoning levels");
+    } else {
+        out.push_str(&format!(", reasoning {}", model.thinking_levels.join("/")));
+    }
+    out
 }
 
 /// One POST. Any failure — no network, a refused key, a body that does not
@@ -235,48 +311,65 @@ struct Answer {
 
 /// Turn the answers into a decision. This is where policy lives: the model
 /// supplies judgments, code decides what to do with them.
-fn decide(brief: &Brief<'_>, config: &RoutingConfig, answers: &Answers) -> Routing {
+fn decide(
+    brief: &Brief<'_>,
+    candidates: &[WorkerModel],
+    config: &RoutingConfig,
+    answers: &Answers,
+) -> Routing {
     let mut routing = Routing::default();
     let threshold = config.confidence_threshold();
 
     let model = answers.answers.get("model");
     let confidence = model.and_then(|a| a.confidence).unwrap_or(0.0);
     routing.confidence = confidence;
-    let chosen = model
+    let named = model
         .and_then(|a| a.choice.as_deref())
-        .and_then(|id| brief.candidates.iter().find(|m| m.id == id));
-    match (chosen, confidence >= threshold) {
+        .and_then(|key| candidates.iter().find(|m| m.key() == key));
+    let chosen = match (named, confidence >= threshold) {
         (Some(model), true) => {
             routing.model = Some(model.id.clone());
             routing.provider = (!model.provider.is_empty()).then(|| model.provider.clone());
-            routing.note = format!("jev chose {} ({confidence:.2})", model.id);
+            routing.note = format!("jev chose {} ({confidence:.2})", model.key());
+            Some(model)
         }
         (Some(model), false) => {
             routing.note = format!(
                 "jev leaned to {} but only at {confidence:.2} (threshold {threshold:.2}); \
-kept the configured default",
-                model.id
+kept the configured model",
+                model.key()
             );
+            None
         }
         (None, _) => {
-            routing.note = "jev named no model this fleet has; kept the configured default".into();
+            routing.note = "jev named no candidate; kept the configured model".into();
+            None
         }
+    };
+
+    // The effort Score is read on its own scale, then clamped to the levels
+    // of the model that will actually run — the chosen one, or the fallback
+    // when the choice was not taken. pi accepts a level its model lacks and
+    // then silently ignores it (verified fact 5), so a level that model does
+    // not have is not asked for at all.
+    let runs = chosen.or_else(|| {
+        let fallback = brief.fallback_model?;
+        brief.catalogue.iter().find(|m| {
+            (m.id == fallback || m.key() == fallback)
+                && brief.provider.is_none_or(|p| m.provider == p)
+        })
+    });
+    if let (Some(score), Some(runs)) = (answers.answers.get("effort").and_then(|a| a.score), runs) {
+        routing.thinking = clamp_effort(score, &runs.thinking_levels);
     }
 
-    // The effort Score is answered on its own scale, then clamped to the
-    // levels the chosen model actually has: pi accepts a level its model
-    // lacks and then silently ignores it (AGENTS.md, verified fact 5), so a
-    // level it cannot honour is worse than none at all.
-    if let Some(score) = answers.answers.get("effort").and_then(|a| a.score) {
-        let at = (score.round().max(0.0) as usize).min(EFFORT_SCALE.len() - 1);
-        routing.thinking = Some(EFFORT_SCALE[at].to_string());
-    }
-
+    // `true` only ever keeps what the spawn already has; `false` drops the
+    // worktree, and so needs a judgment that is sure of it
     routing.worktree = answers
         .answers
         .get("needs_worktree")
         .and_then(|a| a.noul)
-        .map(|p| p >= 0.5);
+        .map(|p| p >= READ_ONLY_BELOW);
     routing.parallel_safe = answers
         .answers
         .get("parallel_safe")
@@ -285,22 +378,64 @@ kept the configured default",
     routing
 }
 
+/// The level nearest the effort `score` among the ones a model has, or
+/// `None` when it has none to set. Ties go to the higher level: too little
+/// reasoning costs more than a little too much.
+fn clamp_effort(score: f64, levels: &[String]) -> Option<String> {
+    let order = |level: &str| {
+        crate::fleet::run::THINKING_LEVELS
+            .iter()
+            .position(|l| *l == level)
+    };
+    let at = (score.round().max(0.0) as usize).min(EFFORT_SCALE.len() - 1);
+    let want = order(EFFORT_SCALE[at])?;
+    levels
+        .iter()
+        .filter_map(|level| order(level).map(|i| (i, level)))
+        .min_by_key(|(i, _)| (i.abs_diff(want), std::cmp::Reverse(*i)))
+        .map(|(_, level)| level.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn candidates() -> Vec<WorkerModel> {
+    fn model(provider: &str, id: &str, levels: &[&str]) -> WorkerModel {
+        WorkerModel {
+            thinking_levels: levels.iter().map(ToString::to_string).collect(),
+            ..WorkerModel::new(provider, id)
+        }
+    }
+
+    /// Shaped like the real catalogue: the same id from two providers, one
+    /// model with a narrow level map and one with none.
+    fn catalogue() -> Vec<WorkerModel> {
         vec![
             WorkerModel {
-                provider: "anthropic".into(),
-                id: "claude-opus-5".into(),
                 name: Some("Opus 5".into()),
+                context_window: Some(1_000_000),
+                cost: Some(crate::fleet::run::ModelCost {
+                    input: 5.0,
+                    output: 25.0,
+                }),
+                ..model(
+                    "anthropic",
+                    "claude-opus-5",
+                    &["off", "high", "xhigh", "max"],
+                )
             },
-            WorkerModel {
-                provider: "openrouter".into(),
-                id: "deepseek-v4-flash".into(),
-                name: None,
-            },
+            model(
+                "claude-bridge",
+                "claude-opus-5",
+                &["off", "high", "xhigh", "max"],
+            ),
+            model("openrouter", "deepseek-v4-flash", &["off", "high", "xhigh"]),
+            model(
+                "opencode-go",
+                "deepseek-v4-flash",
+                &["off", "high", "xhigh"],
+            ),
+            model("anthropic", "claude-haiku-4-5", &[]),
         ]
     }
 
@@ -310,7 +445,9 @@ mod tests {
             brief: "add token refresh",
             repo_root: Path::new("/repo"),
             in_flight,
-            candidates: models,
+            catalogue: models,
+            provider: None,
+            fallback_model: None,
         }
     }
 
@@ -318,9 +455,15 @@ mod tests {
         serde_json::from_value(json).unwrap()
     }
 
+    fn decide_all(b: &Brief<'_>, json: Value) -> Routing {
+        let config = RoutingConfig::default();
+        let list = candidates(b, &config).unwrap();
+        decide(b, &list, &config, &answers(json))
+    }
+
     #[test]
-    fn the_request_offers_every_model_and_names_what_is_in_flight() {
-        let models = candidates();
+    fn every_candidate_is_named_by_provider_and_id() {
+        let models = catalogue();
         let mut running = RunState {
             name: "docs".into(),
             task_brief: "rewrite the readme\nsecond line".into(),
@@ -328,118 +471,193 @@ mod tests {
         };
         running.branch = Some("parl/docs-1234567".into());
         let in_flight = vec![running];
-        let body = request_body(&brief(&models, &in_flight), &RoutingConfig::default());
+        let b = brief(&models, &in_flight);
+        let list = candidates(&b, &RoutingConfig::default()).unwrap();
+        let body = request_body(&b, &list, &RoutingConfig::default());
 
-        let criteria = &body["questions"]["model"]["criteria"];
-        assert!(
-            criteria["claude-opus-5"]
-                .as_str()
-                .unwrap()
-                .contains("Opus 5")
-        );
-        assert!(
-            criteria["deepseek-v4-flash"]
-                .as_str()
-                .unwrap()
-                .contains("openrouter"),
-            "a model with no display name still names its provider: {criteria}"
-        );
-        assert_eq!(body["state"]["inFlight"][0]["name"], "docs");
+        let criteria = body["questions"]["model"]["criteria"].as_object().unwrap();
         assert_eq!(
-            body["state"]["inFlight"][0]["brief"], "rewrite the readme",
-            "one line of another worker's brief is context enough"
+            criteria.len(),
+            5,
+            "the same id from two providers stays two options: {criteria:?}"
         );
+        let opus = criteria["anthropic:claude-opus-5"].as_str().unwrap();
+        assert!(opus.contains("Opus 5"), "{opus}");
+        assert!(opus.contains("1000k context"), "{opus}");
+        assert!(
+            opus.contains("$5.00 in / $25.00 out"),
+            "cost is what it weighs: {opus}"
+        );
+        assert!(
+            criteria["anthropic:claude-haiku-4-5"]
+                .as_str()
+                .unwrap()
+                .contains("no reasoning levels")
+        );
+        assert_eq!(body["state"]["inFlight"][0]["brief"], "rewrite the readme");
         assert_eq!(body["model"], "jev-latest");
-        // the four questions are independent, so they ride in one request
-        let questions = body["questions"].as_object().unwrap();
-        assert_eq!(questions.len(), 4, "{questions:?}");
+        assert_eq!(body["questions"].as_object().unwrap().len(), 4);
     }
 
     #[test]
-    fn a_confident_choice_is_taken_with_its_provider() {
-        let models = candidates();
-        let decision = decide(
-            &brief(&models, &[]),
-            &RoutingConfig::default(),
-            &answers(json!({"answers": {
-                "model": {"type": "choice", "choice": "claude-opus-5", "confidence": 0.9},
-                "effort": {"type": "score", "score": 3.0},
-                "needs_worktree": {"type": "noul", "noul": 0.95},
-                "parallel_safe": {"type": "noul", "noul": 0.1},
-            }})),
+    fn candidates_follow_the_allowlist_and_the_pinned_provider() {
+        let models = catalogue();
+        let config = RoutingConfig {
+            models: vec!["deepseek-v4-flash".into(), "anthropic:claude-opus-5".into()],
+            ..RoutingConfig::default()
+        };
+        let keys = |list: Vec<WorkerModel>| list.iter().map(WorkerModel::key).collect::<Vec<_>>();
+        assert_eq!(
+            keys(candidates(&brief(&models, &[]), &config).unwrap()),
+            vec![
+                "anthropic:claude-opus-5",
+                "openrouter:deepseek-v4-flash",
+                "opencode-go:deepseek-v4-flash"
+            ],
+            "a bare id admits every provider, provider:id admits one"
         );
-        assert_eq!(decision.model.as_deref(), Some("claude-opus-5"));
-        assert_eq!(decision.provider.as_deref(), Some("anthropic"));
-        assert_eq!(decision.thinking.as_deref(), Some("high"));
+        let pinned = Brief {
+            provider: Some("opencode-go"),
+            ..brief(&models, &[])
+        };
+        assert_eq!(
+            keys(candidates(&pinned, &config).unwrap()),
+            vec!["opencode-go:deepseek-v4-flash"],
+            "a pinned provider is never contradicted"
+        );
+    }
+
+    #[test]
+    fn too_many_candidates_or_none_is_a_reason_not_a_request() {
+        let huge: Vec<WorkerModel> = (0..300)
+            .map(|i| model("openrouter", &format!("m-{i}"), &[]))
+            .collect();
+        let err = candidates(&brief(&huge, &[]), &RoutingConfig::default()).unwrap_err();
+        assert!(err.contains("300 models"), "{err}");
+        assert!(
+            err.contains("[routing] models"),
+            "says how to narrow it: {err}"
+        );
+        let err = candidates(&brief(&[], &[]), &RoutingConfig::default()).unwrap_err();
+        assert!(err.contains("no pi catalogue"), "{err}");
+    }
+
+    #[test]
+    fn a_confident_choice_brings_its_own_provider() {
+        let models = catalogue();
+        let decision = decide_all(
+            &brief(&models, &[]),
+            json!({"answers": {
+                "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.9},
+                "needs_worktree": {"noul": 0.95},
+                "parallel_safe": {"noul": 0.1},
+            }}),
+        );
+        assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(
+            decision.provider.as_deref(),
+            Some("opencode-go"),
+            "not whichever provider happens to come first"
+        );
         assert_eq!(decision.worktree, Some(true));
         assert_eq!(decision.parallel_safe, Some(false));
-        assert!(decision.note.contains("claude-opus-5"), "{}", decision.note);
     }
 
     #[test]
-    fn an_unconfident_choice_keeps_the_configured_default() {
-        let models = candidates();
-        let decision = decide(
+    fn an_unconfident_or_unknown_choice_keeps_the_configured_model() {
+        let models = catalogue();
+        let decision = decide_all(
             &brief(&models, &[]),
-            &RoutingConfig::default(),
-            &answers(json!({"answers": {
-                "model": {"type": "choice", "choice": "claude-opus-5", "confidence": 0.2},
-                "effort": {"type": "score", "score": 0.0},
-            }})),
+            json!({"answers": {"model": {"choice": "anthropic:claude-opus-5", "confidence": 0.2}}}),
         );
-        assert_eq!(decision.model, None, "the fallback is the configured model");
-        assert_eq!(decision.thinking.as_deref(), Some("off"));
+        assert_eq!(decision.model, None);
         assert!(decision.note.contains("threshold"), "{}", decision.note);
-        // an unanswered noul decides nothing either way
-        assert_eq!(decision.worktree, None);
+        let decision = decide_all(
+            &brief(&models, &[]),
+            json!({"answers": {"model": {"choice": "claude-opus-5", "confidence": 1.0}}}),
+        );
+        assert_eq!(decision.model, None, "a bare id is not a candidate's name");
     }
 
     #[test]
-    fn a_model_this_fleet_does_not_have_is_refused() {
-        let models = candidates();
+    fn effort_is_clamped_to_the_levels_of_the_model_that_runs() {
+        let models = catalogue();
+        let b = brief(&models, &[]);
+        let effort = |choice: &str, score: f64| {
+            decide_all(
+                &b,
+                json!({"answers": {
+                    "model": {"choice": choice, "confidence": 0.9},
+                    "effort": {"score": score},
+                }}),
+            )
+            .thinking
+        };
+        // deepseek-v4-flash has off/high/xhigh only
+        let flash = "openrouter:deepseek-v4-flash";
+        assert_eq!(effort(flash, 0.0).as_deref(), Some("off"));
+        assert_eq!(
+            effort(flash, 1.0).as_deref(),
+            Some("high"),
+            "low is not there"
+        );
+        assert_eq!(effort(flash, 2.0).as_deref(), Some("high"), "nor medium");
+        assert_eq!(effort(flash, 4.0).as_deref(), Some("xhigh"), "nor max");
+        // a model with no levels gets none asked for
+        assert_eq!(effort("anthropic:claude-haiku-4-5", 3.0), None);
+    }
+
+    #[test]
+    fn an_untaken_choice_clamps_effort_to_the_fallback_model_instead() {
+        let models = catalogue();
+        let b = Brief {
+            fallback_model: Some("deepseek-v4-flash"),
+            provider: Some("opencode-go"),
+            ..brief(&models, &[])
+        };
+        let list = candidates(&b, &RoutingConfig::default()).unwrap();
         let decision = decide(
-            &brief(&models, &[]),
+            &b,
+            &list,
             &RoutingConfig::default(),
             &answers(json!({"answers": {
-                "model": {"type": "choice", "choice": "gpt-9", "confidence": 1.0},
+                "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.1},
+                "effort": {"score": 4.0},
             }})),
         );
         assert_eq!(decision.model, None);
-        assert!(decision.note.contains("no model this fleet has"));
+        assert_eq!(
+            decision.thinking.as_deref(),
+            Some("xhigh"),
+            "the fallback's levels, not the scale's `max`"
+        );
+        // and with no model known to run, no level is guessed at
+        let unknown = Brief {
+            fallback_model: None,
+            ..b
+        };
+        let decision = decide(
+            &unknown,
+            &list,
+            &RoutingConfig::default(),
+            &answers(json!({"answers": {"effort": {"score": 4.0}}})),
+        );
+        assert_eq!(decision.thinking, None);
     }
 
     #[test]
-    fn the_effort_score_maps_onto_the_scale_and_cannot_run_off_it() {
-        let models = candidates();
-        for (score, level) in [
-            (-4.0, "off"),
-            (0.0, "off"),
-            (1.4, "low"),
-            (2.0, "medium"),
-            (4.0, "max"),
-            (99.0, "max"),
-        ] {
-            let decision = decide(
+    fn a_worktree_is_only_dropped_on_a_confident_read_only() {
+        let models = catalogue();
+        let worktree = |p: f64| {
+            decide_all(
                 &brief(&models, &[]),
-                &RoutingConfig::default(),
-                &answers(json!({"answers": {"effort": {"type": "score", "score": score}}})),
-            );
-            assert_eq!(decision.thinking.as_deref(), Some(level), "score {score}");
-        }
-    }
-
-    #[test]
-    fn a_key_comes_from_either_variable_and_blank_is_no_key() {
-        assert_eq!(
-            api_key_from(Some("ours"), Some("theirs")).as_deref(),
-            Some("ours")
-        );
-        assert_eq!(
-            api_key_from(None, Some("theirs")).as_deref(),
-            Some("theirs")
-        );
-        assert_eq!(api_key_from(Some("  "), None), None);
-        assert_eq!(api_key_from(None, None), None);
+                json!({"answers": {"needs_worktree": {"noul": p}}}),
+            )
+            .worktree
+        };
+        assert_eq!(worktree(0.45), Some(true), "a coin flip keeps the worktree");
+        assert_eq!(worktree(0.2), Some(true));
+        assert_eq!(worktree(0.05), Some(false));
     }
 
     /// A one-request HTTP stub: reads the request, hands the body back over
@@ -492,13 +710,13 @@ mod tests {
     #[tokio::test]
     async fn a_round_trip_sends_the_key_and_reads_the_decision_back() {
         let (url, rx) = stub(json!({"answers": {
-            "model": {"type": "choice", "choice": "deepseek-v4-flash", "confidence": 0.82},
-            "effort": {"type": "score", "score": 1.0},
+            "model": {"type": "choice", "choice": "opencode-go:deepseek-v4-flash", "confidence": 0.82},
+            "effort": {"type": "score", "score": 3.0},
             "needs_worktree": {"type": "noul", "noul": 0.9},
             "parallel_safe": {"type": "noul", "noul": 0.8},
         }}))
         .await;
-        let models = candidates();
+        let models = catalogue();
         let config = RoutingConfig {
             enabled: true,
             endpoint: Some(url),
@@ -508,8 +726,8 @@ mod tests {
             .await
             .expect("a decision");
         assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(decision.provider.as_deref(), Some("openrouter"));
-        assert_eq!(decision.thinking.as_deref(), Some("low"));
+        assert_eq!(decision.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(decision.thinking.as_deref(), Some("high"));
         assert_eq!(decision.worktree, Some(true));
 
         let (head, body) = rx.await.unwrap();
@@ -520,28 +738,32 @@ mod tests {
         );
         let sent: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(sent["state"]["task"]["name"], "add-auth");
-        assert!(sent["questions"]["model"]["criteria"]["claude-opus-5"].is_string());
+        assert!(sent["questions"]["model"]["criteria"]["anthropic:claude-opus-5"].is_string());
     }
 
     #[tokio::test]
-    async fn an_endpoint_that_is_not_there_is_no_decision_rather_than_an_error() {
-        let models = candidates();
+    async fn a_judgment_that_cannot_be_had_says_so_rather_than_failing() {
+        let models = catalogue();
         let config = RoutingConfig {
             enabled: true,
             // nothing listening: a spawn must not fail because a judgment could not be had
             endpoint: Some("http://127.0.0.1:1/v1/systemone".to_string()),
             ..RoutingConfig::default()
         };
+        let decision = route(&brief(&models, &[]), &config, Some("sk-test"))
+            .await
+            .expect("routing was on, so the outcome is said");
+        assert_eq!(decision.model, None);
         assert!(
-            route(&brief(&models, &[]), &config, Some("sk-test"))
-                .await
-                .is_none()
+            decision.note.contains("did not answer"),
+            "{}",
+            decision.note
         );
     }
 
     #[tokio::test]
-    async fn routing_declines_when_it_is_off_unkeyed_or_has_no_catalogue() {
-        let models = candidates();
+    async fn routing_is_silent_when_off_or_unkeyed_and_says_why_it_declined() {
+        let models = catalogue();
         let on = RoutingConfig {
             enabled: true,
             ..RoutingConfig::default()
@@ -552,13 +774,12 @@ mod tests {
                 .is_none(),
             "off by default"
         );
+        assert!(route(&brief(&models, &[]), &on, None).await.is_none());
+        let declined = route(&brief(&[], &[]), &on, Some("k")).await.unwrap();
         assert!(
-            route(&brief(&models, &[]), &on, None).await.is_none(),
-            "no key, no judgment"
-        );
-        assert!(
-            route(&brief(&[], &[]), &on, Some("k")).await.is_none(),
-            "nothing to choose between"
+            declined.note.starts_with("not routed:"),
+            "{}",
+            declined.note
         );
     }
 }

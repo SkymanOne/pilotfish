@@ -23,6 +23,7 @@ use crate::orch::records::{
     Capabilities, OrchestratorCommand, OrchestratorState, PermissionDecisionRecord,
 };
 use crate::paths::{FleetPaths, SessionKey};
+use crate::secrets::Secret;
 use crate::tui::completions::{
     AgentCommandOption, CompletionState, CompletionTarget, apply_suggestion, completions_for,
 };
@@ -39,6 +40,14 @@ use crate::util::now_ms;
 
 /// How long a toolbar note stays up.
 const FLASH_MS: i64 = 6_000;
+
+/// A permission prompt does not raise itself until the keyboard has been
+/// quiet this long, so it never opens under a word being typed.
+const TYPING_QUIET_MS: i64 = 800;
+
+/// Keys that reach a self-raised permission prompt this soon after it
+/// appeared are dropped: they were aimed at the composer, not at the prompt.
+const RAISE_GRACE_MS: i64 = 600;
 
 /// How old the capability view may get before the console asks the agent
 /// again. Short enough that a skill installed mid-session shows up on the
@@ -69,6 +78,46 @@ pub enum Overlay {
     Search(SearchState),
     /// The selected session's full brief, scrollable.
     Brief(BriefState),
+    /// Model routing: on or off, and the TypeSafe key it uses.
+    Routing(RoutingPanel),
+}
+
+/// The `/routing` panel: whether routing is on, where its key lives, what it
+/// has to choose between — and, while one is being entered, the new key,
+/// held as a [`Secret`] so not even a debug print shows it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RoutingPanel {
+    pub status: Option<RoutingStatus>,
+    /// A key being typed or pasted, drawn as one dot per character.
+    pub entering: Option<Secret>,
+    /// `d` was pressed: the next `y` deletes the stored key.
+    pub confirm_delete: bool,
+}
+
+/// What the panel reports, gathered off the UI thread because reading the
+/// credential store can block on a system dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutingStatus {
+    pub enabled: bool,
+    pub key: KeyState,
+    /// What routing would choose between, or why it would decline.
+    pub candidates: Result<usize, String>,
+}
+
+/// Where the key in force comes from — never the key itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyState {
+    None,
+    /// An environment variable, which wins over the store.
+    Env {
+        var: String,
+        masked: String,
+    },
+    Store {
+        masked: String,
+    },
+    /// No credential store here, or it refused: the reason, for the panel.
+    Unavailable(String),
 }
 
 /// The full-brief viewer's own state (`b` in normal mode).
@@ -236,8 +285,8 @@ pub enum Effect {
     /// completions show what is installed now rather than what was
     /// installed when the session started.
     RefreshCapabilities,
-    /// Cut the orchestrator's transcript file down to its recent tail. The
-    /// console notices the file shrank on its next poll and replays it.
+    /// Ask the monitor to cut the orchestrator's transcript down to its
+    /// recent tail. The console replays the shorter file on its next poll.
     TrimTranscript,
     /// The same question, asked of a running worker: pi's catalogue is
     /// fleet-wide, so any live worker can answer for the installation.
@@ -255,6 +304,15 @@ pub enum Effect {
         request_id: String,
         decision: PermissionDecisionRecord,
     },
+    /// Find out what the routing panel reports: the key's source, the
+    /// config's switch, the candidate count.
+    LoadRoutingStatus,
+    /// Put a TypeSafe key in the operating system's credential store.
+    SaveTypesafeKey(Secret),
+    /// Remove the stored TypeSafe key.
+    DeleteTypesafeKey,
+    /// Switch `[routing] enabled` in `~/.parl/config.toml`.
+    SetRouting(bool),
     /// Stop the orchestrator for good (`/shutdown`).
     StopOrchestrator,
     /// Stop one named session's orchestrator (`/shutdown <key>`); its
@@ -377,6 +435,11 @@ pub struct Console {
     /// Show every line of an old turn's reasoning and tool output, rather
     /// than folding each to a summary row (`ctrl-o`, `/verbose`).
     verbose: bool,
+    /// When the last key went down, so a permission prompt can wait for the
+    /// keyboard to go quiet before it raises itself.
+    last_key_at: i64,
+    /// When a permission prompt last raised itself, for its grace window.
+    raised_at: Option<i64>,
     /// Answers gathered so far for a multi-question `AskUserQuestion`.
     permission_answers: HashMap<String, String>,
     prefs: Prefs,
@@ -428,6 +491,8 @@ impl Console {
             scroll_base: 0,
             raised_permissions: std::collections::HashSet::new(),
             verbose: false,
+            last_key_at: 0,
+            raised_at: None,
             search: None,
             permission_answers: HashMap::new(),
             prefs: Prefs::default(),
@@ -490,6 +555,15 @@ impl Console {
         if self.overlay.is_some() {
             return;
         }
+        // Never under someone's fingers: a prompt that opened mid-word would
+        // read the next `a` as allow-always. While the composer holds text or
+        // a key went down just now, the approval waits — the status line
+        // counts it — and it rises on the first quiet poll after.
+        let typing = !self.composer.input.is_empty()
+            || now_ms().saturating_sub(self.last_key_at) < TYPING_QUIET_MS;
+        if typing {
+            return;
+        }
         let Some(request) = self.orch.pending_requests.first() else {
             return;
         };
@@ -497,6 +571,14 @@ impl Console {
             return;
         }
         self.open_permission_overlay();
+        self.raised_at = Some(now_ms());
+    }
+
+    /// Whether a key reaching a prompt that raised itself landed too soon
+    /// after it appeared to have been meant for it.
+    fn within_raise_grace(&self) -> bool {
+        self.raised_at
+            .is_some_and(|at| now_ms().saturating_sub(at) < RAISE_GRACE_MS)
     }
 
     /// Note a worker's diff stat for its dashboard row, when the runtime has
@@ -525,9 +607,13 @@ impl Console {
     /// index goes with it — those indices meant the old content.
     pub fn reset_orchestrator_transcript(&mut self) {
         self.orch_transcript = Transcript::new();
-        self.scroll = None;
-        self.scroll_base = 0;
-        self.search = None;
+        // only the open view's anchors meant the old content; a worker being
+        // read keeps its scroll and its search
+        if matches!(self.selected_target(), SessionTarget::Orchestrator(_)) {
+            self.scroll = None;
+            self.scroll_base = 0;
+            self.search = None;
+        }
     }
 
     /// Fold one orchestrator record into the transcript.
@@ -683,6 +769,30 @@ impl Console {
             SessionTarget::Orchestrator(_) => &self.orch_transcript,
             SessionTarget::Worker { run_id } => self.worker_transcripts.entry(run_id).or_default(),
         }
+    }
+
+    /// The flash to show under the transcript. `None` when the same words are
+    /// already the last line on screen: a notice is both a transcript line and
+    /// a flash, and showing both is the same sentence twice. When the reader
+    /// has scrolled away, or has a worker open while the notice went to the
+    /// orchestrator, the flash is the only place it can be seen.
+    #[must_use]
+    pub fn chrome_flash(&self) -> Option<&Flash> {
+        let flash = self.flash.as_ref()?;
+        if self.scroll.is_some() {
+            return Some(flash);
+        }
+        let last = match self.selected_target() {
+            SessionTarget::Orchestrator(_) => self.orch_transcript.blocks().last(),
+            SessionTarget::Worker { run_id } => self
+                .worker_transcripts
+                .get(&run_id)
+                .and_then(|t| t.blocks().last()),
+        };
+        if last.is_some_and(|block| block.text == flash.text) {
+            return None;
+        }
+        Some(flash)
     }
 
     /// The session scroll offset: `None` follows the tail.
@@ -874,6 +984,7 @@ impl Console {
 
     /// Turn a key press into view-model changes plus effects to carry out.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        self.last_key_at = now_ms();
         // The palette and the search box are text fields, so they read keys
         // the way the composer does. Every other overlay is a list, and reads
         // single letters as its own commands.
@@ -884,6 +995,7 @@ impl Console {
         let typed = match &self.overlay {
             None | Some(Overlay::Palette(_) | Overlay::Search(_)) => true,
             Some(Overlay::Permission(state)) => state.denying || state.custom,
+            Some(Overlay::Routing(panel)) => panel.entering.is_some(),
             Some(_) => false,
         };
         let action = if typed {
@@ -892,6 +1004,57 @@ impl Console {
             map_overlay_key(key)
         };
         self.handle_action(action)
+    }
+
+    /// A bracketed paste: the whole pasted text in one piece, rather than as
+    /// keystrokes whose first newline would send the rest half-typed. It goes
+    /// wherever typing is going — the composer keeps its newlines, one-line
+    /// fields drop them, and a key field keeps it masked.
+    pub fn paste(&mut self, text: &str) {
+        self.last_key_at = now_ms();
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let one_line = || text.split('\n').collect::<Vec<_>>().join(" ");
+        match &mut self.overlay {
+            None => {
+                let cursor = self
+                    .composer
+                    .cursor
+                    .min(self.composer.input.chars().count());
+                let byte = char_to_byte(&self.composer.input, cursor);
+                let clean: String = text
+                    .chars()
+                    .filter(|c| *c == '\n' || !c.is_control())
+                    .collect();
+                self.composer.input.insert_str(byte, &clean);
+                self.composer.cursor += clean.chars().count();
+                self.composer.dismissed = false;
+                self.history_at = None;
+                self.recompute_completion();
+            }
+            Some(Overlay::Routing(panel)) => {
+                if let Some(key) = panel.entering.as_mut() {
+                    key.push_str(&text);
+                }
+            }
+            Some(Overlay::Palette(state)) => {
+                state.query.push_str(&one_line());
+                state.refilter();
+            }
+            Some(Overlay::Search(state)) => {
+                state.query.push_str(&one_line());
+                let query = state.query.clone();
+                let matches = self.search_matches(&query);
+                if let Some(Overlay::Search(state)) = &mut self.overlay {
+                    state.current = matches.first().copied();
+                    state.matches = matches;
+                }
+            }
+            Some(Overlay::Permission(state)) if state.denying || state.custom => {
+                state.input.push_str(&one_line());
+            }
+            // the rest are lists: a paste means nothing there
+            Some(_) => {}
+        }
     }
 
     /// Apply an already-mapped action. The runtime routes mouse wheel events
@@ -1092,6 +1255,10 @@ impl Console {
                     self.history_at = None;
                     return Vec::new();
                 }
+                if self.search.take().is_some() {
+                    self.scroll = None;
+                    return Vec::new();
+                }
                 self.interrupt_turn()
             }
             KeyAction::OpenFleet => {
@@ -1103,7 +1270,7 @@ impl Console {
             // the same key opens the box and then walks the matches, the way
             // a shell's reverse search does
             KeyAction::Search => {
-                if self.search.is_some() {
+                if self.search.as_ref().is_some_and(|s| !s.matches.is_empty()) {
                     self.step_match(1);
                 } else {
                     self.overlay = Some(Overlay::Search(SearchState::default()));
@@ -1144,6 +1311,11 @@ impl Console {
     /// Esc with an empty composer: stop whatever the selected session is
     /// doing. Nothing running means nothing to stop, and saying so beats a
     /// key that silently does nothing.
+    ///
+    /// Only ever the orchestrator's turn, which claude resumes from. A worker
+    /// is never aborted by `esc`: aborting escalates on repeat to SIGKILL, and
+    /// a key people press reflexively to close things must not be one that
+    /// destroys work. `/stop` and `s` in the fleet are the deliberate ways.
     fn interrupt_turn(&mut self) -> Vec<Effect> {
         match self.selected_target() {
             SessionTarget::Orchestrator(_) => {
@@ -1154,7 +1326,10 @@ impl Console {
                     Vec::new()
                 }
             }
-            SessionTarget::Worker { .. } => self.stop_selected(),
+            SessionTarget::Worker { .. } => {
+                self.toast("· esc never stops a worker — /stop does", false);
+                Vec::new()
+            }
         }
     }
 
@@ -1284,10 +1459,7 @@ impl Console {
     /// One [`Effect::RefreshCapabilities`] when the capability view has aged
     /// past [`CAPABILITIES_MAX_AGE`], nothing when it is fresh.
     fn refresh_capabilities_if_stale(&self) -> Vec<Effect> {
-        let mut effects = Vec::new();
-        if self.caps.is_stale(CAPABILITIES_MAX_AGE) {
-            effects.push(Effect::RefreshCapabilities);
-        }
+        let mut effects = self.refresh_orchestrator_capabilities_if_stale();
         // pi's catalogue is a property of the installation, so any running
         // worker can answer for it; with none running there is nobody to ask
         // and the last answer stands.
@@ -1298,6 +1470,16 @@ impl Console {
             effects.push(Effect::RefreshWorkerCapabilities { run_id });
         }
         effects
+    }
+
+    /// Just claude's half of [`Self::refresh_capabilities_if_stale`], for a
+    /// question only claude can answer — whether it offers a command.
+    pub(super) fn refresh_orchestrator_capabilities_if_stale(&self) -> Vec<Effect> {
+        if self.caps.is_stale(CAPABILITIES_MAX_AGE) {
+            vec![Effect::RefreshCapabilities]
+        } else {
+            Vec::new()
+        }
     }
 
     /// A worker whose monitor can still answer an RPC, if there is one.
@@ -1405,6 +1587,61 @@ impl Console {
         }
     }
 
+    /// Gather what the routing panel reports and hand it to the panel if it
+    /// is still open. The key's source comes off a blocking thread, since the
+    /// credential store can put up a dialog; the key itself never leaves it
+    /// except as its masked tail.
+    async fn reload_routing_status(&mut self) {
+        let key = match tokio::task::spawn_blocking(crate::secrets::typesafe_key).await {
+            Ok(Ok(Some((key, crate::secrets::KeySource::Env(var))))) => KeyState::Env {
+                var,
+                masked: key.masked(),
+            },
+            Ok(Ok(Some((key, crate::secrets::KeySource::Store)))) => KeyState::Store {
+                masked: key.masked(),
+            },
+            Ok(Ok(None)) => KeyState::None,
+            Ok(Err(err)) => KeyState::Unavailable(err.to_string()),
+            Err(err) => KeyState::Unavailable(err.to_string()),
+        };
+        let user_dir = crate::paths::user_dir();
+        let (enabled, candidates) = match crate::paths::load_user_config(user_dir.as_deref()) {
+            Ok(config) => {
+                let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
+                    .map(|cache| cache.available_models)
+                    .unwrap_or_default();
+                let root = self.fleet.root().to_path_buf();
+                let brief = crate::route::Brief {
+                    name: "",
+                    brief: "",
+                    repo_root: &root,
+                    in_flight: &[],
+                    catalogue: &catalogue,
+                    provider: config.worker_provider(None),
+                    fallback_model: config.worker_model(None),
+                };
+                (
+                    config.routing.enabled,
+                    crate::route::candidates(&brief, &config.routing).map(|list| list.len()),
+                )
+            }
+            Err(err) => (false, Err(format!("{err:#}"))),
+        };
+        self.set_routing_status(RoutingStatus {
+            enabled,
+            key,
+            candidates,
+        });
+    }
+
+    /// Hand the routing panel what it reports, if it is still open — it may
+    /// have been closed while the store was being read.
+    pub fn set_routing_status(&mut self, status: RoutingStatus) {
+        if let Some(Overlay::Routing(panel)) = &mut self.overlay {
+            panel.status = Some(status);
+        }
+    }
+
     async fn execute(&mut self, effect: Effect) {
         let repo_root = self
             .fleet
@@ -1419,26 +1656,54 @@ impl Console {
                 Effect::Interrupt => {
                     self.append_orchestrator(&OrchestratorCommand::Interrupt)?;
                 }
-                Effect::RefreshCapabilities => {
-                    self.append_orchestrator(&OrchestratorCommand::RefreshCapabilities)?;
+                Effect::LoadRoutingStatus => self.reload_routing_status().await,
+                Effect::SaveTypesafeKey(key) => {
+                    use crate::secrets::SecretStore as _;
+                    // off the UI thread: the store can block on a system dialog
+                    let saved =
+                        tokio::task::spawn_blocking(move || crate::secrets::Keychain.set(&key))
+                            .await?;
+                    match saved {
+                        Ok(()) => self.toast(
+                            format!("· key saved in {}", crate::secrets::store_name()),
+                            false,
+                        ),
+                        Err(err) => self.toast(format!("! {err}"), true),
+                    }
+                    self.reload_routing_status().await;
                 }
-                Effect::TrimTranscript => {
-                    let path = self.fleet.orchestrator_events(&self.orch_key);
-                    let trimmed = crate::orch::records::trim_events_file(
-                        &path,
-                        crate::orch::client::MAX_RESTORED_LINES,
-                    );
-                    self.notice(
-                        if trimmed {
-                            format!(
-                                "· transcript cut to its last {} records",
-                                crate::orch::client::MAX_RESTORED_LINES
-                            )
+                Effect::DeleteTypesafeKey => {
+                    use crate::secrets::SecretStore as _;
+                    let deleted =
+                        tokio::task::spawn_blocking(|| crate::secrets::Keychain.delete()).await?;
+                    match deleted {
+                        Ok(()) => self.toast("· stored key deleted", false),
+                        Err(err) => self.toast(format!("! {err}"), true),
+                    }
+                    self.reload_routing_status().await;
+                }
+                Effect::SetRouting(on) => {
+                    let Some(dir) = crate::paths::user_dir() else {
+                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                    };
+                    crate::paths::set_routing_enabled(&dir, on)?;
+                    self.toast(
+                        if on {
+                            "· routing on — spawns without a model are routed"
                         } else {
-                            "· transcript is already short enough".to_string()
+                            "· routing off — spawns use the configured model"
                         },
                         false,
                     );
+                    self.reload_routing_status().await;
+                }
+                Effect::RefreshCapabilities => {
+                    self.append_orchestrator(&OrchestratorCommand::RefreshCapabilities)?;
+                }
+                // the monitor is the transcript's only writer, so it trims too;
+                // the console replays the shorter file when it sees the new inode
+                Effect::TrimTranscript => {
+                    self.append_orchestrator(&OrchestratorCommand::TrimTranscript)?;
                 }
                 Effect::RefreshWorkerCapabilities { run_id } => {
                     append_envelope(

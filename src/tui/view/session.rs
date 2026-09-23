@@ -51,7 +51,7 @@ pub fn draw(
         .clamp(1, composer::MAX_LINES) as u16;
     let composer_height = composer_lines + 2; // the borders
     let now = now_ms();
-    let flash = u16::from(console.flash().is_some());
+    let flash = u16::from(console.chrome_flash().is_some());
     let activity = u16::from(console.activity_line(now).is_some());
     let [transcript_area, chrome_area] = Layout::vertical([
         Constraint::Min(TRANSCRIPT_MIN_ROWS),
@@ -151,7 +151,8 @@ fn draw_transcript(frame: &mut Frame, area: Rect, console: &mut Console, pal: &P
         current: s.current,
     });
     let verbose = console.verbose();
-    let lines = {
+    let orchestrator = !console.selected_target().is_worker();
+    let (mut lines, fresh) = {
         let transcript = console.open_transcript();
         let partial = transcript.partial();
         let fold = if verbose {
@@ -159,7 +160,14 @@ fn draw_transcript(frame: &mut Frame, area: Rect, console: &mut Console, pal: &P
         } else {
             Some(transcript.blocks().len().saturating_sub(RECENT_BLOCKS))
         };
-        render_rows(
+        // nothing said yet: only the monitor's own notices are on screen
+        let fresh = orchestrator
+            && partial.is_none()
+            && transcript
+                .blocks()
+                .iter()
+                .all(|b| b.kind == BlockKind::System);
+        let lines = render_rows(
             transcript.blocks(),
             partial.as_deref(),
             scroll,
@@ -170,9 +178,62 @@ fn draw_transcript(frame: &mut Frame, area: Rect, console: &mut Console, pal: &P
                 fold_before: fold,
             },
             pal,
-        )
+        );
+        (lines, fresh)
     };
+    if fresh {
+        lines.retain(|line| {
+            !line
+                .spans
+                .iter()
+                .any(|s| s.content.contains("no events captured yet"))
+        });
+        lines.extend(welcome(width, pal));
+    }
+    // A conversation reads upwards from where you type: while it is shorter
+    // than the pane, it sits on the composer rather than at the top of the
+    // screen with a gap between the last reply and the next prompt.
+    if scroll.is_none() && lines.len() < height {
+        let pad = height - lines.len();
+        lines.splice(0..0, std::iter::repeat_n(Line::default(), pad));
+    }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// What an empty conversation shows: what to do, and where the rest is.
+fn welcome(width: usize, pal: &Palette) -> Vec<Line<'static>> {
+    let intro = "Tell the orchestrator what you want done. It plans the work, briefs a \
+worker for each step, and reports back as they finish.";
+    let mut lines = vec![Line::default()];
+    lines.extend(
+        markdown::wrap_spans(
+            &[Span::styled(intro.to_string(), pal.accent())],
+            width.max(2),
+        )
+        .into_iter()
+        .map(Line::from),
+    );
+    lines.push(Line::default());
+    lines.extend(
+        markdown::wrap_spans(&welcome_keys(pal), width.max(2))
+            .into_iter()
+            .map(Line::from),
+    );
+    lines
+}
+
+/// The four ways into the rest of the console, as one wrappable row.
+fn welcome_keys(pal: &Palette) -> Vec<Span<'static>> {
+    vec![
+        Span::styled("  ctrl+f ".to_string(), pal.heading()),
+        Span::styled("the fleet   ".to_string(), pal.dim()),
+        Span::styled("ctrl+k ".to_string(), pal.heading()),
+        Span::styled("commands   ".to_string(), pal.dim()),
+        Span::styled("/routing ".to_string(), pal.heading()),
+        Span::styled("model routing   ".to_string(), pal.dim()),
+        Span::styled("/help ".to_string(), pal.heading()),
+        Span::styled("keys".to_string(), pal.dim()),
+    ]
 }
 
 /// The visible rows for the transcript pane: units rendered on demand, the

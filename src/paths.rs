@@ -380,6 +380,11 @@ pub struct RoutingConfig {
     pub confidence_threshold: Option<f64>,
     /// A different endpoint, for a proxy or a test stub.
     pub endpoint: Option<String>,
+    /// The models routing may choose between, as `provider:id` or a bare
+    /// `id` (any provider). Empty means every model pi offers under the
+    /// configured `[worker] provider` — and pi can offer hundreds, more than
+    /// one judgment can weigh, which is what this list is for.
+    pub models: Vec<String>,
 }
 
 impl Default for RoutingConfig {
@@ -389,16 +394,17 @@ impl Default for RoutingConfig {
             model: "jev-latest".to_string(),
             confidence_threshold: None,
             endpoint: None,
+            models: Vec::new(),
         }
     }
 }
 
 impl RoutingConfig {
-    /// The confidence a judgment needs before it is acted on.
+    /// The confidence a judgment needs before it is acted on. Validated at
+    /// load, so what is here is already a probability.
     #[must_use]
     pub fn confidence_threshold(&self) -> f64 {
         self.confidence_threshold
-            .filter(|t| (0.0..=1.0).contains(t))
             .unwrap_or(DEFAULT_ROUTING_CONFIDENCE)
     }
 }
@@ -496,8 +502,58 @@ pub fn load_user_config(user_dir: Option<&Path>) -> anyhow::Result<UserConfig> {
     if raw.trim().is_empty() {
         return Ok(UserConfig::default());
     }
-    toml::from_str(&raw)
-        .map_err(|err| anyhow::anyhow!("parsing user config {}: {err}", path.display()))
+    let config: UserConfig = toml::from_str(&raw)
+        .map_err(|err| anyhow::anyhow!("parsing user config {}: {err}", path.display()))?;
+    // a value that parses but cannot mean what it says is as malformed as
+    // one that does not parse: `80` meant as a percentage must not quietly
+    // become the default
+    if let Some(threshold) = config.routing.confidence_threshold
+        && !(0.0..=1.0).contains(&threshold)
+    {
+        anyhow::bail!(
+            "user config {}: [routing] confidence_threshold = {threshold} is outside 0..1 \
+(it is a probability: 0.6, not 60)",
+            path.display()
+        );
+    }
+    Ok(config)
+}
+
+/// Switch `[routing] enabled` in `<user_dir>/config.toml`, creating the file
+/// and the section when they are missing.
+///
+/// Edits the document rather than re-serialising it, so a file the user
+/// wrote by hand keeps its comments, its order and every key this code does
+/// not know about. A file that does not parse is refused rather than
+/// overwritten — silently replacing a config someone wrote is worse than
+/// failing.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read, does not parse, or cannot
+/// be written.
+pub fn set_routing_enabled(user_dir: &Path, enabled: bool) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let path = user_dir.join("config.toml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => return Err(err).context(format!("reading user config {}", path.display())),
+    };
+    let mut doc: toml_edit::DocumentMut = raw
+        .parse()
+        .map_err(|err| anyhow::anyhow!("parsing user config {}: {err}", path.display()))?;
+    let routing = doc
+        .entry("routing")
+        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
+    let Some(table) = routing.as_table_like_mut() else {
+        anyhow::bail!("user config {}: `routing` is not a table", path.display());
+    };
+    table.insert("enabled", toml_edit::value(enabled));
+    std::fs::create_dir_all(user_dir)
+        .with_context(|| format!("creating {}", user_dir.display()))?;
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing user config {}", path.display()))
 }
 
 /// Append `entry` to `<root>/.gitignore` unless a line already covers it.
@@ -791,6 +847,69 @@ mod tests {
             .to_string();
         assert!(err.contains("config.toml"), "names the file: {err}");
         assert!(err.contains("line 1"), "names the parse problem: {err}");
+    }
+
+    #[test]
+    fn a_confidence_threshold_outside_zero_to_one_is_refused_not_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[routing]\nconfidence_threshold = 80\n",
+        )
+        .unwrap();
+        let err = load_user_config(Some(tmp.path())).unwrap_err().to_string();
+        assert!(err.contains("confidence_threshold"), "{err}");
+        assert!(err.contains("config.toml"), "names the file: {err}");
+
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[routing]\nconfidence_threshold = 0.8\nmodels = [\"anthropic:claude-opus-5\"]\n",
+        )
+        .unwrap();
+        let config = load_user_config(Some(tmp.path())).unwrap();
+        assert!((config.routing.confidence_threshold() - 0.8).abs() < 1e-9);
+        assert_eq!(config.routing.models, vec!["anthropic:claude-opus-5"]);
+    }
+
+    #[test]
+    fn switching_routing_keeps_the_rest_of_a_hand_written_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my settings\n[worker]\nmodel = \"claude-opus-5\" # the good one\n\n[routing]\nmodel = \"jev-latest\"\n",
+        )
+        .unwrap();
+
+        set_routing_enabled(tmp.path(), true).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my settings"), "{raw}");
+        assert!(raw.contains("# the good one"), "{raw}");
+        let config = load_user_config(Some(tmp.path())).unwrap();
+        assert!(config.routing.enabled);
+        assert_eq!(config.routing.model, "jev-latest");
+        assert_eq!(config.worker.model.as_deref(), Some("claude-opus-5"));
+
+        set_routing_enabled(tmp.path(), false).unwrap();
+        assert!(!load_user_config(Some(tmp.path())).unwrap().routing.enabled);
+    }
+
+    #[test]
+    fn switching_routing_creates_the_file_and_refuses_a_broken_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("fresh");
+        set_routing_enabled(&home, true).unwrap();
+        assert!(load_user_config(Some(&home)).unwrap().routing.enabled);
+
+        let broken = tmp.path().join("broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("config.toml"), "[routing\nenabled = ").unwrap();
+        assert!(set_routing_enabled(&broken, true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(broken.join("config.toml")).unwrap(),
+            "[routing\nenabled = ",
+            "a config that does not parse is left exactly as it was"
+        );
     }
 
     #[test]

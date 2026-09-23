@@ -113,6 +113,13 @@ pub(crate) async fn spawn_core_with_dirs(
         .root()
         .to_path_buf();
     let session = super::acting_session(&fleet_dir);
+    // Routing goes first. It can wait on the network, and between counting
+    // the live workers and creating the new one nothing slow may happen, or
+    // two parallel spawns both pass a cap only one of them fits under.
+    // What it picks is what gets validated below.
+    let mut request = request;
+    let in_flight = super::live_runs_for_session(&fleet_dir, session);
+    let routing = route_request(&mut request, &config, &fleet_dir, &in_flight).await;
     let cap = config.max_workers_per_session();
     let live = super::live_runs_for_session(&fleet_dir, session);
     if live.len() >= cap {
@@ -143,10 +150,6 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
             )],
         ));
     }
-    // Routing happens before validation, because what it picks is what has
-    // to be valid; an explicit `--model` is never second-guessed.
-    let mut request = request;
-    let routing = route_request(&mut request, &config, &fleet_dir, &live).await;
     // The resolved model is the one the monitor will actually run, so a bad
     // name from the config is refused here too — before a worktree exists.
     let model = config.worker_model(request.model.as_deref());
@@ -225,27 +228,54 @@ async fn route_request(
     if request.model.is_some() && request.thinking.is_some() {
         return None;
     }
-    let candidates = run::read_pi_cache(fleet_dir)
+    // The key is only looked up once routing is on: reading the credential
+    // store can put up a system dialog, and a spawn that was never going to
+    // route has no business causing one.
+    if !routing_config.enabled {
+        return None;
+    }
+    let catalogue = run::read_pi_cache(fleet_dir)
         .map(|cache| cache.available_models)
         .unwrap_or_default();
     let repo_root = fleet_dir.parent().unwrap_or(fleet_dir).to_path_buf();
+    let provider = config.worker_provider(request.provider.as_deref());
+    let fallback_model = config.worker_model(request.model.as_deref());
     let brief = crate::route::Brief {
         name: &request.name,
         brief: &request.brief,
         repo_root: &repo_root,
         in_flight,
-        candidates: &candidates,
+        catalogue: &catalogue,
+        provider,
+        fallback_model,
     };
-    let routing =
-        crate::route::route(&brief, &routing_config, crate::route::api_key().as_deref()).await?;
+    // routing is on, so a missing key is said rather than silently skipped
+    let key = match tokio::task::spawn_blocking(crate::secrets::typesafe_key).await {
+        Ok(Ok(Some((key, _)))) => key,
+        Ok(Ok(None)) => {
+            return Some(crate::route::Routing {
+                note: "not routed: no TypeSafe key — set one with /routing in the console, \
+or $PARL_TYPESAFE_API_KEY"
+                    .to_string(),
+                ..crate::route::Routing::default()
+            });
+        }
+        Ok(Err(err)) => {
+            return Some(crate::route::Routing {
+                note: format!("not routed: {err}"),
+                ..crate::route::Routing::default()
+            });
+        }
+        Err(_) => return None,
+    };
+    let routing = crate::route::route(&brief, &routing_config, Some(key.expose())).await?;
+    // the candidates were already narrowed to any pinned provider, so the
+    // routed model's own provider can never contradict it
     if request.model.is_none()
         && let Some(model) = &routing.model
     {
         request.model = Some(model.clone());
-        request.provider = request
-            .provider
-            .clone()
-            .or_else(|| routing.provider.clone());
+        request.provider = routing.provider.clone().or(request.provider.clone());
     }
     if request.thinking.is_none()
         && let Some(thinking) = &routing.thinking

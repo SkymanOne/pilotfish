@@ -28,7 +28,8 @@ use crate::cli::ExitCode;
 use crate::fleet::envelope::{Decoded, Envelope};
 use crate::fleet::run::{
     PendingDialog, PendingQuestion, PiCache, RunState, RunStatus, WorkerActivity, WorkerCommand,
-    WorkerModel, load_state, record_steering, record_tool_activity, save_state, write_pi_cache,
+    WorkerModel, load_state, read_pi_cache, record_steering, record_tool_activity, save_state,
+    write_pi_cache,
 };
 use crate::paths::{FleetPaths, env_var};
 use crate::util::{append_json_line, append_text, now_iso, now_ms, read_new_lines};
@@ -239,7 +240,6 @@ struct Shared {
     /// The fleet-level pi catalogue, persisted to `pi-cache.json` instead of
     /// `run.json`: models and commands describe the pi installation, not the
     /// run, and every run used to carry a byte-identical copy.
-    pi_cache: PiCache,
     dialogs: Vec<DialogRecord>,
     stderr_tail: VecDeque<String>,
     /// Resolved when the post-settle `get_last_assistant_text` arrives, so
@@ -323,7 +323,6 @@ impl Monitor {
                 shutdown_started: false,
                 abort_requests: 0,
                 available_models: Vec::new(),
-                pi_cache: PiCache::default(),
                 dialogs: Vec::new(),
                 stderr_tail: VecDeque::new(),
                 last_text_done: None,
@@ -593,12 +592,7 @@ impl Monitor {
                     .collect();
                 // Commands describe the pi installation, not the run: they go
                 // to the fleet-level cache, never into run.json.
-                let cache = {
-                    let mut sh = self.shared();
-                    sh.pi_cache.commands = commands;
-                    sh.pi_cache.clone()
-                };
-                self.persist_pi_cache(cache);
+                self.persist_pi_cache(|cache| cache.commands = commands);
             }
             ("get_available_models", true) => {
                 let models = response.available_models();
@@ -609,18 +603,20 @@ impl Monitor {
                             provider: m.provider.clone().unwrap_or_default(),
                             id,
                             name: m.name.clone(),
+                            thinking_levels: m.thinking_levels(),
+                            context_window: m.context_window,
+                            cost: m.cost,
                         })
                     })
                     .collect();
                 // Same fleet-level treatment as commands; the `ModelRef` list
-                // still stays on the monitor for provider resolution.
-                let cache = {
-                    let mut sh = self.shared();
-                    sh.available_models = models;
-                    sh.pi_cache.available_models = worker_models;
-                    sh.pi_cache.clone()
-                };
-                self.persist_pi_cache(cache);
+                // still stays on the monitor for provider resolution. An empty
+                // answer is pi being briefly unaskable (the open list_models
+                // issue), not pi having no models, so it replaces nothing.
+                self.shared().available_models = models;
+                if !worker_models.is_empty() {
+                    self.persist_pi_cache(|cache| cache.available_models = worker_models);
+                }
             }
             ("get_last_assistant_text", true) => {
                 if let Some(text) = response.text() {
@@ -1169,11 +1165,19 @@ impl Monitor {
         });
     }
 
-    /// Persist the fleet-level pi catalogue to `pi-cache.json`. Best-effort:
-    /// the cache is derived data rewritten at every boot, so a failed write
-    /// degrades to an empty catalogue for the console — never an error path
-    /// for the run. The failure is logged to `pi.log` for diagnosis.
-    fn persist_pi_cache(&self, cache: PiCache) {
+    /// Update one field of the fleet-level pi catalogue in `pi-cache.json`.
+    ///
+    /// Read, change the one field that just arrived, write — never a
+    /// whole-file write from this monitor's memory. Several monitors boot
+    /// side by side, and each learns commands and models in two separate
+    /// replies; writing a whole cache after the first reply once wiped the
+    /// models list another spawn was about to route from.
+    ///
+    /// Best-effort: a failed write degrades to an older catalogue, never an
+    /// error path for the run, and is logged to `pi.log` for diagnosis.
+    fn persist_pi_cache(&self, update: impl FnOnce(&mut PiCache)) {
+        let mut cache = read_pi_cache(&self.fleet_dir).unwrap_or_default();
+        update(&mut cache);
         if let Err(err) = write_pi_cache(&self.fleet_dir, &cache) {
             let _ = append_text(
                 &self.pi_log_path,
@@ -1409,16 +1413,19 @@ mod tests {
                 id: Some("m-1".into()),
                 name: None,
                 provider: Some("vendorco".into()),
+                ..ModelRef::default()
             },
             ModelRef {
                 id: Some("m-1".into()),
                 name: None,
                 provider: Some("vendorco".into()),
+                ..ModelRef::default()
             },
             ModelRef {
                 id: Some("m-2".into()),
                 name: None,
                 provider: Some("other".into()),
+                ..ModelRef::default()
             },
         ];
         assert_eq!(
@@ -1431,11 +1438,13 @@ mod tests {
                 id: Some("m".into()),
                 name: None,
                 provider: Some("a".into()),
+                ..ModelRef::default()
             },
             ModelRef {
                 id: Some("m".into()),
                 name: None,
                 provider: Some("b".into()),
+                ..ModelRef::default()
             },
         ];
         let err = resolve_provider(&ambiguous, "m").unwrap_err();

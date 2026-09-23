@@ -367,9 +367,11 @@ mod tests {
         console.set_orchestrator_state(orch.clone());
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
         let status = row_text(&buf, buf.area.height - 1);
-        assert!(status.contains("starting…"), "no model yet: {status}");
-        assert!(status.contains("$0.000"), "{status}");
-        assert!(status.contains("0 turns"), "{status}");
+        // before the first message claude has said nothing: a session waiting
+        // to start reads as ready, and spend and turns wait until there are any
+        assert!(status.contains("ready"), "no session yet: {status}");
+        assert!(!status.contains("$0.000"), "{status}");
+        assert!(!status.contains("0 turns"), "{status}");
         assert!(status.contains("1 approval pending"), "{status}");
     }
 
@@ -397,6 +399,36 @@ mod tests {
         assert_visible(&buf, "confirm");
         assert_visible(&buf, "Abort it and remove");
         assert_visible(&buf, "y confirm");
+    }
+
+    #[test]
+    fn the_routing_panel_shows_where_the_key_lives_and_never_the_key() {
+        let (mut console, runs, orch) = fleet();
+        console.submit("/routing");
+        let key = "ts_live_0123456789abcdef";
+        console.set_routing_status(crate::tui::app::RoutingStatus {
+            enabled: true,
+            key: crate::tui::app::KeyState::Store {
+                masked: crate::secrets::Secret::new(key).masked(),
+            },
+            candidates: Ok(12),
+        });
+        for c in "s".chars().chain(key.chars()) {
+            console.handle_key(ch(c));
+        }
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
+        assert_visible(&buf, "model routing");
+        assert_visible(&buf, "••••cdef, in the");
+        assert_visible(&buf, "between 12 models");
+        assert_visible(&buf, &"•".repeat(key.len()));
+        let drawn = (0..buf.area.height)
+            .map(|y| row_text(&buf, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !drawn.contains("0123456789"),
+            "the key is never drawn: {drawn}"
+        );
     }
 
     #[test]

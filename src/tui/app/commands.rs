@@ -564,6 +564,10 @@ impl Console {
             Some("/mouse") => return self.toggle_mouse(),
             Some("/clear") => return self.clear_transcript(),
             Some("/verbose") => return self.toggle_verbose(),
+            Some("/routing") => {
+                self.overlay = Some(Overlay::Routing(super::RoutingPanel::default()));
+                return vec![Effect::LoadRoutingStatus];
+            }
             Some("/trim") => return vec![Effect::TrimTranscript],
             _ => {}
         }
@@ -895,9 +899,14 @@ impl Console {
                 }
             };
         }
-        if text.starts_with('/') {
-            // neither ours nor one claude offers: almost certainly a typo,
-            // and sending it would put a question about a command in the log
+        // Neither ours nor one claude offers: almost certainly a typo, and
+        // sending it would put a question about a command in the log. Only
+        // judged against a list claude actually gave — before the first
+        // answer arrives (a monitor that has not been asked yet, or one from
+        // an older build) the list is empty, and every agent command, `/compact`
+        // included, must still get through.
+        let asked = !self.caps.fetched_at.is_empty() && !self.caps.commands.is_empty();
+        if text.starts_with('/') && asked {
             let known = self
                 .caps
                 .commands
@@ -911,6 +920,9 @@ impl Console {
                     .map(|c| format!("/{}", c.name))
                     .collect();
                 let near = suggest_command(head, &available);
+                // the list may simply be out of date — a skill installed since
+                // it was fetched — so ask again; the next try is judged fresh
+                let refresh = self.refresh_orchestrator_capabilities_if_stale();
                 self.notice(
                     format!(
                         "! unknown command {head}{}",
@@ -918,7 +930,7 @@ impl Console {
                     ),
                     true,
                 );
-                return Vec::new();
+                return refresh;
             }
         }
         self.orch_transcript.push_sent(text);

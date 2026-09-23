@@ -27,7 +27,7 @@ pub fn inner_width(area: Rect) -> usize {
 
 /// Draw the chrome under the transcript: flash note, activity line, composer.
 pub fn draw(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette, now: i64) {
-    let flash = console.flash();
+    let flash = console.chrome_flash();
     let activity = console.activity_line(now);
     let mut parts: Vec<Constraint> = Vec::new();
     if flash.is_some() {
@@ -139,12 +139,18 @@ pub fn draw_popup(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // one row for each suggestion plus the hint line
+    // one row for each suggestion plus the hint line; when they outnumber
+    // the rows, the window slides so the highlighted one is always drawn
     let rows = inner.height.saturating_sub(1) as usize;
-    for (i, item) in completion.items.iter().enumerate() {
-        if i >= rows {
-            break;
-        }
+    let first = selected.saturating_sub(rows.saturating_sub(1));
+    for (row, (i, item)) in completion
+        .items
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(rows)
+        .enumerate()
+    {
         let is_selected = i == selected;
         let marker = if is_selected { "▸ " } else { "  " };
         let label_style = pal.suggestion(item.kind);
@@ -167,12 +173,17 @@ pub fn draw_popup(
         }
         frame.render_widget(
             ratatui::widgets::Paragraph::new(Line::from(spans)),
-            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+            Rect::new(inner.x, inner.y + row as u16, inner.width, 1),
         );
     }
+    let hidden = completion.items.len().saturating_sub(rows);
     frame.render_widget(
         ratatui::widgets::Paragraph::new(Line::styled(
-            "tab accept · esc dismiss".to_string(),
+            if hidden > 0 {
+                format!("tab accept · esc dismiss · {hidden} more, up/down")
+            } else {
+                "tab accept · esc dismiss".to_string()
+            },
             pal.dim(),
         )),
         Rect::new(

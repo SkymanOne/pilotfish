@@ -1137,6 +1137,9 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
         provider: "fakeprovider".into(),
         id: "glm-5.3".into(),
         name: Some("GLM 5.3".into()),
+        thinking_levels: Vec::new(),
+        context_window: None,
+        cost: None,
     }];
     state.pending_dialog = Some(parl::fleet::run::PendingDialog {
         id: "u1".into(),
@@ -1164,6 +1167,9 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
             provider: "fakeprovider".into(),
             id: "glm-5.3".into(),
             name: Some("GLM 5.3".into()),
+            thinking_levels: Vec::new(),
+            context_window: None,
+            cost: None,
         }],
         commands: Vec::new(),
         ..parl::fleet::run::PiCache::default()

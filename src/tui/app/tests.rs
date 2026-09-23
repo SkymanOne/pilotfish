@@ -75,6 +75,12 @@ fn type_text(c: &mut Console, text: &str) {
     }
 }
 
+/// Let a self-raised permission prompt's grace window pass, as it would for
+/// a human reading it before answering.
+fn read_the_prompt(c: &mut Console) {
+    c.raised_at = None;
+}
+
 /// Open the fleet overlay, where single letters are commands.
 fn open_fleet(c: &mut Console) {
     c.handle_key(ctrl('f'));
@@ -273,15 +279,61 @@ fn a_modified_enter_inserts_a_newline_instead_of_sending() {
     }
 }
 
+/// What claude says it offers, answered just now.
+fn claude_offers(c: &mut Console, names: &[&str]) {
+    c.set_capabilities(Capabilities {
+        fetched_at: crate::util::now_iso(),
+        commands: names
+            .iter()
+            .map(|name| AgentCommand {
+                name: (*name).into(),
+                description: None,
+                argument_hint: None,
+                aliases: None,
+            })
+            .collect(),
+        ..Capabilities::default()
+    });
+}
+
 #[test]
 fn an_unknown_command_is_caught_not_sent() {
     let mut c = setup_with_worker();
-    c.submit("/pemissions auto");
+    claude_offers(&mut c, &["compact", "usage"]);
+    let effects = c.submit("/pemissions auto");
+    assert!(effects.is_empty(), "nothing reaches claude: {effects:?}");
     assert!(
         c.flash()
             .unwrap()
             .text
             .contains("unknown command /pemissions")
+    );
+}
+
+#[test]
+fn an_unknown_command_against_a_stale_list_asks_claude_again() {
+    let mut c = setup_with_worker();
+    c.set_capabilities(Capabilities {
+        fetched_at: "2020-01-01T00:00:00.000Z".into(),
+        commands: vec![AgentCommand {
+            name: "usage".into(),
+            description: None,
+            argument_hint: None,
+            aliases: None,
+        }],
+        ..Capabilities::default()
+    });
+    let effects = c.submit("/review");
+    assert_eq!(effects, vec![Effect::RefreshCapabilities]);
+}
+
+#[test]
+fn before_claude_has_listed_anything_every_agent_command_gets_through() {
+    // a fresh console, or a monitor from an older build: no list to judge by
+    let mut c = setup_with_worker();
+    assert_eq!(
+        c.submit("/compact"),
+        vec![Effect::SendToOrchestrator("/compact".to_string())]
     );
 }
 
@@ -493,6 +545,9 @@ fn m_opens_the_palette_over_models_only() {
         provider: "anthropic".into(),
         id: "claude-opus-5".into(),
         name: Some("Opus".into()),
+        thinking_levels: Vec::new(),
+        context_window: None,
+        cost: None,
     }];
     c.set_runs(vec![entry]);
     select_row(&mut c, 1);
@@ -998,6 +1053,7 @@ fn the_permission_overlay_allows_denies_and_answers() {
     c.set_orchestrator_state(state);
     // the prompt blocks the orchestrator, so it raises itself
     assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+    read_the_prompt(&mut c);
     let effects = c.handle_key(ch('y'));
     assert!(matches!(
         &effects[0],
@@ -1006,6 +1062,7 @@ fn the_permission_overlay_allows_denies_and_answers() {
             ..
         }
     ));
+    c.last_key_at = 0;
     // deny with a reason
     let state = OrchestratorState {
         pending_requests: vec![PermissionRequest {
@@ -1019,6 +1076,7 @@ fn the_permission_overlay_allows_denies_and_answers() {
         ..OrchestratorState::default()
     };
     c.set_orchestrator_state(state);
+    read_the_prompt(&mut c);
     c.handle_key(ch('n')); // start the deny reason
     c.handle_key(ch('n'));
     c.handle_key(ch('o'));
@@ -1030,6 +1088,222 @@ fn the_permission_overlay_allows_denies_and_answers() {
             ..
         } if message == "no"
     ));
+}
+
+fn bash_request(id: &str) -> OrchestratorState {
+    OrchestratorState {
+        pending_requests: vec![PermissionRequest {
+            request_id: id.into(),
+            request: CanUseToolRequest {
+                tool_name: "Bash".into(),
+                input: serde_json::json!({"command": "git push --force"}),
+                tool_use_id: "t1".into(),
+                permission_suggestions: vec![serde_json::json!({"type": "addRules"})],
+                ..CanUseToolRequest::default()
+            },
+            received_at: crate::util::now_iso(),
+        }],
+        ..OrchestratorState::default()
+    }
+}
+
+#[test]
+fn a_permission_prompt_never_opens_under_a_word_being_typed() {
+    let mut c = setup_with_worker();
+    type_text(&mut c, "can you also");
+    c.set_orchestrator_state(bash_request("req_9"));
+    assert!(
+        c.overlay().is_none(),
+        "not while the composer holds text: the next `a` would allow-always"
+    );
+    // the letters keep going to the composer
+    type_text(&mut c, " a");
+    assert_eq!(c.composer().input, "can you also a");
+
+    // once the line is sent and the keyboard has gone quiet, it rises
+    c.handle_key(enter());
+    c.last_key_at = 0;
+    c.set_orchestrator_state(bash_request("req_9"));
+    assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+}
+
+#[test]
+fn a_key_that_lands_just_as_a_prompt_raises_itself_does_not_answer_it() {
+    let mut c = setup_with_worker();
+    c.set_orchestrator_state(bash_request("req_10"));
+    assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+    // inside the grace window: dropped, and the prompt stays up unanswered
+    let effects = c.handle_key(ch('a'));
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+    // after it, the prompt answers as ever
+    read_the_prompt(&mut c);
+    let effects = c.handle_key(ch('y'));
+    assert!(matches!(&effects[0], Effect::ResolvePermission { .. }));
+}
+
+#[test]
+fn a_cancelled_or_fruitless_search_leaves_ctrl_r_able_to_open_the_box() {
+    let mut c = setup_with_worker();
+    c.orch_transcript.push_notice("the quick brown fox");
+    // cancelled
+    c.handle_key(ctrl('r'));
+    c.handle_key(esc());
+    assert!(c.search().is_none());
+    c.handle_key(ctrl('r'));
+    assert!(matches!(c.overlay(), Some(Overlay::Search(_))), "reopens");
+    // a typo that matched nothing
+    type_text(&mut c, "zzz");
+    c.handle_key(enter());
+    assert!(c.search().is_none(), "nothing to step through is not kept");
+    c.handle_key(ctrl('r'));
+    assert!(matches!(c.overlay(), Some(Overlay::Search(_))), "reopens");
+}
+
+#[test]
+fn esc_clears_a_search_highlight_before_it_stops_anything() {
+    let mut c = setup_with_worker();
+    c.orch_transcript.push_notice("the quick brown fox");
+    c.orch_transcript.push_sent("hello"); // a turn is running
+    c.handle_key(ctrl('r'));
+    type_text(&mut c, "quick");
+    c.handle_key(enter());
+    assert!(c.search().is_some());
+    assert!(c.handle_key(esc()).is_empty(), "first the highlight goes");
+    assert!(c.search().is_none());
+    assert_eq!(c.handle_key(esc()), vec![Effect::Interrupt]);
+}
+
+#[test]
+fn an_orchestrator_trim_leaves_a_worker_view_alone() {
+    let mut c = setup_with_worker();
+    select_row(&mut c, 1);
+    c.scroll = Some(3);
+    c.reset_orchestrator_transcript();
+    assert_eq!(c.scroll(), Some(3));
+}
+
+const KEY: &str = "ts_live_0123456789abcdef";
+
+fn open_routing(c: &mut Console, enabled: bool, key: KeyState) {
+    assert_eq!(c.submit("/routing"), vec![Effect::LoadRoutingStatus]);
+    // what the runtime would hand back after reading the store and the config
+    if let Some(Overlay::Routing(panel)) = &mut c.overlay {
+        panel.status = Some(RoutingStatus {
+            enabled,
+            key,
+            candidates: Ok(3),
+        });
+    }
+}
+
+#[test]
+fn a_key_typed_into_the_routing_panel_is_saved_and_never_shown() {
+    let mut c = setup_with_worker();
+    open_routing(&mut c, false, KeyState::None);
+    c.handle_key(ch('s'));
+    // every letter is part of the key while it is being entered — even the
+    // ones the panel would otherwise read as commands
+    type_text(&mut c, KEY);
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("still on the panel");
+    };
+    assert_eq!(panel.entering.as_ref().unwrap().len(), KEY.len());
+    let effects = c.handle_key(enter());
+    assert_eq!(effects, vec![Effect::SaveTypesafeKey(Secret::new(KEY))]);
+    let printed = format!("{effects:?}");
+    assert!(
+        !printed.contains("0123456789"),
+        "not even a debug print of the effect holds the key: {printed}"
+    );
+    assert!(
+        c.composer().input.is_empty(),
+        "the key never touched the composer"
+    );
+    assert!(
+        !c.orch_transcript
+            .blocks()
+            .iter()
+            .any(|b| b.text.contains("ts_live")),
+        "nor the transcript"
+    );
+}
+
+#[test]
+fn a_key_can_be_pasted_and_entering_can_be_cancelled() {
+    let mut c = setup_with_worker();
+    open_routing(&mut c, true, KeyState::None);
+    c.handle_key(ch('s'));
+    c.paste(&format!("{KEY}\n"));
+    assert_eq!(
+        c.handle_key(enter()),
+        vec![Effect::SaveTypesafeKey(Secret::new(KEY))],
+        "the paste's trailing newline is not part of the key"
+    );
+    c.handle_key(ch('s'));
+    type_text(&mut c, "half");
+    assert!(
+        c.handle_key(esc()).is_empty(),
+        "esc cancels, saving nothing"
+    );
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("esc leaves the panel open, the entry gone");
+    };
+    assert!(panel.entering.is_none());
+}
+
+#[test]
+fn the_routing_panel_switches_routing_and_deletes_only_a_stored_key() {
+    let mut c = setup_with_worker();
+    open_routing(&mut c, false, KeyState::None);
+    assert_eq!(c.handle_key(ch('r')), vec![Effect::SetRouting(true)]);
+    // nothing stored: `d` does nothing
+    c.handle_key(ch('d'));
+    assert!(c.handle_key(ch('y')).is_empty());
+
+    open_routing(
+        &mut c,
+        true,
+        KeyState::Store {
+            masked: "••••cdef".into(),
+        },
+    );
+    assert_eq!(c.handle_key(ch('r')), vec![Effect::SetRouting(false)]);
+    c.handle_key(ch('d'));
+    assert_eq!(c.handle_key(ch('y')), vec![Effect::DeleteTypesafeKey]);
+    // and any other key keeps it
+    c.handle_key(ch('d'));
+    assert!(c.handle_key(ch('n')).is_empty());
+}
+
+#[test]
+fn a_multi_line_paste_into_the_composer_is_one_message_not_several() {
+    let mut c = setup_with_worker();
+    c.paste("first line\r\nsecond line\n");
+    assert_eq!(
+        c.composer().input,
+        "first line\nsecond line\n",
+        "nothing was sent at the first newline"
+    );
+    assert_eq!(
+        c.handle_key(enter()),
+        vec![Effect::SendToOrchestrator(
+            "first line\nsecond line".to_string()
+        )]
+    );
+}
+
+#[test]
+fn esc_never_aborts_a_worker() {
+    let mut c = setup_with_worker();
+    select_row(&mut c, 1);
+    for _ in 0..3 {
+        assert!(
+            c.handle_key(esc()).is_empty(),
+            "reflexive esc presses must not escalate to SIGKILL"
+        );
+    }
+    assert!(c.flash().is_some_and(|f| f.text.contains("/stop")));
 }
 
 #[test]
@@ -1057,6 +1331,7 @@ fn an_ask_user_question_is_answered_from_its_options_or_in_your_own_words() {
     c.set_orchestrator_state(state);
     // a blocked orchestrator raises its own prompt
     assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+    read_the_prompt(&mut c);
     // the first option is highlighted; down moves, enter answers
     c.handle_key(key(KeyCode::Down));
     let effects = c.handle_key(enter());
@@ -1075,7 +1350,9 @@ fn an_ask_user_question_is_answered_from_its_options_or_in_your_own_words() {
         )],
         ..OrchestratorState::default()
     };
+    c.last_key_at = 0; // the keyboard has been quiet since the last answer
     c.set_orchestrator_state(state);
+    read_the_prompt(&mut c);
     c.handle_key(key(KeyCode::Down)); // onto "something else"
     c.handle_key(enter()); // start typing
     c.handle_key(ch('s'));

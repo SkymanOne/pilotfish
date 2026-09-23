@@ -15,7 +15,7 @@ use crate::orch::protocol::is_ask_user_question;
 use crate::tui::app::{
     BriefState, ConfirmState, Overlay, PaletteState, PermissionOverlay, SearchState, questions_of,
 };
-use crate::tui::keys::help_lines;
+use crate::tui::keys::help_sections;
 use crate::tui::theme::{OverlayRole, Palette};
 use crate::tui::transcript::tool_args_text;
 use crate::tui::view::Feeds;
@@ -37,15 +37,18 @@ pub fn draw(
         Overlay::Palette(state) => palette(frame, area, state, pal),
         Overlay::Search(state) => search(frame, area, state, pal),
         Overlay::Brief(state) => brief(frame, area, state, pal),
+        Overlay::Routing(panel) => routing(frame, area, panel, pal),
     }
 }
 
-/// The fleet: every session and what can be done to the one selected. The
-/// panel is deliberately large — the point of opening it is to see the whole
-/// fleet, and a dozen workers need the room.
+/// The fleet: every session and what can be done to the one selected, as
+/// wide as the screen and as tall as the fleet.
 fn fleet(frame: &mut Frame, area: Rect, console: &crate::tui::app::Console, pal: &Palette) {
     let width = area.width.saturating_sub(4).max(20);
-    let height = area.height.saturating_sub(2).max(6);
+    // as tall as the fleet, not as tall as the screen: header, two rows per
+    // session, a blank and the footer, plus the borders
+    let wanted = u16::try_from(console.rows().len() * 2 + 5).unwrap_or(u16::MAX);
+    let height = wanted.min(area.height.saturating_sub(2)).max(6);
     let inner = panel(
         frame,
         centered(area, width, height),
@@ -177,25 +180,106 @@ fn draw_lines(frame: &mut Frame, area: Rect, lines: Vec<Line<'static>>) {
 // -- help -------------------------------------------------------------------
 
 fn help(frame: &mut Frame, area: Rect, pal: &Palette) {
-    let wanted_width = 74u16.min(area.width.saturating_sub(4));
-    let inner_width = wanted_width.saturating_sub(4) as usize;
-    let inner_height = area.height.saturating_sub(6) as usize;
-    let lines = help_lines(inner_width, inner_height);
+    let sections = help_sections();
+    let key_width = sections
+        .iter()
+        .flat_map(|section| section.rows.iter())
+        .map(|row| row.keys.width())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    // two columns when a key column and a readable description fit twice;
+    // the fleet's letters sit beside the typing and chord keys then, and the
+    // whole panel fits a terminal that one long column would overflow
+    let max_width = area.width.saturating_sub(4);
+    let two_columns = max_width >= 2 * (key_width as u16 + 28) + 3;
+    let width = if two_columns {
+        max_width.min(128)
+    } else {
+        max_width.min(78)
+    };
+    let inner_width = width.saturating_sub(4) as usize;
+    let (left, right) = if two_columns {
+        let split = sections.len().saturating_sub(1);
+        (&sections[..split], &sections[split..])
+    } else {
+        (&sections[..], &sections[..0])
+    };
+    let column_width = if two_columns {
+        (inner_width - 3) / 2
+    } else {
+        inner_width
+    };
+    let left_lines = help_column(left, key_width, column_width, pal);
+    let right_lines = help_column(right, key_width, column_width, pal);
+    let rows = left_lines.len().max(right_lines.len());
+    let height = (rows as u16 + 2).min(area.height.saturating_sub(2));
     let inner = panel(
         frame,
-        centered(area, wanted_width, lines.len() as u16 + 4),
-        "keys",
+        centered(area, width, height),
+        "keys · esc closes",
         OverlayRole::Help,
         pal,
     );
-    draw_lines(
-        frame,
-        inner,
-        lines
-            .into_iter()
-            .map(|l| Line::styled(l, pal.dim()))
-            .collect(),
-    );
+    let (left_area, right_area) = if two_columns {
+        let [l, _, r] = ratatui::layout::Layout::horizontal([
+            ratatui::layout::Constraint::Length(column_width as u16),
+            ratatui::layout::Constraint::Length(3),
+            ratatui::layout::Constraint::Min(1),
+        ])
+        .areas(inner);
+        (l, Some(r))
+    } else {
+        (inner, None)
+    };
+    draw_help_lines(frame, left_area, left_lines, pal);
+    if let Some(right_area) = right_area {
+        draw_help_lines(frame, right_area, right_lines, pal);
+    }
+}
+
+/// Draw a help column, counting what does not fit rather than cutting it
+/// off unannounced.
+fn draw_help_lines(frame: &mut Frame, area: Rect, mut lines: Vec<Line<'static>>, pal: &Palette) {
+    let room = area.height as usize;
+    if lines.len() > room && room > 0 {
+        let hidden = lines.len() - (room - 1);
+        lines.truncate(room - 1);
+        lines.push(Line::styled(
+            format!("… {hidden} more lines — a taller window shows them all"),
+            pal.dim(),
+        ));
+    }
+    draw_lines(frame, area, lines);
+}
+
+/// One column of help: a heading per section, then each key beside what it
+/// does, the description wrapped under itself rather than clipped at the
+/// panel's edge.
+fn help_column(
+    sections: &[crate::tui::keys::HelpSection],
+    key_width: usize,
+    width: usize,
+    pal: &Palette,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for section in sections {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(section.title.to_string(), pal.heading()));
+        for row in section.rows {
+            let what = wrap(row.what, width.saturating_sub(key_width).max(10));
+            for (i, part) in what.into_iter().enumerate() {
+                let keys = if i == 0 { row.keys } else { "" };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{keys:<key_width$}"), pal.accent()),
+                    Span::styled(part, pal.dim()),
+                ]));
+            }
+        }
+    }
+    lines
 }
 
 // -- confirm ----------------------------------------------------------------
@@ -221,6 +305,124 @@ fn confirm(frame: &mut Frame, area: Rect, state: &ConfirmState, pal: &Palette) {
         "y confirm · n or esc cancel".to_string(),
         pal.dim(),
     ));
+    draw_lines(frame, inner, lines);
+}
+
+// -- routing ----------------------------------------------------------------
+
+/// The `/routing` panel: routing's switch, where its key lives, what it has
+/// to choose from. A key being entered is drawn as one dot per character;
+/// nothing on this panel ever draws a key itself.
+fn routing(frame: &mut Frame, area: Rect, state: &crate::tui::app::RoutingPanel, pal: &Palette) {
+    use crate::tui::app::KeyState;
+    let width = 72u16.min(area.width.saturating_sub(4));
+    let inner_width = width.saturating_sub(4) as usize;
+    let mut lines: Vec<Line<'static>> = wrap(
+        "Jev picks each worker's model, thinking level and worktree from its brief, \
+when a spawn does not name a model itself.",
+        inner_width,
+    )
+    .into_iter()
+    .map(|l| Line::styled(l, pal.dim()))
+    .collect();
+    lines.push(Line::default());
+    // a value wraps under itself, the label column left clear
+    let row = |label: &str, value: String, style: ratatui::style::Style| -> Vec<Line<'static>> {
+        wrap(&value, inner_width.saturating_sub(10))
+            .into_iter()
+            .enumerate()
+            .map(|(i, part)| {
+                let label = if i == 0 { label } else { "" };
+                Line::from(vec![
+                    Span::styled(format!("{label:<10}"), pal.dim()),
+                    Span::styled(part, style),
+                ])
+            })
+            .collect()
+    };
+    match &state.status {
+        None => lines.push(Line::styled("checking…".to_string(), pal.dim())),
+        Some(status) => {
+            lines.extend(if status.enabled {
+                row("routing", "on".into(), pal.accent())
+            } else {
+                row("routing", "off".into(), pal.dim())
+            });
+            let store = crate::secrets::store_name();
+            lines.extend(match &status.key {
+                KeyState::None => row("api key", "none set".into(), pal.attention()),
+                KeyState::Store { masked } => {
+                    row("api key", format!("{masked}, in {store}"), pal.accent())
+                }
+                KeyState::Env { var, masked } => row(
+                    "api key",
+                    format!("{masked}, from ${var} (it wins over {store})"),
+                    pal.accent(),
+                ),
+                KeyState::Unavailable(why) => row("api key", why.clone(), pal.error()),
+            });
+            lines.extend(match &status.candidates {
+                Ok(n) => row(
+                    "choosing",
+                    format!("between {n} model{}", if *n == 1 { "" } else { "s" }),
+                    pal.dim(),
+                ),
+                Err(why) => row("choosing", why.clone(), pal.attention()),
+            });
+            if status.enabled && status.key == KeyState::None {
+                lines.push(Line::default());
+                lines.push(Line::styled(
+                    "Routing is on but has no key, so spawns are not routed yet.".to_string(),
+                    pal.attention(),
+                ));
+            }
+        }
+    }
+    lines.push(Line::default());
+    if let Some(key) = &state.entering {
+        lines.push(Line::styled(
+            "Paste or type your TypeSafe API key:".to_string(),
+            pal.heading(),
+        ));
+        let dots = "•".repeat(key.len().min(inner_width.saturating_sub(4)));
+        lines.push(Line::from(vec![
+            Span::styled("▶ ".to_string(), pal.accent()),
+            Span::raw(dots),
+            Span::styled("▍".to_string(), pal.dim()),
+        ]));
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            format!(
+                "enter save to {} · esc cancel",
+                crate::secrets::store_name()
+            ),
+            pal.dim(),
+        ));
+    } else if state.confirm_delete {
+        lines.push(Line::styled(
+            "Delete the stored key? y deletes · any other key keeps it".to_string(),
+            pal.error().add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        let stored = matches!(
+            state.status.as_ref().map(|s| &s.key),
+            Some(KeyState::Store { .. })
+        );
+        let mut hint = String::from("r routing on/off · s set key");
+        if stored {
+            hint.push_str(" · d delete key");
+        }
+        hint.push_str(" · esc close");
+        lines.push(Line::styled(hint, pal.dim()));
+    }
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let inner = panel(
+        frame,
+        centered(area, width, height),
+        "model routing",
+        OverlayRole::Palette,
+        pal,
+    );
     draw_lines(frame, inner, lines);
 }
 

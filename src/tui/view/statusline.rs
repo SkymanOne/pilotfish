@@ -56,30 +56,33 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console, feeds: &Feeds<'_>,
         }
         SessionTarget::Orchestrator(_) => {
             let transcript = console.orchestrator_transcript();
+            // claude says nothing at all until the first message (verified
+            // fact 3), so before then there is no model or session to name —
+            // which is a session waiting to start, not one failing to
             let model = transcript
                 .model()
                 .or(feeds.orch.model.as_deref())
-                .unwrap_or("starting…");
+                .unwrap_or("default model");
             part(&mut spans, model.to_string(), pal.dim());
-            part(
-                &mut spans,
-                transcript.session_id().map_or_else(
-                    || "no session".to_string(),
-                    |id| id.chars().take(8).collect(),
-                ),
-                pal.dim(),
-            );
-            part(
-                &mut spans,
-                format!("${:.3}", transcript.cost_usd()),
-                pal.dim(),
-            );
-            let turns = transcript.num_turns();
-            part(
-                &mut spans,
-                format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
-                pal.dim(),
-            );
+            match transcript.session_id() {
+                Some(id) => part(&mut spans, id.chars().take(8).collect(), pal.dim()),
+                None => part(&mut spans, "ready".to_string(), pal.accent()),
+            }
+            // the monitor's count survives a trimmed transcript; the
+            // transcript's own covers a monitor that has not flushed yet
+            let turns = feeds.orch.num_turns.max(transcript.num_turns());
+            if turns > 0 {
+                part(
+                    &mut spans,
+                    format!("${:.3}", transcript.cost_usd()),
+                    pal.dim(),
+                );
+                part(
+                    &mut spans,
+                    format!("{turns} turn{}", if turns == 1 { "" } else { "s" }),
+                    pal.dim(),
+                );
+            }
             if let Some(effort) = console.effort() {
                 part(&mut spans, format!("thinking {effort}"), pal.dim());
             }

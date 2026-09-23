@@ -140,8 +140,15 @@ pub fn build_items(ctx: &PaletteContext, scope: PaletteScope) -> Vec<PaletteItem
             &ctx.orchestrator_commands
         };
         for command in agent {
+            // a console command of the same name is the one that runs — the
+            // console intercepts it before anything reaches the agent — so the
+            // agent's entry would be a second row that does the first's job
+            let label = format!("/{}", command.name);
+            if crate::tui::completions::resolve_command(&label).is_some() {
+                continue;
+            }
             items.push(PaletteItem {
-                label: format!("/{}", command.name),
+                label,
                 detail: [
                     command.description.clone(),
                     command
@@ -169,7 +176,12 @@ pub fn build_items(ctx: &PaletteContext, scope: PaletteScope) -> Vec<PaletteItem
                 detail: if server.tools.is_empty() {
                     server.status.clone()
                 } else {
-                    format!("{} · {} tools", server.status, server.tools.len())
+                    format!(
+                        "{} · {} tool{}",
+                        server.status,
+                        server.tools.len(),
+                        if server.tools.len() == 1 { "" } else { "s" }
+                    )
                 },
                 group: PaletteGroup::Servers,
                 action: PaletteAction::Reference,
@@ -312,11 +324,17 @@ mod tests {
                     provider: "anthropic".into(),
                     id: "claude-opus-5".into(),
                     name: Some("Opus".into()),
+                    thinking_levels: Vec::new(),
+                    context_window: None,
+                    cost: None,
                 },
                 WorkerModel {
                     provider: "openai".into(),
                     id: "gpt-5.6".into(),
                     name: None,
+                    thinking_levels: Vec::new(),
+                    context_window: None,
+                    cost: None,
                 },
             ],
             sessions: vec!["orchestrator".into(), "db".into()],
@@ -326,6 +344,19 @@ mod tests {
 
     fn groups_of(items: &[PaletteItem]) -> Vec<PaletteGroup> {
         items.iter().map(|i| i.group.clone()).collect()
+    }
+
+    #[test]
+    fn an_agent_command_a_console_command_shadows_is_listed_once() {
+        // claude offers /model, and so does the console, whose version runs
+        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+        let models: Vec<&PaletteItem> = items.iter().filter(|i| i.label == "/model").collect();
+        assert_eq!(models.len(), 1, "{models:?}");
+        assert!(matches!(models[0].action, PaletteAction::ConsoleCommand(_)));
+        assert!(
+            items.iter().any(|i| i.label == "/usage"),
+            "an agent command nothing shadows still rides along"
+        );
     }
 
     #[test]

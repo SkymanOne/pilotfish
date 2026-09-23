@@ -23,13 +23,17 @@ Exit codes: 0 ok, 1 refusal or error, 2 no report, 3 wait timed out, 4 the run e
 
 ## Choosing a model for a brief
 
-With `[routing] enabled = true` in `~/.parl/config.toml` (or `--route` on one spawn), a `spawn` that names no `--model` has one chosen from the brief, along with a thinking level and whether the work needs its own worktree. The judgment comes from TypeSafe's System One, over the models pi actually has; the spawn prints what was chosen and why, and records it on the run.
+With routing on — `/routing` in the console, `[routing] enabled = true` in `~/.parl/config.toml`, or `--route` on one spawn — a `spawn` that names no `--model` has one chosen from its brief, along with a thinking level and whether the work needs its own worktree. The judgment comes from TypeSafe's System One; the spawn prints what was chosen and why, and records it on the run.
 
 ```toml
 [routing]
 enabled = true
-model = "jev-latest"            # the System One model to ask
-confidence_threshold = 0.6      # below this, the configured default stands
+models = ["anthropic:claude-opus-5", "anthropic:claude-sonnet-5", "deepseek-v4-flash"]
+confidence_threshold = 0.6      # below this, the configured model stands
 ```
 
-The key comes from `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`; without one, routing does nothing however the config reads. A `--model` you pass is never second-guessed, `--no-route` switches it off for one spawn, and a judgment that cannot be had — no network, a refused key — is not an error: the spawn goes ahead on the configured default.
+pi can offer hundreds of models, and most are served by several providers, so routing chooses between the ones you allow: `models` lists them as `provider:id`, or a bare id to allow every provider of it; a `[worker] provider` narrows it further. With more than 255 left, routing declines and says so.
+
+What it decides stays within what you set. A `--model` you pass is never second-guessed. The thinking level is one the chosen model actually has. A worktree is only skipped when the brief is clearly read-only. And when routing is on but cannot decide — no key, no network, too many models — the spawn goes ahead on your configured defaults and prints why.
+
+The key is set with `/routing` in the console, which keeps it in your operating system's credential store, or comes from `$PARL_TYPESAFE_API_KEY` / `$TYPESAFE_API_KEY`, which win when set.

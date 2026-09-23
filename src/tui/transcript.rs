@@ -477,9 +477,9 @@ impl Transcript {
             if let Some(cost) = msg.get("total_cost_usd").and_then(Value::as_f64) {
                 self.cost_usd = cost;
             }
-            if let Some(turns) = msg.get("num_turns").and_then(Value::as_u64) {
-                self.num_turns = u32::try_from(turns).unwrap_or(u32::MAX);
-            }
+            // claude's `num_turns` restarts with every query (verified fact 6),
+            // so a result is counted rather than read
+            self.num_turns = self.num_turns.saturating_add(1);
             if msg
                 .get("is_error")
                 .and_then(Value::as_bool)
@@ -1626,7 +1626,9 @@ mod tests {
         });
         t.apply_claude_message(&result);
         assert!((t.cost_usd() - 0.12).abs() < 1e-9);
-        assert_eq!(t.num_turns(), 3);
+        // claude's `num_turns` is per query, so a result counts as one turn
+        // whatever it says
+        assert_eq!(t.num_turns(), 1);
         assert!(!t.turn_active());
         assert_eq!(t.activity(), None);
         let failed = serde_json::json!({
@@ -1638,6 +1640,7 @@ mod tests {
             t.blocks().last().unwrap().text,
             "! turn failed (error_during_execution): boom; crash"
         );
+        assert_eq!(t.num_turns(), 2, "a failed turn is still a turn");
     }
 
     #[test]

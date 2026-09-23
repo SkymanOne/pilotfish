@@ -207,7 +207,7 @@ pub(crate) async fn status_core_with_env(
         return Ok(ok(
             StatusData {
                 runs: vec![derived],
-                models: worker_models(&fleet_dir),
+                models: worker_models(&fleet_dir).0,
             },
             vec![rendered],
         ));
@@ -220,12 +220,12 @@ pub(crate) async fn status_core_with_env(
         load_session_states(&fleet_dir, super::acting_session(&fleet_dir))
     };
     let runs: Vec<Value> = states.iter().map(derived_json).collect();
-    let models = worker_models(&fleet_dir);
+    let (models, total) = worker_models(&fleet_dir);
     if json {
         let rendered = serde_json::to_string_pretty(&runs)?;
         return Ok(ok(StatusData { runs, models }, vec![rendered]));
     }
-    let catalogue = models_line(&models);
+    let catalogue = models_line(&models, total);
     if states.is_empty() {
         let mut lines = vec!["(no runs)".to_string()];
         lines.extend(catalogue);
@@ -236,26 +236,47 @@ pub(crate) async fn status_core_with_env(
     Ok(ok(StatusData { runs, models }, lines))
 }
 
-/// The models pi has configured, from the fleet catalogue. Empty when no
-/// worker has ever asked pi — the catalogue is written by a live worker
-/// monitor, so a fleet that has never run one has nothing to report.
-fn worker_models(fleet_dir: &Path) -> Vec<run::WorkerModel> {
-    run::read_pi_cache(fleet_dir)
+/// The models worth naming to a caller choosing one: pi's catalogue,
+/// narrowed the way routing narrows it — the configured `[worker] provider`
+/// and `[routing] models` — and capped. A real pi install lists hundreds,
+/// and every `fleet_status` would otherwise pour them all into the
+/// orchestrator's context. Returns the models shown and how many matched.
+fn worker_models(fleet_dir: &Path) -> (Vec<run::WorkerModel>, usize) {
+    let catalogue = run::read_pi_cache(fleet_dir)
         .map(|c| c.available_models)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // an unreadable config narrows nothing; status is not the place to fail on it
+    let config =
+        crate::paths::load_user_config(crate::paths::user_dir().as_deref()).unwrap_or_default();
+    let mut models = crate::route::narrow(
+        &catalogue,
+        config.worker_provider(None),
+        &config.routing.models,
+    );
+    let total = models.len();
+    models.truncate(MODELS_SHOWN);
+    (models, total)
 }
+
+/// How many models a status lists before it only counts them.
+const MODELS_SHOWN: usize = 40;
 
 /// One `models:` line naming what `fleet_spawn` can be asked for, or nothing
 /// when the catalogue is empty.
-fn models_line(models: &[run::WorkerModel]) -> Option<String> {
+fn models_line(models: &[run::WorkerModel], total: usize) -> Option<String> {
     if models.is_empty() {
         return None;
     }
-    let names: Vec<String> = models
-        .iter()
-        .map(|m| format!("{}:{}", m.provider, m.id))
-        .collect();
-    Some(format!("models: {}", names.join(", ")))
+    let names: Vec<String> = models.iter().map(run::WorkerModel::key).collect();
+    let rest = total.saturating_sub(models.len());
+    Some(if rest == 0 {
+        format!("models: {}", names.join(", "))
+    } else {
+        format!(
+            "models: {} … and {rest} more — narrow the list with [worker] provider or [routing] models",
+            names.join(", ")
+        )
+    })
 }
 
 /// The fleet table, formatted by hand (the crate pins no table dependency):

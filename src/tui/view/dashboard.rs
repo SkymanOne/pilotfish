@@ -43,7 +43,10 @@ fn draw_header(frame: &mut Frame, area: Rect, rows: &[DashboardRow], pal: &Palet
     if workers == 0 {
         spans.push(Span::raw("orchestrator only".to_string()));
     } else {
-        spans.push(Span::raw(format!("orchestrator + {workers} workers")));
+        spans.push(Span::raw(format!(
+            "orchestrator + {workers} worker{}",
+            if workers == 1 { "" } else { "s" }
+        )));
     }
     for (glyph, label) in counts_by_state(rows) {
         spans.push(Span::styled(

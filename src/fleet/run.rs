@@ -160,13 +160,53 @@ pub struct PendingDialog {
 }
 
 /// A model pi has configured (from `get_available_models`), slimmed to what
-/// the console needs to offer and switch models.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// the console needs to offer and switch models and what routing needs to
+/// choose between them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorkerModel {
     pub provider: String,
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// The thinking levels this model has. Empty means it has none pi can
+    /// set, or pi did not say — either way there is no level to ask for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking_levels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ModelCost>,
+}
+
+impl WorkerModel {
+    /// A model known only by provider and id.
+    #[must_use]
+    pub fn new(provider: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            id: id.into(),
+            name: None,
+            thinking_levels: Vec::new(),
+            context_window: None,
+            cost: None,
+        }
+    }
+
+    /// `provider:id`, the form that names one model unambiguously — most ids
+    /// are served by more than one provider.
+    #[must_use]
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.provider, self.id)
+    }
+}
+
+/// What a model costs, in dollars per million tokens, as pi reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
 }
 
 /// The fleet-level pi catalogue: the models and commands pi offers. These
@@ -177,7 +217,7 @@ pub struct WorkerModel {
 /// [`load_state`], so the console's model switcher and command lists see the
 /// same data they always did. Serde-tolerant like everything on disk: unknown
 /// fields are ignored and missing ones default.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PiCache {
     /// When pi last answered, RFC3339. The console shows the age and asks a
@@ -952,6 +992,9 @@ mod tests {
                 provider: "anthropic".into(),
                 id: "claude-opus-5".into(),
                 name: Some("Opus".into()),
+                thinking_levels: Vec::new(),
+                context_window: None,
+                cost: None,
             }],
             commands: vec![WorkerCommand {
                 name: "compact-notes".into(),

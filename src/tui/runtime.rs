@@ -14,9 +14,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -88,6 +88,10 @@ pub fn enter() -> io::Result<Terminal<CrosstermBackend<io::Stdout>>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Without bracketed paste a pasted brief arrives as keystrokes, and its
+    // first newline is an enter that sends the rest half-typed. With it the
+    // terminal hands over the whole paste as one event.
+    let _ = execute!(stdout, EnableBracketedPaste);
     // Without this a terminal cannot tell shift-enter from enter — both are
     // a bare CR — so the composer could never bind the newline everyone
     // reaches for. `DISAMBIGUATE_ESCAPE_CODES` makes the terminal send
@@ -113,6 +117,7 @@ pub fn restore() {
     let _ = execute!(
         io::stdout(),
         PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     );
@@ -249,6 +254,9 @@ struct Poll {
     /// What the orchestrator's agent currently offers, re-read every poll.
     caps: crate::orch::records::Capabilities,
     orch_offset: u64,
+    /// The inode `orch_offset` is an offset into; a trim replaces the file,
+    /// and an offset into the old one means nothing in the new.
+    orch_inode: Option<u64>,
     worker_offsets: HashMap<String, u64>,
     /// The fleet-event watcher, owned for the console's lifetime: its
     /// cursors are the memory that keeps a reopened console from replaying
@@ -270,6 +278,7 @@ impl Poll {
             orch: OrchestratorState::default(),
             caps: crate::orch::records::Capabilities::default(),
             orch_offset: 0,
+            orch_inode: None,
             worker_offsets: HashMap::new(),
             watcher,
             diff_stats: HashMap::new(),
@@ -329,11 +338,20 @@ impl Poll {
         // The monitor caps the file while it runs, so a file shorter than
         // our cursor means it was trimmed, not that it went backwards: start
         // the transcript again from what is left.
+        // A trim renames a new file over the old one, so a changed inode is
+        // the reliable sign; a shorter file catches anything that rewrote it
+        // in place. Size alone misses a trim followed by enough new bytes to
+        // pass the old offset, and then reads from the middle of a record.
         let events_path = self.fleet.orchestrator_events(&self.key);
-        if std::fs::metadata(&events_path).is_ok_and(|meta| meta.len() < self.orch_offset) {
-            self.orch_offset = 0;
-            console.reset_orchestrator_transcript();
-            ingested = true;
+        if let Ok(meta) = std::fs::metadata(&events_path) {
+            use std::os::unix::fs::MetadataExt as _;
+            let replaced = self.orch_inode.is_some_and(|inode| inode != meta.ino());
+            if replaced || meta.len() < self.orch_offset {
+                self.orch_offset = 0;
+                console.reset_orchestrator_transcript();
+                ingested = true;
+            }
+            self.orch_inode = Some(meta.ino());
         }
         let (lines, offset) = read_new_lines(&events_path, self.orch_offset);
         self.orch_offset = offset;
@@ -630,15 +648,11 @@ async fn anchor_console(
     console.set_capabilities(poll.caps.clone());
     poll.tail_events(console);
     let started = match ensure_orchestrator(fleet, options, user_dir, &key) {
-        Ok(true) => {
-            console.notice("· orchestrator monitor started", false);
-            true
-        }
+        // the monitor announces itself in the transcript ("· new orchestrator
+        // session", "· resumed …"), so a line of our own would say it twice
+        Ok(true) => true,
         Ok(false) => {
-            console.notice(
-                "· attaching to the orchestrator that is already running here",
-                false,
-            );
+            console.toast("· attached to the orchestrator already running here", false);
             false
         }
         Err(err) => {
@@ -779,6 +793,9 @@ pub async fn run_console(
                         let effects = console.handle_action(action);
                         console.execute_all(effects).await;
                     }
+                }
+                Some(Ok(Event::Paste(text))) => {
+                    console.paste(&text);
                 }
                 // resize redraws on the next pass; focus is unused
                 Some(Ok(_)) => {}

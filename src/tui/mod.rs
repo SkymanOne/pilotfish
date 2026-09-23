@@ -44,7 +44,7 @@
 //!   markdown raw — run `markdown::render` over `Text` blocks) and
 //!   `.partial()` for the in-flight stream. Scroll per `scroll()` (`None` =
 //!   follow the tail) and highlight `search()`.
-//! - `overlay()` → one of Help (use `keys::help_lines`), Confirm,
+//! - `overlay()` → one of Help (use `keys::help_sections`), Confirm,
 //!   Permission (the approval/question picker: `y`/`a`/`n`, options,
 //!   "something else"), Palette (`state.items`/`state.visible` +
 //!   `state.selected_item()`, grouped by `group`), Search (live query).

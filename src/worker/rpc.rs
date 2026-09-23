@@ -223,8 +223,8 @@ impl RpcResponse {
 }
 
 /// The `model` object from `get_state`/`set_model`/`get_available_models`.
-/// pi sends more fields (`api`, `contextWindow`, …); they are ignored.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// pi sends more fields (`api`, `baseUrl`, …); the rest are ignored.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ModelRef {
     #[serde(default)]
     pub id: Option<String>,
@@ -232,6 +232,31 @@ pub struct ModelRef {
     pub name: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
+    /// Every level pi knows, the ones this model lacks mapped to null.
+    #[serde(default, rename = "thinkingLevelMap")]
+    pub thinking_level_map: Option<Map<String, Value>>,
+    #[serde(default, rename = "contextWindow")]
+    pub context_window: Option<u64>,
+    #[serde(default)]
+    pub cost: Option<crate::fleet::run::ModelCost>,
+}
+
+impl ModelRef {
+    /// The levels this model has, in [`THINKING_LEVELS`] order: the map's
+    /// non-null entries. Empty for a model with no map at all.
+    ///
+    /// [`THINKING_LEVELS`]: crate::fleet::run::THINKING_LEVELS
+    #[must_use]
+    pub fn thinking_levels(&self) -> Vec<String> {
+        let Some(map) = &self.thinking_level_map else {
+            return Vec::new();
+        };
+        crate::fleet::run::THINKING_LEVELS
+            .iter()
+            .filter(|level| map.get(**level).is_some_and(|v| !v.is_null()))
+            .map(|level| (*level).to_string())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -534,9 +559,34 @@ mod tests {
                 id: Some("m-1".into()),
                 name: Some("Model One".into()),
                 provider: Some("vendorco".into()),
+                // routing weighs it, so it is kept now rather than ignored
+                context_window: Some(200_000),
+                ..ModelRef::default()
             })
         );
         assert_eq!(r.thinking_level().as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn a_catalogue_model_carries_its_levels_context_and_cost() {
+        // shaped like a real get_available_models entry (pi 0.87)
+        let line = r#"{"type":"response","command":"get_available_models","success":true,"data":{"models":[
+            {"id":"claude-fable-5","name":"Claude Fable 5","provider":"anthropic","contextWindow":1000000,
+             "cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5},
+             "thinkingLevelMap":{"off":null,"xhigh":"xhigh","max":"max"}},
+            {"id":"claude-haiku-4-5","provider":"anthropic","thinkingLevelMap":null}]}}"#;
+        let RpcMessage::Response(r) = parse_line(line).unwrap() else {
+            panic!("a response")
+        };
+        let models = r.available_models();
+        assert_eq!(models[0].thinking_levels(), vec!["xhigh", "max"]);
+        assert_eq!(models[0].context_window, Some(1_000_000));
+        let cost = models[0].cost.unwrap();
+        assert!((cost.input - 10.0).abs() < 1e-9 && (cost.output - 50.0).abs() < 1e-9);
+        assert!(
+            models[1].thinking_levels().is_empty(),
+            "a model with no map has no level to ask for"
+        );
     }
 
     #[test]
