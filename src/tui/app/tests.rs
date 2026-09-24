@@ -2158,3 +2158,124 @@ fn the_shortlist_refuses_a_model_past_the_limit() {
     assert!(!editor.changed);
     assert!(c.flash().is_some_and(|f| f.error && f.text.contains("255")));
 }
+
+// -- the pi catalogue on demand -----------------------------------------
+
+fn old_catalogue(models: Vec<WorkerModel>) -> crate::fleet::run::PiCache {
+    crate::fleet::run::PiCache {
+        fetched_at: "2020-01-02T03:04:05.000Z".to_string(),
+        available_models: models,
+        commands: Vec::new(),
+    }
+}
+
+/// A catalogue with a past `fetchedAt`, written straight to disk: the
+/// atomic writer stamps the timestamp itself, so a stale cache has to skip it.
+fn write_old_catalogue(c: &mut Console, models: Vec<WorkerModel>) {
+    std::fs::write(
+        c.fleet.root().join(crate::paths::PI_CACHE_FILE),
+        serde_json::to_string(&old_catalogue(models)).expect("serializable"),
+    )
+    .unwrap();
+}
+
+fn model(id: &str) -> WorkerModel {
+    WorkerModel::new("fakeprovider", id)
+}
+
+#[test]
+fn m_without_a_catalogue_asks_pi_instead_of_refusing_the_editor() {
+    let mut c = test_console();
+    assert_eq!(c.submit("/routing"), vec![Effect::LoadRoutingStatus]);
+    if let Some(Overlay::Routing(panel)) = &mut c.overlay {
+        panel.status = Some(RoutingStatus {
+            enabled: true,
+            key: KeyState::None,
+            candidates: Err("pi could not be asked for its models".to_string()),
+            threshold: 0.6,
+            models: Vec::new(),
+        });
+    }
+    // no pi-cache.json anywhere: `m` starts a fetch (an effect the runtime
+    // executes off the UI loop) instead of claiming there is no catalogue
+    let effects = c.handle_key(ch('m'));
+    assert_eq!(effects, vec![Effect::FetchPiCatalogue]);
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("still on the panel");
+    };
+    assert!(panel.shortlist.is_none(), "no editor over nothing");
+    assert!(
+        c.flash()
+            .is_some_and(|f| f.text.contains("fetching pi's model list")),
+        "the toast says pi is being asked, not that there is no catalogue"
+    );
+}
+
+#[test]
+fn m_opens_the_shortlist_over_a_catalogue_that_exists() {
+    let mut c = test_console();
+    write_old_catalogue(&mut c, vec![model("glm-5.3"), model("glm-5.3-flash")]);
+    assert_eq!(c.submit("/routing"), vec![Effect::LoadRoutingStatus]);
+    if let Some(Overlay::Routing(panel)) = &mut c.overlay {
+        panel.status = Some(RoutingStatus {
+            enabled: true,
+            key: KeyState::None,
+            candidates: Ok(2),
+            threshold: 0.6,
+            models: Vec::new(),
+        });
+    }
+    assert!(
+        c.handle_key(ch('m')).is_empty(),
+        "no fetch over a real catalogue"
+    );
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("back on the panel");
+    };
+    let editor = panel.shortlist.as_ref().unwrap();
+    assert_eq!(editor.visible.len(), 2);
+}
+
+#[test]
+fn a_stale_catalogue_is_fetched_by_a_worker_when_one_is_live() {
+    let mut c = setup_with_worker();
+    write_old_catalogue(&mut c, vec![model("glm-5.3")]);
+    let effects = c.handle_key(ctrl('k'));
+    assert!(
+        effects.contains(&Effect::RefreshWorkerCapabilities {
+            run_id: "db-20260829120000".to_string(),
+        }),
+        "{effects:?}"
+    );
+    assert!(!effects.contains(&Effect::FetchPiCatalogue), "{effects:?}");
+}
+
+#[test]
+fn a_stale_catalogue_with_no_live_worker_is_fetched_from_pi_directly() {
+    let mut c = test_console();
+    write_old_catalogue(&mut c, vec![model("glm-5.3")]);
+    let effects = c.handle_key(ctrl('k'));
+    assert!(
+        effects.contains(&Effect::FetchPiCatalogue),
+        "the one-shot stands in for the missing worker: {effects:?}"
+    );
+    // and a fresh catalogue is left alone
+    let mut c = test_console();
+    crate::fleet::run::write_pi_cache(
+        c.fleet.root(),
+        &crate::fleet::run::PiCache {
+            fetched_at: crate::util::now_iso(),
+            available_models: vec![model("glm-5.3")],
+            commands: Vec::new(),
+        },
+    )
+    .unwrap();
+    let effects = c.handle_key(ctrl('k'));
+    assert!(!effects.contains(&Effect::FetchPiCatalogue), "{effects:?}");
+    assert!(
+        !effects.contains(&Effect::RefreshWorkerCapabilities {
+            run_id: "db-20260829120000".to_string(),
+        }),
+        "{effects:?}"
+    );
+}

@@ -807,6 +807,10 @@ pub async fn run_console(
                 console.set_orchestrator_state(poll.orch.clone());
                 console.set_capabilities(poll.caps.clone());
                 console.set_model_questions(crate::route::pending_questions(&fleet));
+                // a one-shot pi fetch that finished reloads the routing
+                // status, so the panel picks up the fresh catalogue without
+                // the user asking again
+                console.collect_pi_fetch().await;
                 poll.tail_events(&mut console);
                 poll.forward_fleet_events(&mut console).await;
                 poll.refresh_diff_stats(&mut console).await;

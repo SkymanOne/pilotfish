@@ -27,12 +27,12 @@ use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use crate::cli::ExitCode;
 use crate::fleet::envelope::{Decoded, Envelope};
 use crate::fleet::run::{
-    PendingDialog, PendingQuestion, PiCache, RunState, RunStatus, WorkerActivity, WorkerCommand,
-    WorkerModel, load_state, read_pi_cache, record_steering, record_tool_activity, save_state,
-    write_pi_cache,
+    PendingDialog, PendingQuestion, PiCache, RunState, RunStatus, WorkerActivity, load_state,
+    read_pi_cache, record_steering, record_tool_activity, save_state, write_pi_cache,
 };
 use crate::paths::{FleetPaths, env_var};
 use crate::util::{append_json_line, append_text, now_iso, now_ms, read_new_lines};
+use crate::worker::models::{worker_commands, worker_models};
 use crate::worker::rpc::{
     ExtensionUiRequest, ExtensionUiResponse, ModelRef, RpcCommand, RpcMessage, RpcResponse,
     StreamPhase, StreamingBehavior, is_selected_event, parse_line,
@@ -579,36 +579,14 @@ impl Monitor {
                 }
             }
             ("get_commands", true) => {
-                let commands: Vec<WorkerCommand> = response
-                    .commands()
-                    .into_iter()
-                    .filter_map(|entry| {
-                        entry.name.map(|name| WorkerCommand {
-                            name,
-                            description: entry.description.unwrap_or_default(),
-                            source: entry.source.unwrap_or_else(|| "unknown".to_string()),
-                        })
-                    })
-                    .collect();
+                let commands = worker_commands(&response.commands());
                 // Commands describe the pi installation, not the run: they go
                 // to the fleet-level cache, never into run.json.
                 self.persist_pi_cache(|cache| cache.commands = commands);
             }
             ("get_available_models", true) => {
                 let models = response.available_models();
-                let worker_models: Vec<WorkerModel> = models
-                    .iter()
-                    .filter_map(|m| {
-                        m.id.clone().map(|id| WorkerModel {
-                            provider: m.provider.clone().unwrap_or_default(),
-                            id,
-                            name: m.name.clone(),
-                            thinking_levels: m.thinking_levels(),
-                            context_window: m.context_window,
-                            cost: m.cost,
-                        })
-                    })
-                    .collect();
+                let worker_models = worker_models(&models);
                 // Same fleet-level treatment as commands; the `ModelRef` list
                 // still stays on the monitor for provider resolution. An empty
                 // answer is pi being briefly unaskable (the open list_models

@@ -11,6 +11,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Context as _;
 use crossterm::event::KeyEvent;
@@ -202,6 +204,19 @@ pub struct RoutingStatus {
     pub models: Vec<String>,
 }
 
+/// The one-shot pi catalogue fetch the console runs off the UI loop:
+/// [`Console::start_pi_catalogue_fetch`] reports into this cell, and the
+/// feed tick collects the result and reloads the routing status. Nothing
+/// here is ever awaited on the UI loop — the fetch task runs on its own.
+pub struct PiFetch {
+    /// `true` while a fetch task runs: the palette, the routing panel and
+    /// `m` can all ask at once, and one fetch answers them all.
+    pub in_flight: AtomicBool,
+    /// The models the finished fetch found, waiting for the feed tick. A
+    /// taken value reverts to `None`, so each fetch is reported once.
+    pub result: Mutex<Option<Vec<crate::fleet::run::WorkerModel>>>,
+}
+
 /// Where the key in force comes from — never the key itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyState {
@@ -389,6 +404,9 @@ pub enum Effect {
     /// The same question, asked of a running worker: pi's catalogue is
     /// fleet-wide, so any live worker can answer for the installation.
     RefreshWorkerCapabilities { run_id: String },
+    /// Ask pi itself for its catalogue with a one-shot process, off the UI
+    /// loop, when the console wants one and no worker can answer for it.
+    FetchPiCatalogue,
     /// Set the orchestrator's reasoning effort.
     SetEffort(String),
     /// Set how the orchestrator's tool use is approved.
@@ -544,8 +562,7 @@ pub struct Console {
     /// Show every line of an old turn's reasoning and tool output, rather
     /// than folding each to a summary row (`ctrl-o`, `/verbose`).
     verbose: bool,
-    /// When the last key went down, so a permission prompt can wait for the
-    /// keyboard to go quiet before it raises itself.
+    /// When the last key went down, so a permission prompt can wait for the    /// keyboard to go quiet before it raises itself.
     last_key_at: i64,
     /// When a permission prompt last raised itself, for its grace window.
     raised_at: Option<i64>,
@@ -560,6 +577,8 @@ pub struct Console {
     /// Per-run optimistic thinking levels, until the worker monitor persists
     /// them into the run's state and the next poll confirms it.
     pending_thinking: HashMap<String, String>,
+    /// A one-shot pi catalogue fetch in flight, and its result; see [`PiFetch`].
+    pi_fetch: Arc<PiFetch>,
     /// Is the mouse ours? While it is, the wheel scrolls the transcript and
     /// the terminal never sees a drag, so its own selection cannot run.
     /// Releasing it hands both back — see [`Self::toggle_mouse`]. Never
@@ -611,6 +630,10 @@ impl Console {
             viewport_rows: 20,
             pending_effort: None,
             pending_thinking: HashMap::new(),
+            pi_fetch: Arc::new(PiFetch {
+                in_flight: AtomicBool::new(false),
+                result: Mutex::new(None),
+            }),
         }
     }
 
@@ -1601,15 +1624,46 @@ impl Console {
     fn refresh_capabilities_if_stale(&self) -> Vec<Effect> {
         let mut effects = self.refresh_orchestrator_capabilities_if_stale();
         // pi's catalogue is a property of the installation, so any running
-        // worker can answer for it; with none running there is nobody to ask
-        // and the last answer stands.
-        let pi_stale = crate::fleet::run::read_pi_cache(self.fleet.root()).is_none_or(|cache| {
-            crate::util::age_of(&cache.fetched_at).is_none_or(|age| age > CAPABILITIES_MAX_AGE)
-        });
-        if pi_stale && let Some(run_id) = self.first_live_run_id() {
-            effects.push(Effect::RefreshWorkerCapabilities { run_id });
+        // worker can answer for it; with none running, a one-shot pi is asked
+        // on its own task instead of the palette waiting for a worker that
+        // never comes.
+        if self.pi_catalogue_stale() {
+            if let Some(run_id) = self.first_live_run_id() {
+                effects.push(Effect::RefreshWorkerCapabilities { run_id });
+            } else {
+                effects.push(Effect::FetchPiCatalogue);
+            }
         }
         effects
+    }
+
+    /// Whether the fleet's pi catalogue is missing or past its freshness
+    /// window.
+    fn pi_catalogue_stale(&self) -> bool {
+        crate::fleet::run::read_pi_cache(self.fleet.root()).is_none_or(|cache| {
+            crate::util::age_of(&cache.fetched_at).is_none_or(|age| age > CAPABILITIES_MAX_AGE)
+        })
+    }
+
+    /// Start a one-shot pi catalogue fetch unless one already runs.
+    /// Never awaited: the task writes `pi-cache.json` and reports into
+    /// [`Self::pi_fetch`], which [`Self::collect_pi_fetch`] collects on the
+    /// feed tick.
+    fn start_pi_catalogue_fetch(&mut self) {
+        // swap: if another fetch is already running, this one is a no-op —
+        // the palette, the routing panel and `m` can all ask in the same
+        // instant, and one fetch answers them all
+        if self.pi_fetch.in_flight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let cell = self.pi_fetch.clone();
+        let fleet_dir = self.fleet.root().to_path_buf();
+        let pi_spec = crate::worker::models::pi_bin_spec();
+        tokio::spawn(async move {
+            let models = crate::worker::models::ensure_pi_catalogue(&fleet_dir, &pi_spec).await;
+            *cell.result.lock().unwrap_or_else(PoisonError::into_inner) = Some(models);
+            cell.in_flight.store(false, Ordering::SeqCst);
+        });
     }
 
     /// Just claude's half of [`Self::refresh_capabilities_if_stale`], for a
@@ -1751,6 +1805,13 @@ impl Console {
                     let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
                         .map(|cache| cache.available_models)
                         .unwrap_or_default();
+                    // no catalogue, or a stale one, is fetched in the
+                    // background when no worker could answer for it; the
+                    // panel says what is happening instead of pretending
+                    // there is no catalogue
+                    if self.pi_catalogue_stale() && self.first_live_run_id().is_none() {
+                        self.start_pi_catalogue_fetch();
+                    }
                     let root = self.fleet.root().to_path_buf();
                     let brief = crate::route::Brief {
                         name: "",
@@ -1762,9 +1823,18 @@ impl Console {
                         fallback_model: config.worker_model(None),
                         model_pinned: false,
                     };
+                    let candidates = if catalogue.is_empty() {
+                        Err(if self.pi_fetch.in_flight.load(Ordering::SeqCst) {
+                            "pi's model list is being fetched…".to_string()
+                        } else {
+                            "pi could not be asked for its models".to_string()
+                        })
+                    } else {
+                        crate::route::candidates(&brief, &config.routing).map(|list| list.len())
+                    };
                     (
                         config.routing.enabled,
-                        crate::route::candidates(&brief, &config.routing).map(|list| list.len()),
+                        candidates,
                         config.routing.confidence_threshold(),
                         config.routing.models.clone(),
                     )
@@ -1783,6 +1853,40 @@ impl Console {
             threshold,
             models,
         });
+    }
+
+    /// Collect a finished one-shot fetch, if one finished since the last
+    /// feed tick: say what it found and reload the routing status so the
+    /// panel picks up the fresh catalogue. Called on the feed tick — the
+    /// fetch itself ran on its own task, so this never blocks the UI loop.
+    pub async fn collect_pi_fetch(&mut self) {
+        let models = {
+            let mut result = self
+                .pi_fetch
+                .result
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            result.take()
+        };
+        let Some(models) = models else {
+            return;
+        };
+        if models.is_empty() {
+            self.toast(
+                "! pi could not be asked for its models — check that pi is on PATH",
+                true,
+            );
+        } else {
+            self.toast(
+                format!(
+                    "· pi catalogue refreshed — {} model{}",
+                    models.len(),
+                    if models.len() == 1 { "" } else { "s" }
+                ),
+                false,
+            );
+        }
+        self.reload_routing_status().await;
     }
 
     /// Hand the routing panel what it reports, if it is still open — it may
@@ -1808,6 +1912,9 @@ impl Console {
                     self.append_orchestrator(&OrchestratorCommand::Interrupt)?;
                 }
                 Effect::LoadRoutingStatus => self.reload_routing_status().await,
+                // executed, never awaited: the fetch runs on its own task and
+                // the feed tick collects it
+                Effect::FetchPiCatalogue => self.start_pi_catalogue_fetch(),
                 Effect::SaveTypesafeKey(key) => {
                     use crate::secrets::SecretStore as _;
                     // off the UI thread: the store can block on a system dialog

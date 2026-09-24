@@ -1,15 +1,24 @@
-//! `pi --list-models` and model checking: refuse a `--model` pattern pi
-//! cannot resolve before a worktree exists, naming the closest models it
-//! does have. A worker spawned with a bad model dies a minute later, after a
-//! worktree and a branch exist, with the reason buried in its state file —
-//! the names are cheap to ask for, so a spawn checks first.
-//! (Ported from the TypeScript `src/models.ts`.)
+//! Asking pi what it offers: the `--list-models` one-shot and model
+//! checking, plus the on-demand fleet catalogue fetch that lets a fresh
+//! fleet route and the console's `/routing` panel work before any worker
+//! has ever booted. A bad `--model` is refused before a worktree exists,
+//! naming the closest models pi does have. (Ported from the TypeScript
+//! `src/models.ts`.)
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::{LazyLock, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::paths::env_var;
+use tokio::io::AsyncBufReadExt as _;
+use tokio::io::AsyncWriteExt as _;
+use tokio::process::Command;
+
+use crate::fleet::run::{PiCache, WorkerCommand, WorkerModel, read_pi_cache, write_pi_cache};
+use crate::paths::{FleetPaths, env_var};
+use crate::worker::monitor::materialize_worker_files;
+use crate::worker::rpc::{CommandEntry, ModelRef, RpcMessage, parse_line};
 
 /// How long the listing may take before the check gives up and allows the spawn.
 const LIST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -26,6 +35,174 @@ static CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
 #[must_use]
 pub fn pi_bin_spec() -> String {
     std::env::var(env_var("PI_BIN")).unwrap_or_else(|_| "pi".into())
+}
+
+/// [`ModelRef`]s pi reported (`get_available_models` data), slimmed to what
+/// the console's model switcher and routing need. Refs without an id are
+/// dropped; the provider is empty when pi did not name one.
+#[must_use]
+pub fn worker_models(models: &[ModelRef]) -> Vec<WorkerModel> {
+    models
+        .iter()
+        .filter_map(|m| {
+            m.id.clone().map(|id| WorkerModel {
+                provider: m.provider.clone().unwrap_or_default(),
+                id,
+                name: m.name.clone(),
+                thinking_levels: m.thinking_levels(),
+                context_window: m.context_window,
+                cost: m.cost,
+            })
+        })
+        .collect()
+}
+
+/// `get_commands` entries, as the fleet cache stores them. Entries without a
+/// name are dropped.
+#[must_use]
+pub fn worker_commands(entries: &[CommandEntry]) -> Vec<WorkerCommand> {
+    entries
+        .iter()
+        .filter_map(|entry| {
+            entry.name.clone().map(|name| WorkerCommand {
+                name,
+                description: entry.description.clone().unwrap_or_default(),
+                source: entry
+                    .source
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+            })
+        })
+        .collect()
+}
+
+/// The fleet's pi catalogue, fetched from pi on demand when the cache holds
+/// no models yet: the one-shot runs `pi --mode rpc --no-session` with the
+/// same materialised extension and skill a worker boots with and cwd at the
+/// repo root, so the commands it writes are the list a worker would report.
+/// The answers are merged into the fleet cache one field at a time, exactly
+/// as a monitor writes it — and an empty answer replaces nothing. Returns
+/// the models the cache now offers.
+///
+/// Never an error: the catalogue is derived data, and every failure mode
+/// (no pi, an answer that never comes, a write that fails) just reports
+/// nothing and leaves any existing cache alone.
+pub async fn ensure_pi_catalogue(fleet_dir: &Path, pi_spec: &str) -> Vec<WorkerModel> {
+    // the cache is the fast path; only a missing models list is worth the
+    // cost of starting pi
+    if let Some(cache) = read_pi_cache(fleet_dir)
+        && !cache.available_models.is_empty()
+    {
+        return cache.available_models;
+    }
+    let Some(fresh) = ask_pi_catalogue(fleet_dir, pi_spec).await else {
+        return Vec::new();
+    };
+    if fresh.available_models.is_empty() && fresh.commands.is_empty() {
+        return Vec::new();
+    }
+    // read-modify-write, one field per answer: a monitor that just wrote a
+    // field must not be clobbered, and a field pi did not answer is left as
+    // it was
+    let mut cache = read_pi_cache(fleet_dir).unwrap_or_default();
+    if !fresh.available_models.is_empty() {
+        cache.available_models = fresh.available_models.clone();
+    }
+    if !fresh.commands.is_empty() {
+        cache.commands = fresh.commands;
+    }
+    let _ = write_pi_cache(fleet_dir, &cache);
+    fresh.available_models
+}
+
+/// One `get_available_models` + `get_commands` round trip against a fresh
+/// pi. `--no-session` keeps every byte out of the session store, and the
+/// child is killed the moment the answers are in hand or [`LIST_TIMEOUT`]
+/// lapses, so no pi lingers on. `None` when pi cannot be asked at all.
+async fn ask_pi_catalogue(fleet_dir: &Path, pi_spec: &str) -> Option<PiCache> {
+    let paths = FleetPaths::new(fleet_dir);
+    let (extension, skill) = materialize_worker_files(&paths).ok()?;
+    let mut parts = pi_spec.split_whitespace();
+    let bin = parts.next()?;
+    let mut command = Command::new(bin);
+    command
+        .args(parts)
+        .arg("--mode")
+        .arg("rpc")
+        .arg("--no-session")
+        .arg("--extension")
+        .arg(extension.to_string_lossy().into_owned())
+        .arg("--skill")
+        .arg(skill.to_string_lossy().into_owned())
+        .current_dir(fleet_dir.parent().unwrap_or(fleet_dir))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let Ok(mut child) = command.spawn() else {
+        return None;
+    };
+    let mut stdin = child.stdin.take()?;
+    let stdout = child.stdout.take()?;
+    // the whole exchange is a [`tokio::time::timeout`] future: dropping it
+    // (on timeout, or on the way out) drops the child, which `kill_on_drop`
+    // turns into a kill
+    let Ok(fresh) = tokio::time::timeout(LIST_TIMEOUT, async move {
+        let _ = stdin
+            .write_all(b"{\"type\":\"get_available_models\"}\n{\"type\":\"get_commands\"}\n")
+            .await;
+        // ending stdin tells pi to exit once it has answered, which ends
+        // the read below even when an answer never comes
+        drop(stdin);
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut buf = Vec::new();
+        let mut models: Vec<ModelRef> = Vec::new();
+        let mut commands: Vec<CommandEntry> = Vec::new();
+        let mut got_models = false;
+        let mut got_commands = false;
+        while !got_models || !got_commands {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let mut line = String::from_utf8_lossy(&buf).into_owned();
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            if let Some(RpcMessage::Response(response)) = parse_line(&line) {
+                let command = response.command.as_deref().unwrap_or("").to_string();
+                let success = response.success == Some(true);
+                match (command.as_str(), success) {
+                    ("get_available_models", true) => {
+                        models = response.available_models();
+                        got_models = true;
+                    }
+                    ("get_commands", true) => {
+                        commands = response.commands();
+                        got_commands = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !got_models && !got_commands {
+            return None;
+        }
+        Some(PiCache {
+            fetched_at: crate::util::now_iso(),
+            available_models: worker_models(&models),
+            commands: worker_commands(&commands),
+        })
+    })
+    .await
+    else {
+        return None;
+    };
+    fresh
 }
 
 /// Model names pi reports, or an empty list when it cannot be asked.
@@ -123,6 +300,7 @@ fn shares_stem(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fleet::run::{PiCache, WorkerCommand, read_pi_cache, write_pi_cache};
     use crate::util::new_id;
     use std::fmt::Write as _;
     use std::path::PathBuf;
@@ -137,6 +315,32 @@ mod tests {
         let script = dir.join("fake-pi.sh");
         std::fs::write(&script, body).unwrap();
         script
+    }
+
+    fn tmp_fleet() -> FleetPaths {
+        let dir = std::env::temp_dir().join(format!(
+            "pilotfish-catalogue-{}-{}",
+            std::process::id(),
+            new_id("t").replace('_', "")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        FleetPaths::new(dir)
+    }
+
+    /// A pi spec pointing at the real fake pi fixture, through a `sh` wrapper
+    /// (the spec splits on spaces, so a script is how it travels). With
+    /// `drop_commands`, `get_commands` lines never reach the fake.
+    fn rpc_fake_pi(drop_commands: bool) -> String {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/fake-pi-pilotfish.mjs");
+        let mut body = String::from("#!/bin/sh\n");
+        if drop_commands {
+            body.push_str(
+                "{ while IFS= read -r line || [ -n \"$line\" ]; do\n  case \"$line\" in\n    *get_commands*) ;;\n    *) printf '%s\\n' \"$line\" ;;\n  esac\ndone } | "
+            );
+        }
+        let _ = writeln!(body, "node {}\n", fixture.to_string_lossy().into_owned());
+        format!("sh {}", write_fake_pi(&body).display())
     }
 
     fn listing_script(rows: &[&str]) -> String {
@@ -203,6 +407,78 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn a_missing_catalogue_is_fetched_from_pi_models_and_commands() {
+        let fleet = tmp_fleet();
+        let pi = rpc_fake_pi(false);
+        let models = ensure_pi_catalogue(fleet.root(), &pi).await;
+        assert_eq!(models.len(), 2);
+        let cache = read_pi_cache(fleet.root()).unwrap();
+        assert_eq!(
+            cache
+                .available_models
+                .iter()
+                .map(|m| format!("{}:{}", m.provider, m.id))
+                .collect::<Vec<_>>(),
+            vec!["fakeprovider:glm-5.3", "fakeprovider:glm-5.3-flash"],
+            "the one-shot writes what the fake pi answered"
+        );
+        assert_eq!(
+            cache
+                .commands
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["skill:fleet-worker-report", "compact-notes", "session-name"],
+            "and the commands with it, like a booted worker would"
+        );
+        // a catalogue already on disk is never re-fetched
+        assert_eq!(
+            ensure_pi_catalogue(fleet.root(), "no-such-pi").await,
+            models
+        );
+    }
+
+    #[tokio::test]
+    async fn fields_pi_did_not_answer_are_left_alone() {
+        let fleet = tmp_fleet();
+        let kept = vec![WorkerCommand {
+            name: "keep-me".to_string(),
+            description: "kept".to_string(),
+            source: "test".to_string(),
+        }];
+        write_pi_cache(
+            fleet.root(),
+            &PiCache {
+                available_models: Vec::new(),
+                commands: kept.clone(),
+                ..PiCache::default()
+            },
+        )
+        .unwrap();
+        // this pi answers models but never answers get_commands: the models
+        // land and the pre-existing commands survive the read-modify-write
+        let models = ensure_pi_catalogue(fleet.root(), &rpc_fake_pi(true)).await;
+        assert_eq!(models.len(), 2);
+        let cache = read_pi_cache(fleet.root()).unwrap();
+        assert_eq!(cache.available_models.len(), 2);
+        assert_eq!(cache.commands, kept);
+    }
+
+    #[tokio::test]
+    async fn an_unaskable_pi_writes_nothing() {
+        let fleet = tmp_fleet();
+        assert!(
+            ensure_pi_catalogue(fleet.root(), "definitely-not-a-real-pi-bin")
+                .await
+                .is_empty()
+        );
+        assert!(
+            !crate::fleet::run::pi_cache_json_path(fleet.root()).exists(),
+            "no catalogue file is written when pi cannot be asked"
         );
     }
 

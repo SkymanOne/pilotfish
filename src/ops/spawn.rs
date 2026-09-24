@@ -290,6 +290,7 @@ or $PILOTFISH_TYPESAFE_API_KEY"
         fleet_dir,
         in_flight,
         key.expose(),
+        &pi_bin_spec(),
         ask_timeout_ms,
     )
     .await
@@ -298,6 +299,7 @@ or $PILOTFISH_TYPESAFE_API_KEY"
 /// [`route_request`] once routing is on and the key is in hand — the part
 /// the tests drive, since the key otherwise comes from the environment or
 /// the credential store.
+#[allow(clippy::too_many_arguments)]
 async fn route_with_key(
     request: &mut SpawnRequest,
     config: &crate::paths::UserConfig,
@@ -305,11 +307,14 @@ async fn route_with_key(
     fleet_dir: &Path,
     in_flight: &[RunState],
     key: &str,
+    pi_spec: &str,
     ask_timeout_ms: i64,
 ) -> Option<crate::route::Routing> {
-    let catalogue = run::read_pi_cache(fleet_dir)
-        .map(|cache| cache.available_models)
-        .unwrap_or_default();
+    // a fresh fleet has no catalogue: rather than declining, ask pi for its
+    // models before choosing. Only a missing models list triggers it — a
+    // stale catalogue is still a catalogue, and spawns do not start pi over
+    // one.
+    let catalogue = crate::worker::models::ensure_pi_catalogue(fleet_dir, pi_spec).await;
     let repo_root = fleet_dir.parent().unwrap_or(fleet_dir).to_path_buf();
     let provider = config.worker_provider(request.provider.as_deref());
     let fallback_model = config.worker_model(request.model.as_deref());
@@ -780,6 +785,38 @@ mod tests {
         (root, fleet_dir)
     }
 
+    /// The same layout with no catalogue at all: what a fresh fleet looks
+    /// like, and what the on-demand fetch has to fix.
+    fn fleet_without_catalogue(name: &str) -> (PathBuf, PathBuf) {
+        let root = init_repo(name);
+        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        (root, fleet_dir)
+    }
+
+    /// A pi spec pointing at the real fake rpc pi, through a `sh` wrapper
+    /// (the spec splits on spaces, so a script is how it travels).
+    fn rpc_fake_pi() -> String {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-pilotfish.mjs");
+        let dir = std::env::temp_dir().join(format!(
+            "pilotfish-route-pi-{}-{}",
+            std::process::id(),
+            crate::util::new_id("t").replace('_', "")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("fake-pi.sh");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nexec node {}\n",
+                fixture.to_string_lossy().into_owned()
+            ),
+        )
+        .unwrap();
+        format!("sh {}", script.to_string_lossy().into_owned())
+    }
+
     fn routing_on(endpoint: String) -> crate::paths::UserConfig {
         crate::paths::UserConfig {
             routing: crate::paths::RoutingConfig {
@@ -817,6 +854,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn no_catalogue_fetches_pi_models_before_routing() {
+        let (root, fleet_dir) = fleet_without_catalogue("pilotfish-route-nocat-");
+        let (url, _requests) =
+            crate::route::test_support::stub(vec![serde_json::json!({"answers": {
+                "model": {"choice": "fakeprovider:glm-5.3", "confidence": 0.9},
+            }})])
+            .await;
+        let config = routing_on(url);
+        let mut req = request("nocat", "do a thing", &root, true);
+        let routing = route_with_key(
+            &mut req,
+            &config,
+            &config.routing,
+            &fleet_dir,
+            &[],
+            "k",
+            &rpc_fake_pi(),
+            10_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(req.model.as_deref(), Some("glm-5.3"));
+        assert_eq!(req.provider.as_deref(), Some("fakeprovider"));
+        assert!(!routing.note.contains("not routed"), "{}", routing.note);
+        // the fetch wrote the fleet catalogue, so the next spawn is routed
+        // from the cache
+        let cache = run::read_pi_cache(&fleet_dir).unwrap();
+        assert_eq!(
+            cache
+                .available_models
+                .iter()
+                .map(run::WorkerModel::key)
+                .collect::<Vec<_>>(),
+            vec!["fakeprovider:glm-5.3", "fakeprovider:glm-5.3-flash"],
+        );
+    }
+
+    #[tokio::test]
     async fn a_confident_route_sets_the_model_and_then_its_thinking() {
         let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-sure-");
         let (url, _requests) = crate::route::test_support::stub(vec![
@@ -835,6 +910,7 @@ mod tests {
             &fleet_dir,
             &[],
             "k",
+            "pi",
             5_000,
         )
         .await
@@ -880,6 +956,7 @@ mod tests {
             &fleet_dir,
             &[],
             "k",
+            "pi",
             10_000,
         )
         .await
@@ -928,6 +1005,7 @@ mod tests {
             &fleet_dir,
             &[],
             "k",
+            "pi",
             300,
         )
         .await
@@ -964,6 +1042,7 @@ mod tests {
             &fleet_dir,
             &[],
             "k",
+            "pi",
             60_000,
         )
         .await

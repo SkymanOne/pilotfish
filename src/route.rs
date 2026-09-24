@@ -182,7 +182,7 @@ pub fn candidates(brief: &Brief<'_>, config: &RoutingConfig) -> Result<Vec<Worke
     let list = narrow(brief.catalogue, brief.provider, &config.models);
     if list.is_empty() {
         return Err(if brief.catalogue.is_empty() {
-            "no pi catalogue yet — it is written when a worker first starts".to_string()
+            "pi could not be asked for its models".to_string()
         } else {
             "no model in pi's catalogue matches the shortlist and the pinned provider".to_string()
         });
@@ -949,8 +949,10 @@ mod tests {
         let err = candidates(&brief(&huge, &[]), &RoutingConfig::default()).unwrap_err();
         assert!(err.contains("300 models"), "{err}");
         assert!(err.contains("shortlist"), "says how to narrow it: {err}");
-        let err = candidates(&brief(&[], &[]), &RoutingConfig::default()).unwrap_err();
-        assert!(err.contains("no pi catalogue"), "{err}");
+        let Err(err) = candidates(&brief(&[], &[]), &RoutingConfig::default()) else {
+            panic!("expected a decline");
+        };
+        assert!(err.contains("could not be asked"), "{err}");
     }
 
     #[test]

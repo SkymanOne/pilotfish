@@ -19,7 +19,8 @@ pub const BIN_NAME: &str = "pilotfish";
 /// The fleet-level pi catalogue (`availableModels` + `commands`): a property
 /// of the pi installation, byte-identical across runs, so it lives once
 /// here instead of being copied into every `run.json`. Refreshed on demand
-/// by any live worker monitor, and stamped with when pi last answered.
+/// by any live worker monitor or a one-shot pi, and stamped with when pi
+/// last answered.
 pub const PI_CACHE_FILE: &str = "pi-cache.json";
 
 /// Env-var name from its suffix: `_DIR` -> `PILOTFISH_DIR`.
@@ -112,8 +113,9 @@ impl FleetPaths {
     }
 
     /// `pi-cache.json` — the fleet-level pi catalogue (models + commands),
-    /// written by a worker monitor at boot and read back through run state
-    /// loading so the console needs no other source.
+    /// written by a worker monitor at boot or fetched on demand from a
+    /// one-shot pi, and read back through run state loading so the console
+    /// needs no other source.
     pub fn pi_cache(&self) -> PathBuf {
         self.root.join(PI_CACHE_FILE)
     }

@@ -558,11 +558,11 @@ impl Console {
                     .map(|cache| cache.available_models)
                     .unwrap_or_default();
                 if catalogue.is_empty() {
-                    self.toast(
-                        "! no pi catalogue yet — it is written when a worker first starts",
-                        true,
-                    );
-                    return Vec::new();
+                    // ask pi for its models rather than pretending there are
+                    // none; the effect only starts a fetch (one at a time),
+                    // so this never blocks the console
+                    self.toast("· fetching pi's model list…", false);
+                    return vec![Effect::FetchPiCatalogue];
                 }
                 panel.shortlist = Some(ShortlistEditor::new(catalogue, &status.models));
                 self.overlay = Some(Overlay::Routing(panel));
