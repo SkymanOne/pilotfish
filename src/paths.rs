@@ -394,6 +394,10 @@ pub struct RoutingConfig {
     /// configured `[worker] provider` — and pi can offer hundreds, more than
     /// one judgment can weigh, which is what this list is for.
     pub models: Vec<String>,
+    /// The TypeSafe key, when it is kept here rather than in
+    /// `$TYPESAFE_API_KEY`. A [`Secret`](crate::secrets::Secret), so printing
+    /// the config never prints the key.
+    pub api_key: Option<crate::secrets::Secret>,
 }
 
 impl Default for RoutingConfig {
@@ -404,6 +408,7 @@ impl Default for RoutingConfig {
             confidence_threshold: None,
             endpoint: None,
             models: Vec::new(),
+            api_key: None,
         }
     }
 }
@@ -547,8 +552,11 @@ pub fn console_holder(lock: &Path) -> Option<u64> {
 }
 
 /// Set one `[routing]` key in `<user_dir>/config.toml` — `enabled`,
-/// `confidence_threshold`, `models` — creating the file and the section when
-/// they are missing.
+/// `confidence_threshold`, `models`, `api_key` — creating the file and the
+/// section when they are missing. [`toml_edit::Item::None`] removes the key.
+///
+/// The file can hold the TypeSafe key, so it is written readable by its
+/// owner only, whatever it held before.
 ///
 /// Edits the document rather than re-serialising it, so a file the user
 /// wrote by hand keeps its comments, its order and every key this code does
@@ -577,11 +585,41 @@ pub fn set_routing(user_dir: &Path, key: &str, value: toml_edit::Item) -> anyhow
     let Some(table) = routing.as_table_like_mut() else {
         anyhow::bail!("user config {}: `routing` is not a table", path.display());
     };
-    table.insert(key, value);
+    if value.is_none() {
+        table.remove(key);
+    } else {
+        table.insert(key, value);
+    }
     std::fs::create_dir_all(user_dir)
         .with_context(|| format!("creating {}", user_dir.display()))?;
-    std::fs::write(&path, doc.to_string())
+    write_private(&path, doc.to_string().as_bytes())
         .with_context(|| format!("writing user config {}", path.display()))
+}
+
+/// Write `contents` to `path` readable and writable by its owner only. An
+/// existing file is narrowed *before* the write, so the key is never on
+/// disk under wider permissions, not even for a moment.
+fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(contents)
+    }
 }
 
 /// Append `entry` to `<root>/.gitignore` unless a line already covers it.
@@ -936,6 +974,32 @@ mod tests {
         assert!((config.routing.confidence_threshold() - 0.45).abs() < 1e-9);
         assert_eq!(config.routing.models, models);
         let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# the good one"), "{raw}");
+
+        set_routing(
+            tmp.path(),
+            "api_key",
+            toml_edit::value("ts_live_0123456789abcdef"),
+        )
+        .unwrap();
+        let config = load_user_config(Some(tmp.path())).unwrap();
+        assert_eq!(
+            config
+                .routing
+                .api_key
+                .as_ref()
+                .map(crate::secrets::Secret::expose),
+            Some("ts_live_0123456789abcdef")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "a file holding the key is its owner's alone");
+        }
+        set_routing(tmp.path(), "api_key", toml_edit::Item::None).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("api_key"), "removed, not blanked: {raw}");
         assert!(raw.contains("# the good one"), "{raw}");
     }
 

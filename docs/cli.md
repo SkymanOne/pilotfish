@@ -42,4 +42,4 @@ pi can offer hundreds of models, most of them from several providers, so routing
 
 Routing stays within the limits you set. An explicit `--model` is never overridden, although a reasoning level is still chosen for it unless `--thinking` is also given. A worktree is only omitted when the brief is clearly read-only. When routing is enabled but cannot decide — no key, no network, too many candidates — the spawn proceeds on the configured defaults and prints the reason.
 
-The API key is set with `/routing` in the console, which stores it in the operating system's credential store, or supplied through `$PILOTFISH_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`, which take precedence when set.
+The API key comes from `$TYPESAFE_API_KEY` when it is set, and otherwise from `[routing] api_key` in `~/.pilotfish/config.toml`, which `/routing` in the console writes when you paste a key into it. Without either, a routed spawn proceeds on the configured defaults and says the key is missing.

@@ -87,7 +87,7 @@ pilotfish --permission-mode auto      # a classifier approves routine actions
 pilotfish --model opus                # the orchestrator's model; /model changes it during a session
 ```
 
-By default a worker runs on `[worker] model` from `~/.pilotfish/config.toml`, unless the orchestrator specifies another. Routing can choose instead: `/routing` enables it and stores a [TypeSafe](https://docs.typesafe.ai) API key in the operating system's credential store, and nowhere else. With routing enabled, a worker spawned without a model is routed in two steps:
+By default a worker runs on `[worker] model` from `~/.pilotfish/config.toml`, unless the orchestrator specifies another. Routing can choose instead. It needs a [TypeSafe](https://docs.typesafe.ai) API key, read from `$TYPESAFE_API_KEY` or, failing that, from `~/.pilotfish/config.toml`; `/routing` enables routing, and when no key is set the console asks you to paste one and saves it to that file, readable only by you. With routing enabled, a worker spawned without a model is routed in two steps:
 
 1. **Model.** TypeSafe's System One (Jev) selects the model that gives the best result for its cost from your shortlist. Each candidate is presented with its price relative to the cheapest option, and where two candidates are nearly tied, the cheaper one is chosen. If Jev's confidence is below your limit, the console asks you to choose, and the spawn waits for your answer for up to ten minutes before falling back to the configured model.
 2. **Thinking level.** Jev then selects a reasoning level from those the chosen model supports.

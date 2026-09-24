@@ -37,12 +37,19 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// A user config directory that holds nothing, for every child: no test may
+/// read the developer's `~/.pilotfish`.
+const NO_USER_HOME: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/no-user-home");
+
 fn pilotfish() -> assert_cmd::Command {
     let mut command = assert_cmd::Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
         // No child inherits an ambient PILOTFISH_DIR; the helpers that know the
         // test's own fleet dir pin it explicitly below.
         .env_remove("PILOTFISH_DIR")
+        // nor the developer's own ~/.pilotfish: with routing on and a key in
+        // it, a spawn here would call the real TypeSafe API
+        .env("PILOTFISH_HOME", NO_USER_HOME)
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
@@ -472,6 +479,7 @@ fn the_hidden_orchestrator_monitor_reaches_its_implementation() {
     let (_tmp, root) = plain_dir();
     let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
     let output = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
+        .env("PILOTFISH_HOME", NO_USER_HOME)
         .args(["orchestrator-monitor", "--fleet-dir"])
         .arg(&fleet_dir)
         .env("PILOTFISH_DIR", &fleet_dir)
@@ -511,6 +519,7 @@ fn mcp_serves_the_fleet_tools_over_stdio() {
     let _serial = serial();
     let (_tmp, root) = plain_dir();
     let mut child = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
+        .env("PILOTFISH_HOME", NO_USER_HOME)
         .arg("mcp")
         .current_dir(&root)
         .env(
@@ -967,6 +976,7 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     let (tmp, root) = plain_dir();
     let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
     let mut monitor = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
+        .env("PILOTFISH_HOME", NO_USER_HOME)
         .args(["orchestrator-monitor", "--fleet-dir"])
         .arg(&fleet_dir)
         .env("PILOTFISH_DIR", &fleet_dir)

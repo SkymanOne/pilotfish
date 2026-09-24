@@ -125,6 +125,11 @@ fn spawn_monitor(
         .args(["--session"])
         .arg(session.uuid.to_string())
         .envs(env)
+        // never the developer's own ~/.pilotfish
+        .env(
+            "PILOTFISH_HOME",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/no-user-home"),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::from(log));

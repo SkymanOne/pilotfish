@@ -531,7 +531,7 @@ impl Console {
             KeyAction::InsertChar('d') => {
                 if matches!(
                     panel.status.as_ref().map(|s| &s.key),
-                    Some(KeyState::Store { .. })
+                    Some(KeyState::Config { .. })
                 ) {
                     panel.confirm_delete = true;
                     self.overlay = Some(Overlay::Routing(panel));

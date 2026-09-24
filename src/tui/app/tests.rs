@@ -18,7 +18,10 @@ fn test_console() -> Console {
         crate::util::new_id("t").replace('_', "")
     ));
     std::fs::create_dir_all(&dir).unwrap();
-    Console::new(FleetPaths::new(dir))
+    let mut console = Console::new(FleetPaths::new(&dir));
+    // never the developer's own ~/.pilotfish: it can hold a real key
+    console.user_dir = Some(dir.join("home"));
+    console
 }
 
 fn key(code: KeyCode) -> KeyEvent {
@@ -1266,8 +1269,9 @@ fn the_routing_panel_switches_routing_and_deletes_only_a_stored_key() {
     open_routing(
         &mut c,
         true,
-        KeyState::Store {
+        KeyState::Config {
             masked: "••••cdef".into(),
+            path: "~/.pilotfish/config.toml".into(),
         },
     );
     assert_eq!(c.handle_key(ch('r')), vec![Effect::SetRouting(false)]);
@@ -2278,4 +2282,134 @@ fn a_stale_catalogue_with_no_live_worker_is_fetched_from_pi_directly() {
         }),
         "{effects:?}"
     );
+}
+
+/// A console whose user config says `config`, and whose fleet has a fresh
+/// pi catalogue — so opening the routing panel never starts a real pi.
+fn console_with_user_config(config: &str) -> Console {
+    let c = test_console();
+    let home = c.user_dir.clone().unwrap();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("config.toml"), config).unwrap();
+    crate::fleet::run::write_pi_cache(
+        c.fleet.root(),
+        &crate::fleet::run::PiCache {
+            available_models: vec![WorkerModel::new("anthropic", "claude-opus-5")],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    c
+}
+
+#[test]
+fn routing_on_without_a_key_asks_for_one_as_the_console_opens() {
+    let mut c = console_with_user_config("[routing]\nenabled = true\n");
+    c.ask_for_missing_key();
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("the routing panel, asking for the key");
+    };
+    assert!(panel.entering.is_some(), "straight into pasting it");
+    assert_eq!(panel.status.as_ref().unwrap().key, KeyState::None);
+
+    // with a key in the config, or routing off, nothing is asked
+    let mut c = console_with_user_config(
+        "[routing]\nenabled = true\napi_key = \"ts_live_0123456789abcdef\"\n",
+    );
+    c.ask_for_missing_key();
+    assert!(c.overlay().is_none());
+    let mut c = console_with_user_config("[routing]\nenabled = false\n");
+    c.ask_for_missing_key();
+    assert!(c.overlay().is_none());
+}
+
+#[tokio::test]
+async fn a_pasted_key_is_saved_to_the_user_config_and_can_be_removed() {
+    let mut c = console_with_user_config("# mine\n[routing]\nenabled = true\n");
+    assert_eq!(c.submit("/routing"), vec![Effect::LoadRoutingStatus]);
+    c.execute_all(vec![Effect::LoadRoutingStatus]).await;
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("the panel");
+    };
+    assert!(
+        panel.entering.is_some(),
+        "no key yet, so /routing asks for one"
+    );
+
+    c.paste(KEY);
+    let effects = c.handle_key(enter());
+    assert_eq!(effects, vec![Effect::SaveTypesafeKey(Secret::new(KEY))]);
+    c.execute_all(effects).await;
+    let path = c.user_dir.clone().unwrap().join("config.toml");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains(KEY) && raw.contains("# mine"), "{raw}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("still the panel");
+    };
+    assert!(
+        matches!(&panel.status.as_ref().unwrap().key, KeyState::Config { masked, .. } if masked == "••••cdef"),
+        "{:?}",
+        panel.status
+    );
+    assert!(
+        !c.flash().unwrap().text.contains("0123456789"),
+        "the toast names the file, never the key"
+    );
+
+    c.handle_key(ch('d'));
+    let effects = c.handle_key(ch('y'));
+    assert_eq!(effects, vec![Effect::DeleteTypesafeKey]);
+    c.execute_all(effects).await;
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("api_key"));
+}
+
+#[tokio::test]
+async fn switching_routing_on_without_a_key_asks_for_one() {
+    let mut c = console_with_user_config("[routing]\nenabled = false\n");
+    c.submit("/routing");
+    c.execute_all(vec![Effect::LoadRoutingStatus]).await;
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("the panel");
+    };
+    assert!(panel.entering.is_some(), "no key: /routing asks for it");
+    // esc declines, and the panel stays
+    c.handle_key(esc());
+    let effects = c.handle_key(ch('r'));
+    assert_eq!(effects, vec![Effect::SetRouting(true)]);
+    c.execute_all(effects).await;
+    // switching routing on with no key asks again
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("the panel");
+    };
+    assert!(panel.entering.is_some());
+}
+
+#[test]
+fn a_status_reload_never_starts_a_catalogue_fetch() {
+    // no catalogue at all: the state that once kept a fetch, a reload and a
+    // key read going round every feed tick
+    let mut c = test_console();
+    c.overlay = Some(Overlay::Routing(RoutingPanel::default()));
+    c.reload_routing_status();
+    assert!(
+        !c.pi_fetch
+            .in_flight
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "only opening the panel, the palette or `m` asks pi"
+    );
+    // a fetch that finished is collected, and reloads, without starting another
+    *c.pi_fetch.result.lock().unwrap() = Some(Vec::new());
+    c.collect_pi_fetch();
+    assert!(
+        !c.pi_fetch
+            .in_flight
+            .load(std::sync::atomic::Ordering::SeqCst)
+    );
+    assert!(c.pi_fetch.result.lock().unwrap().is_none(), "reported once");
 }

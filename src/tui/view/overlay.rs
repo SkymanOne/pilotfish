@@ -356,18 +356,19 @@ unsure, then a thinking level that model has.",
             } else {
                 row("routing", "off".into(), pal.dim())
             });
-            let store = crate::secrets::store_name();
             lines.extend(match &status.key {
                 KeyState::None => row("api key", "none set".into(), pal.attention()),
-                KeyState::Store { masked } => {
-                    row("api key", format!("{masked}, in {store}"), pal.accent())
+                KeyState::Config { masked, path } => {
+                    row("api key", format!("{masked}, in {path}"), pal.accent())
                 }
-                KeyState::Env { var, masked } => row(
+                KeyState::Env { masked } => row(
                     "api key",
-                    format!("{masked}, from ${var} (it wins over {store})"),
+                    format!(
+                        "{masked}, from ${} (it wins over the config file)",
+                        crate::secrets::KEY_VAR
+                    ),
                     pal.accent(),
                 ),
-                KeyState::Unavailable(why) => row("api key", why.clone(), pal.error()),
             });
             lines.extend(match &status.candidates {
                 Ok(n) => row(
@@ -417,10 +418,8 @@ unsure, then a thinking level that model has.",
         ]));
         lines.push(Line::default());
         lines.push(Line::styled(
-            format!(
-                "enter save to {} · esc cancel",
-                crate::secrets::store_name()
-            ),
+            "enter save to ~/.pilotfish/config.toml (readable only by you) · esc cancel"
+                .to_string(),
             pal.dim(),
         ));
     } else if state.confirm_delete {
@@ -431,7 +430,7 @@ unsure, then a thinking level that model has.",
     } else {
         let stored = matches!(
             state.status.as_ref().map(|s| &s.key),
-            Some(KeyState::Store { .. })
+            Some(KeyState::Config { .. })
         );
         let mut hint = String::from("r routing on/off · s set key · m shortlist · -/+ ask limit");
         if stored {

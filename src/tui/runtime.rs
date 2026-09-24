@@ -707,6 +707,9 @@ pub async fn run_console(
     }
 
     poll.save_cursors();
+    // routing switched on with no key anywhere: ask for it now, while the
+    // screen is otherwise empty, rather than letting every spawn decline
+    console.ask_for_missing_key();
 
     let mut events = EventStream::new();
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
@@ -810,7 +813,7 @@ pub async fn run_console(
                 // a one-shot pi fetch that finished reloads the routing
                 // status, so the panel picks up the fresh catalogue without
                 // the user asking again
-                console.collect_pi_fetch().await;
+                console.collect_pi_fetch();
                 poll.tail_events(&mut console);
                 poll.forward_fleet_events(&mut console).await;
                 poll.refresh_diff_stats(&mut console).await;

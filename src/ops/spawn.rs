@@ -258,30 +258,19 @@ async fn route_request(
     if request.model.is_some() && request.thinking.is_some() {
         return None;
     }
-    // The key is only looked up once routing is on: reading the credential
-    // store can put up a system dialog, and a spawn that was never going to
-    // route has no business causing one.
     if !routing_config.enabled {
         return None;
     }
     // routing is on, so a missing key is said rather than silently skipped
-    let key = match tokio::task::spawn_blocking(crate::secrets::typesafe_key).await {
-        Ok(Ok(Some((key, _)))) => key,
-        Ok(Ok(None)) => {
-            return Some(crate::route::Routing {
-                note: "not routed: no TypeSafe key — set one with /routing in the console, \
-or $PILOTFISH_TYPESAFE_API_KEY"
-                    .to_string(),
-                ..crate::route::Routing::default()
-            });
-        }
-        Ok(Err(err)) => {
-            return Some(crate::route::Routing {
-                note: format!("not routed: {err}"),
-                ..crate::route::Routing::default()
-            });
-        }
-        Err(_) => return None,
+    let Some((key, _)) = crate::secrets::typesafe_key(&routing_config, None) else {
+        return Some(crate::route::Routing {
+            note: format!(
+                "not routed: no TypeSafe key — paste one into /routing in the console, \
+or set ${}",
+                crate::secrets::KEY_VAR
+            ),
+            ..crate::route::Routing::default()
+        });
     };
     route_with_key(
         request,
@@ -298,7 +287,7 @@ or $PILOTFISH_TYPESAFE_API_KEY"
 
 /// [`route_request`] once routing is on and the key is in hand — the part
 /// the tests drive, since the key otherwise comes from the environment or
-/// the credential store.
+/// the user config.
 #[allow(clippy::too_many_arguments)]
 async fn route_with_key(
     request: &mut SpawnRequest,

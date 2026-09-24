@@ -91,7 +91,12 @@ impl McpClient {
     /// Spawn `pilotfish mcp [--cwd root]` with the given extra environment.
     fn spawn(root: Option<&Path>, extra_env: &[(&str, &str)]) -> Self {
         let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
-        command.args(["mcp"]);
+        // never the developer's own ~/.pilotfish, which can switch routing on
+        // and hold a real key
+        command.args(["mcp"]).env(
+            "PILOTFISH_HOME",
+            concat!(env!("CARGO_TARGET_TMPDIR"), "/no-user-home"),
+        );
         if let Some(root) = root {
             // The child must never inherit an ambient PILOTFISH_DIR: its fleet is
             // the one this test created, resolved from `--cwd`.

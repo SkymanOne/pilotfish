@@ -1,22 +1,21 @@
-//! The TypeSafe API key, kept out of every file `pilotfish` writes.
+//! The TypeSafe API key.
 //!
-//! Resolution is the environment first — `$PILOTFISH_TYPESAFE_API_KEY`, then
-//! `$TYPESAFE_API_KEY`, which is what CI and headless boxes use — and then
-//! the operating system's credential store: the macOS Keychain, the Windows
-//! Credential Manager, or the Secret Service on Linux. There is deliberately
-//! no file fallback. A machine without a credential store gets the
-//! environment variable or nothing, because a plaintext key in `~/.pilotfish` is
-//! the one thing this module exists to avoid.
+//! Resolution is `$TYPESAFE_API_KEY` first — what CI, headless boxes and a
+//! shell profile's `export` use — and then `[routing] api_key` in the user
+//! config, `~/.pilotfish/config.toml`, which the console writes when the
+//! human pastes a key into it. That file is written readable by its owner
+//! only (see [`crate::paths::set_routing`]).
 //!
-//! Every call into the store blocks, and on macOS the first read by a newly
-//! built binary can put up a system dialog asking to allow it. Callers on an
-//! async path run these on a blocking thread.
+//! There is deliberately no credential store any more: the operating
+//! system's Keychain put up a password dialog for every rebuilt binary, and
+//! an unsigned `cargo install` is a rebuilt binary every time.
 
-use crate::paths::env_var;
+use std::path::PathBuf;
 
-/// The credential store entry: service and account.
-const SERVICE: &str = "pilotfish";
-const ACCOUNT: &str = "typesafe-api-key";
+use crate::paths::RoutingConfig;
+
+/// The environment variable that holds a key. It wins over the config file.
+pub const KEY_VAR: &str = "TYPESAFE_API_KEY";
 
 /// A secret that never prints. `Debug` masks it, so an effect or a state
 /// that carries one can be logged, asserted on and diffed without the key
@@ -84,6 +83,12 @@ impl Secret {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(|key| Self::new(&key))
+    }
+}
+
 impl std::fmt::Debug for Secret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Secret({})", self.masked())
@@ -93,194 +98,46 @@ impl std::fmt::Debug for Secret {
 /// Where the key came from, so the console can say which one is in force.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeySource {
-    /// An environment variable, named. It wins over the credential store.
-    Env(String),
-    /// The operating system's credential store.
-    Store,
+    /// [`KEY_VAR`], which wins over the config file.
+    Env,
+    /// `[routing] api_key` in the user config at this path.
+    Config(PathBuf),
 }
 
-/// What went wrong talking to the credential store.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum SecretError {
-    /// There is no credential store here, or it refused access: a headless
-    /// Linux box without a Secret Service, or a denied Keychain dialog.
-    #[error("no credential store is reachable here ({0}) — set ${var} instead", var = env_var("TYPESAFE_API_KEY"))]
-    Unavailable(String),
-    /// The store is there and the call failed anyway.
-    #[error("the credential store failed: {0}")]
-    Failed(String),
-}
-
-/// A place a secret can be kept. The operating system's store is the only
-/// real one; the trait exists so tests never touch the developer's Keychain.
-pub trait SecretStore {
-    /// The stored key, or `None` when nothing is stored.
-    ///
-    /// # Errors
-    ///
-    /// [`SecretError`] when the store cannot be reached or the read fails.
-    fn get(&self) -> Result<Option<Secret>, SecretError>;
-    /// Store `key`, replacing whatever was there.
-    ///
-    /// # Errors
-    ///
-    /// [`SecretError`] when the store cannot be reached or the write fails.
-    fn set(&self, key: &Secret) -> Result<(), SecretError>;
-    /// Remove the key. Removing nothing is not an error.
-    ///
-    /// # Errors
-    ///
-    /// [`SecretError`] when the store cannot be reached or the delete fails.
-    fn delete(&self) -> Result<(), SecretError>;
-}
-
-/// The operating system's credential store.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Keychain;
-
-impl Keychain {
-    fn entry() -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(SERVICE, ACCOUNT).map_err(classify)
-    }
-}
-
-impl SecretStore for Keychain {
-    fn get(&self) -> Result<Option<Secret>, SecretError> {
-        match Self::entry()?.get_password() {
-            Ok(key) => Ok(Some(Secret::new(&key)).filter(|k| !k.is_empty())),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(err) => Err(classify(err)),
-        }
-    }
-
-    fn set(&self, key: &Secret) -> Result<(), SecretError> {
-        Self::entry()?.set_password(key.expose()).map_err(classify)
-    }
-
-    fn delete(&self) -> Result<(), SecretError> {
-        match Self::entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(err) => Err(classify(err)),
-        }
-    }
-}
-
-/// Sort a store error into "there is no store" and "the store failed", which
-/// is the distinction the console has to explain.
-fn classify(err: keyring::Error) -> SecretError {
-    match err {
-        keyring::Error::NoStorageAccess(_) | keyring::Error::NoDefaultStore => {
-            SecretError::Unavailable(err.to_string())
-        }
-        other => SecretError::Failed(other.to_string()),
-    }
-}
-
-/// The credential store's name as the console should say it.
+/// The key in force: `env`'s value when it holds one, else the config's.
+/// Injected values keep tests off the ambient environment.
 #[must_use]
-pub const fn store_name() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "the macOS Keychain"
-    } else if cfg!(target_os = "windows") {
-        "the Windows Credential Manager"
-    } else {
-        "the Secret Service keyring"
-    }
-}
-
-/// The environment variables that hold a key, most specific first.
-fn env_vars() -> [String; 2] {
-    [env_var("TYPESAFE_API_KEY"), "TYPESAFE_API_KEY".to_string()]
-}
-
-/// The key from the environment, if one is set, with the variable it came
-/// from. Injected values keep tests off the ambient environment.
-#[must_use]
-pub fn key_from_env(values: [Option<&str>; 2]) -> Option<(Secret, KeySource)> {
-    env_vars()
-        .into_iter()
-        .zip(values)
-        .find_map(|(name, value)| {
-            let key = Secret::new(value?);
-            (!key.is_empty()).then_some((key, KeySource::Env(name)))
-        })
-}
-
-/// The ambient environment's values for [`key_from_env`].
-fn ambient_env() -> [Option<String>; 2] {
-    env_vars().map(|name| std::env::var(name).ok())
-}
-
-/// The key in force: the environment's, else the store's.
-///
-/// # Errors
-///
-/// [`SecretError`] only when no environment variable is set *and* the store
-/// cannot be read — a store that simply holds nothing is `Ok(None)`.
 pub fn typesafe_key_with(
-    store: &dyn SecretStore,
-    env: [Option<&str>; 2],
-) -> Result<Option<(Secret, KeySource)>, SecretError> {
-    if let Some(found) = key_from_env(env) {
-        return Ok(Some(found));
+    env: Option<&str>,
+    config: &RoutingConfig,
+    config_path: Option<PathBuf>,
+) -> Option<(Secret, KeySource)> {
+    if let Some(key) = env.map(Secret::new).filter(|key| !key.is_empty()) {
+        return Some((key, KeySource::Env));
     }
-    Ok(store.get()?.map(|key| (key, KeySource::Store)))
+    let key = config.api_key.clone().filter(|key| !key.is_empty())?;
+    Some((key, KeySource::Config(config_path.unwrap_or_default())))
 }
 
-/// [`typesafe_key_with`] against the real environment and the real store.
-///
-/// # Errors
-///
-/// As [`typesafe_key_with`].
-pub fn typesafe_key() -> Result<Option<(Secret, KeySource)>, SecretError> {
-    let env = ambient_env();
-    typesafe_key_with(&Keychain, [env[0].as_deref(), env[1].as_deref()])
+/// [`typesafe_key_with`] against the real environment; `user_dir` is where
+/// `config` was read from, for saying where the key lives.
+#[must_use]
+pub fn typesafe_key(
+    config: &RoutingConfig,
+    user_dir: Option<&std::path::Path>,
+) -> Option<(Secret, KeySource)> {
+    typesafe_key_with(
+        std::env::var(KEY_VAR).ok().as_deref(),
+        config,
+        user_dir.map(|dir| dir.join("config.toml")),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// A store in memory, so no test ever reads or writes the real Keychain.
-    #[derive(Default)]
-    struct Memory {
-        key: Mutex<Option<Secret>>,
-        unavailable: bool,
-    }
-
-    impl SecretStore for Memory {
-        fn get(&self) -> Result<Option<Secret>, SecretError> {
-            if self.unavailable {
-                return Err(SecretError::Unavailable("no store".into()));
-            }
-            Ok(self.key.lock().unwrap().clone())
-        }
-        fn set(&self, key: &Secret) -> Result<(), SecretError> {
-            *self.key.lock().unwrap() = Some(key.clone());
-            Ok(())
-        }
-        fn delete(&self) -> Result<(), SecretError> {
-            *self.key.lock().unwrap() = None;
-            Ok(())
-        }
-    }
 
     const KEY: &str = "ts_live_0123456789abcdef";
-
-    /// The real credential store, round-tripped under a throwaway entry that
-    /// is deleted again. Ignored by default: it touches the machine's
-    /// Keychain, which a hermetic suite must not. Run it by hand once per
-    /// platform: `cargo test --lib secrets -- --ignored`.
-    #[test]
-    #[ignore = "touches the real OS credential store"]
-    fn the_operating_system_store_round_trips_a_throwaway_entry() {
-        let entry = keyring::Entry::new(SERVICE, "roundtrip-test").unwrap();
-        entry.set_password("throwaway-value").unwrap();
-        assert_eq!(entry.get_password().unwrap(), "throwaway-value");
-        entry.delete_credential().unwrap();
-        assert!(matches!(entry.get_password(), Err(keyring::Error::NoEntry)));
-    }
 
     #[test]
     fn a_secret_never_prints_and_shows_only_its_last_four() {
@@ -318,56 +175,37 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_wins_over_the_store_and_names_its_variable() {
-        let store = Memory::default();
-        store.set(&Secret::new("stored-key-0000000000")).unwrap();
-
-        let (key, source) = typesafe_key_with(&store, [Some(KEY), None])
-            .unwrap()
-            .unwrap();
+    fn the_environment_wins_over_the_config_file() {
+        let config = RoutingConfig {
+            api_key: Some(Secret::new("configured-key-00000000")),
+            ..RoutingConfig::default()
+        };
+        let path = PathBuf::from("/home/me/.pilotfish/config.toml");
+        let (key, source) = typesafe_key_with(Some(KEY), &config, Some(path.clone())).unwrap();
         assert_eq!(key.expose(), KEY);
-        assert_eq!(source, KeySource::Env("PILOTFISH_TYPESAFE_API_KEY".into()));
-
-        let (_, source) = typesafe_key_with(&store, [None, Some(KEY)])
-            .unwrap()
-            .unwrap();
-        assert_eq!(source, KeySource::Env("TYPESAFE_API_KEY".into()));
+        assert_eq!(source, KeySource::Env);
 
         // a blank variable is no variable
-        let (key, source) = typesafe_key_with(&store, [Some("  "), None])
-            .unwrap()
-            .unwrap();
-        assert_eq!(source, KeySource::Store);
-        assert_eq!(key.expose(), "stored-key-0000000000");
-    }
+        let (key, source) = typesafe_key_with(Some("  "), &config, Some(path.clone())).unwrap();
+        assert_eq!(source, KeySource::Config(path));
+        assert_eq!(key.expose(), "configured-key-00000000");
 
-    #[test]
-    fn an_empty_store_is_no_key_and_an_absent_store_is_an_error() {
         assert_eq!(
-            typesafe_key_with(&Memory::default(), [None, None]).unwrap(),
-            None
+            typesafe_key_with(None, &RoutingConfig::default(), None),
+            None,
+            "neither set is no key"
         );
-        let absent = Memory {
-            unavailable: true,
-            ..Memory::default()
-        };
-        let err = typesafe_key_with(&absent, [None, None]).unwrap_err();
-        assert!(matches!(err, SecretError::Unavailable(_)));
-        assert!(
-            err.to_string().contains("PILOTFISH_TYPESAFE_API_KEY"),
-            "the error says what to do instead: {err}"
-        );
-        // …unless the environment already answered
-        assert!(typesafe_key_with(&absent, [Some(KEY), None]).is_ok());
     }
 
     #[test]
-    fn a_stored_key_round_trips_and_deleting_nothing_is_fine() {
-        let store = Memory::default();
-        store.set(&Secret::new(KEY)).unwrap();
-        assert_eq!(store.get().unwrap().unwrap().expose(), KEY);
-        store.delete().unwrap();
-        store.delete().unwrap();
-        assert_eq!(store.get().unwrap(), None);
+    fn a_configured_key_never_prints_with_its_config() {
+        let config: RoutingConfig = toml::from_str(&format!("api_key = \"  {KEY} \"")).unwrap();
+        assert_eq!(
+            config.api_key.as_ref().map(Secret::expose),
+            Some(KEY),
+            "trimmed"
+        );
+        let printed = format!("{config:?}");
+        assert!(!printed.contains("0123456789"), "{printed}");
     }
 }

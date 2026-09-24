@@ -190,8 +190,8 @@ impl ShortlistEditor {
     }
 }
 
-/// What the panel reports, gathered off the UI thread because reading the
-/// credential store can block on a system dialog.
+/// What the routing panel reports: the switch, where the key comes from,
+/// what routing would choose between, the ask limit and the shortlist.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutingStatus {
     pub enabled: bool,
@@ -221,16 +221,15 @@ pub struct PiFetch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyState {
     None,
-    /// An environment variable, which wins over the store.
+    /// `$TYPESAFE_API_KEY`, which wins over the config file.
     Env {
-        var: String,
         masked: String,
     },
-    Store {
+    /// `[routing] api_key` in the user config at `path` (home as `~`).
+    Config {
         masked: String,
+        path: String,
     },
-    /// No credential store here, or it refused: the reason, for the panel.
-    Unavailable(String),
 }
 
 /// The full-brief viewer's own state (`b` in normal mode).
@@ -423,9 +422,9 @@ pub enum Effect {
     /// Find out what the routing panel reports: the key's source, the
     /// config's switch, the candidate count.
     LoadRoutingStatus,
-    /// Put a TypeSafe key in the operating system's credential store.
+    /// Save a TypeSafe key as `[routing] api_key` in the user config.
     SaveTypesafeKey(Secret),
-    /// Remove the stored TypeSafe key.
+    /// Remove `[routing] api_key` from the user config.
     DeleteTypesafeKey,
     /// Switch `[routing] enabled` in `~/.pilotfish/config.toml`.
     SetRouting(bool),
@@ -524,6 +523,10 @@ pub fn questions_of(request_input: &Value) -> Vec<AskQuestion> {
 /// The console's whole state, minus the terminal.
 pub struct Console {
     fleet: FleetPaths,
+    /// Where the user config lives (`~/.pilotfish`), read by the routing
+    /// panel and written by its settings. A field so tests point it at a
+    /// temporary directory rather than the developer's own.
+    user_dir: Option<std::path::PathBuf>,
     /// The orchestrator session this console renders: its transcript,
     /// inbox and prompt all live under `orchestrators/<key>/`. The runtime
     /// sets it before the first draw.
@@ -562,7 +565,8 @@ pub struct Console {
     /// Show every line of an old turn's reasoning and tool output, rather
     /// than folding each to a summary row (`ctrl-o`, `/verbose`).
     verbose: bool,
-    /// When the last key went down, so a permission prompt can wait for the    /// keyboard to go quiet before it raises itself.
+    /// When the last key went down, so a permission prompt can wait for the
+    /// keyboard to go quiet before it raises itself.
     last_key_at: i64,
     /// When a permission prompt last raised itself, for its grace window.
     raised_at: Option<i64>,
@@ -598,6 +602,7 @@ impl Console {
         };
         Self {
             fleet,
+            user_dir: crate::paths::user_dir(),
             caps: Capabilities::default(),
             // The session this console renders; the runtime replaces the
             // default with the fleet's current session before the first draw.
@@ -1660,7 +1665,7 @@ impl Console {
         let fleet_dir = self.fleet.root().to_path_buf();
         let pi_spec = crate::worker::models::pi_bin_spec();
         tokio::spawn(async move {
-            let models = crate::worker::models::ensure_pi_catalogue(&fleet_dir, &pi_spec).await;
+            let models = crate::worker::models::refresh_pi_catalogue(&fleet_dir, &pi_spec).await;
             *cell.result.lock().unwrap_or_else(PoisonError::into_inner) = Some(models);
             cell.in_flight.store(false, Ordering::SeqCst);
         });
@@ -1781,85 +1786,128 @@ impl Console {
         }
     }
 
-    /// Gather what the routing panel reports and hand it to the panel if it
-    /// is still open. The key's source comes off a blocking thread, since the
-    /// credential store can put up a dialog; the key itself never leaves it
-    /// except as its masked tail.
-    async fn reload_routing_status(&mut self) {
-        let key = match tokio::task::spawn_blocking(crate::secrets::typesafe_key).await {
-            Ok(Ok(Some((key, crate::secrets::KeySource::Env(var))))) => KeyState::Env {
-                var,
+    /// What the routing panel reports, from the environment and the user
+    /// config. Cheap: nothing here blocks, asks the system for anything, or
+    /// starts a fetch.
+    fn routing_status(&self) -> RoutingStatus {
+        let user_dir = self.user_dir.as_deref();
+        let config = crate::paths::load_user_config(user_dir);
+        // an environment key counts even when the config does not parse
+        let routing = config
+            .as_ref()
+            .map(|config| config.routing.clone())
+            .unwrap_or_default();
+        let key = match crate::secrets::typesafe_key(&routing, user_dir) {
+            Some((key, crate::secrets::KeySource::Env)) => KeyState::Env {
                 masked: key.masked(),
             },
-            Ok(Ok(Some((key, crate::secrets::KeySource::Store)))) => KeyState::Store {
+            Some((key, crate::secrets::KeySource::Config(path))) => KeyState::Config {
                 masked: key.masked(),
+                path: home_relative(&path),
             },
-            Ok(Ok(None)) => KeyState::None,
-            Ok(Err(err)) => KeyState::Unavailable(err.to_string()),
-            Err(err) => KeyState::Unavailable(err.to_string()),
+            None => KeyState::None,
         };
-        let user_dir = crate::paths::user_dir();
-        let (enabled, candidates, threshold, models) =
-            match crate::paths::load_user_config(user_dir.as_deref()) {
-                Ok(config) => {
-                    let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
-                        .map(|cache| cache.available_models)
-                        .unwrap_or_default();
-                    // no catalogue, or a stale one, is fetched in the
-                    // background when no worker could answer for it; the
-                    // panel says what is happening instead of pretending
-                    // there is no catalogue
-                    if self.pi_catalogue_stale() && self.first_live_run_id().is_none() {
-                        self.start_pi_catalogue_fetch();
-                    }
-                    let root = self.fleet.root().to_path_buf();
-                    let brief = crate::route::Brief {
-                        name: "",
-                        brief: "",
-                        repo_root: &root,
-                        in_flight: &[],
-                        catalogue: &catalogue,
-                        provider: config.worker_provider(None),
-                        fallback_model: config.worker_model(None),
-                        model_pinned: false,
-                    };
-                    let candidates = if catalogue.is_empty() {
-                        Err(if self.pi_fetch.in_flight.load(Ordering::SeqCst) {
-                            "pi's model list is being fetched…".to_string()
-                        } else {
-                            "pi could not be asked for its models".to_string()
-                        })
+        let (enabled, candidates, threshold, models) = match config {
+            Ok(config) => {
+                let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
+                    .map(|cache| cache.available_models)
+                    .unwrap_or_default();
+                let root = self.fleet.root().to_path_buf();
+                let brief = crate::route::Brief {
+                    name: "",
+                    brief: "",
+                    repo_root: &root,
+                    in_flight: &[],
+                    catalogue: &catalogue,
+                    provider: config.worker_provider(None),
+                    fallback_model: config.worker_model(None),
+                    model_pinned: false,
+                };
+                let candidates = if catalogue.is_empty() {
+                    Err(if self.pi_fetch.in_flight.load(Ordering::SeqCst) {
+                        "pi's model list is being fetched…".to_string()
                     } else {
-                        crate::route::candidates(&brief, &config.routing).map(|list| list.len())
-                    };
-                    (
-                        config.routing.enabled,
-                        candidates,
-                        config.routing.confidence_threshold(),
-                        config.routing.models.clone(),
-                    )
-                }
-                Err(err) => (
-                    false,
-                    Err(format!("{err:#}")),
-                    crate::paths::DEFAULT_ROUTING_CONFIDENCE,
-                    Vec::new(),
-                ),
-            };
-        self.set_routing_status(RoutingStatus {
+                        "pi could not be asked for its models".to_string()
+                    })
+                } else {
+                    crate::route::candidates(&brief, &config.routing).map(|list| list.len())
+                };
+                (
+                    config.routing.enabled,
+                    candidates,
+                    config.routing.confidence_threshold(),
+                    config.routing.models.clone(),
+                )
+            }
+            Err(err) => (
+                false,
+                Err(format!("{err:#}")),
+                crate::paths::DEFAULT_ROUTING_CONFIDENCE,
+                Vec::new(),
+            ),
+        };
+        RoutingStatus {
             enabled,
             key,
             candidates,
             threshold,
             models,
-        });
+        }
+    }
+
+    /// Hand the open routing panel a fresh status; with the panel closed
+    /// there is nobody to tell, so nothing is read.
+    fn reload_routing_status(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Routing(_))) {
+            let status = self.routing_status();
+            self.set_routing_status(status);
+        }
+    }
+
+    /// With the routing panel open and no key anywhere, go straight to
+    /// asking for one: routing cannot do anything without it.
+    fn ask_for_key_in_panel(&mut self) {
+        if let Some(Overlay::Routing(panel)) = &mut self.overlay
+            && panel.entering.is_none()
+            && panel
+                .status
+                .as_ref()
+                .is_some_and(|s| s.key == KeyState::None)
+        {
+            panel.entering = Some(Secret::default());
+        }
+    }
+
+    /// Routing is on but has no key: ask for one as the console opens, in
+    /// the routing panel, rather than letting every spawn decline. Called
+    /// once, before anything else can be on screen.
+    pub fn ask_for_missing_key(&mut self) {
+        if self.overlay.is_some() {
+            return;
+        }
+        let status = self.routing_status();
+        if status.enabled && status.key == KeyState::None {
+            self.overlay = Some(Overlay::Routing(RoutingPanel {
+                status: Some(status),
+                entering: Some(Secret::default()),
+                ..RoutingPanel::default()
+            }));
+        }
+    }
+
+    /// The user config directory, or the refusal every settings write gives
+    /// when there is none.
+    fn config_dir(&self) -> anyhow::Result<std::path::PathBuf> {
+        self.user_dir
+            .clone()
+            .context("no home directory to keep ~/.pilotfish/config.toml in")
     }
 
     /// Collect a finished one-shot fetch, if one finished since the last
     /// feed tick: say what it found and reload the routing status so the
     /// panel picks up the fresh catalogue. Called on the feed tick — the
     /// fetch itself ran on its own task, so this never blocks the UI loop.
-    pub async fn collect_pi_fetch(&mut self) {
+    pub fn collect_pi_fetch(&mut self) {
         let models = {
             let mut result = self
                 .pi_fetch
@@ -1886,7 +1934,7 @@ impl Console {
                 false,
             );
         }
-        self.reload_routing_status().await;
+        self.reload_routing_status();
     }
 
     /// Hand the routing panel what it reports, if it is still open — it may
@@ -1911,39 +1959,45 @@ impl Console {
                 Effect::Interrupt => {
                     self.append_orchestrator(&OrchestratorCommand::Interrupt)?;
                 }
-                Effect::LoadRoutingStatus => self.reload_routing_status().await,
+                Effect::LoadRoutingStatus => {
+                    self.reload_routing_status();
+                    // the catalogue is asked for on the way in, never from a
+                    // reload: a finished fetch reloads the status, and a
+                    // reload that fetched would go round for ever
+                    if self.pi_catalogue_stale() && self.first_live_run_id().is_none() {
+                        self.start_pi_catalogue_fetch();
+                    }
+                    self.ask_for_key_in_panel();
+                }
                 // executed, never awaited: the fetch runs on its own task and
                 // the feed tick collects it
                 Effect::FetchPiCatalogue => self.start_pi_catalogue_fetch(),
                 Effect::SaveTypesafeKey(key) => {
-                    use crate::secrets::SecretStore as _;
-                    // off the UI thread: the store can block on a system dialog
-                    let saved =
-                        tokio::task::spawn_blocking(move || crate::secrets::Keychain.set(&key))
-                            .await?;
-                    match saved {
-                        Ok(()) => self.toast(
-                            format!("· key saved in {}", crate::secrets::store_name()),
-                            false,
+                    let dir = self.config_dir()?;
+                    crate::paths::set_routing(&dir, "api_key", toml_edit::value(key.expose()))?;
+                    self.toast(
+                        format!(
+                            "· key saved to {}, readable only by you",
+                            home_relative(&dir.join("config.toml"))
                         ),
-                        Err(err) => self.toast(format!("! {err}"), true),
-                    }
-                    self.reload_routing_status().await;
+                        false,
+                    );
+                    self.reload_routing_status();
                 }
                 Effect::DeleteTypesafeKey => {
-                    use crate::secrets::SecretStore as _;
-                    let deleted =
-                        tokio::task::spawn_blocking(|| crate::secrets::Keychain.delete()).await?;
-                    match deleted {
-                        Ok(()) => self.toast("· stored key deleted", false),
-                        Err(err) => self.toast(format!("! {err}"), true),
-                    }
-                    self.reload_routing_status().await;
+                    let dir = self.config_dir()?;
+                    crate::paths::set_routing(&dir, "api_key", toml_edit::Item::None)?;
+                    self.toast(
+                        format!(
+                            "· key removed from {}",
+                            home_relative(&dir.join("config.toml"))
+                        ),
+                        false,
+                    );
+                    self.reload_routing_status();
                 }
                 Effect::SetRouting(on) => {
-                    let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
-                    };
+                    let dir = self.config_dir()?;
                     crate::paths::set_routing(&dir, "enabled", toml_edit::value(on))?;
                     self.toast(
                         if on {
@@ -1953,23 +2007,22 @@ impl Console {
                         },
                         false,
                     );
-                    self.reload_routing_status().await;
+                    self.reload_routing_status();
+                    if on {
+                        self.ask_for_key_in_panel();
+                    }
                 }
                 Effect::SetRoutingThreshold(limit) => {
-                    let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
-                    };
+                    let dir = self.config_dir()?;
                     crate::paths::set_routing(
                         &dir,
                         "confidence_threshold",
                         toml_edit::value(limit),
                     )?;
-                    self.reload_routing_status().await;
+                    self.reload_routing_status();
                 }
                 Effect::SetRoutingModels(models) => {
-                    let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
-                    };
+                    let dir = self.config_dir()?;
                     let count = models.len();
                     crate::paths::set_routing(
                         &dir,
@@ -1987,7 +2040,7 @@ impl Console {
                         },
                         false,
                     );
-                    self.reload_routing_status().await;
+                    self.reload_routing_status();
                 }
                 Effect::AnswerModelQuestion { id, model } => {
                     let name = self
@@ -2176,6 +2229,18 @@ pub fn worker_thinking_levels(state: &RunState) -> Vec<&str> {
             .map(String::as_str)
             .collect()
     }
+}
+
+/// `path` with the home directory written as `~`, the way the docs and the
+/// panel name the user config.
+fn home_relative(path: &Path) -> String {
+    dirs::home_dir()
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(|rest| format!("~/{}", rest.display()))
+        })
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 #[cfg(test)]

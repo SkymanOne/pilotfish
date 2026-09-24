@@ -65,9 +65,12 @@ User-level defaults live in `~/.pilotfish/config.toml` (`$PILOTFISH_HOME` overri
 | `[routing] enabled` | Choose each worker's model and reasoning level from its brief (off by default) |
 | `[routing] models` | The shortlist routing chooses from, as `provider:id` (at most 255) |
 | `[routing] confidence_threshold` | Below this confidence, you are asked to choose the model (default 0.6) |
+| `[routing] api_key` | The TypeSafe API key, when it is not in `$TYPESAFE_API_KEY` (which takes precedence) |
 | `[limits] max_workers_per_session` | The maximum number of live workers per session (default 3) |
 
-Routing is off unless enabled. `/routing` in the console enables it, edits the shortlist and the confidence limit, and stores the TypeSafe key in the system credential store; see [the CLI reference](cli.md#routing-a-brief) for how it decides.
+The file is written readable only by its owner, since it can hold the TypeSafe API key.
+
+Routing is off unless enabled. `/routing` in the console enables it, edits the shortlist and the confidence limit, and saves the TypeSafe key you paste into it; see [the CLI reference](cli.md#routing-a-brief) for how it decides.
 
 ## State
 

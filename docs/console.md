@@ -118,7 +118,7 @@ Most terminals also bypass mouse capture while a modifier is held during a drag 
 ```text
 ╭ model routing ───────────────────────────────────────────────────────╮
 │ routing   on                                                         │
-│ api key   ••••cdef, in the macOS Keychain                            │
+│ api key   ••••cdef, in ~/.pilotfish/config.toml                      │
 │ choosing  between 12 models                                          │
 │ shortlist 12 models                                                  │
 │ ask me    when jev is less than 60% sure of the model                │
@@ -132,13 +132,13 @@ Most terminals also bypass mouse capture while a modifier is held during a drag 
 | --- | --- |
 | `r` | Enable or disable routing |
 | `s` | Enter the TypeSafe API key |
-| `d` | Delete the stored key (asks for confirmation) |
+| `d` | Remove the saved key (asks for confirmation) |
 | `m` | Edit the shortlist |
 | `-` / `+` | Lower or raise the confidence limit in steps of 5% (0% never asks, 100% always asks) |
 
 All settings are written to `~/.pilotfish/config.toml`, and the rest of that file, including comments, is left as it was.
 
-**The API key.** `s` prompts for the key; it can be pasted or typed, and is displayed as dots. `enter` saves it to the operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.pilotfish`, the transcript, or the command history. The panel displays only its last four characters. A key in `$PILOTFISH_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` takes precedence over the stored one, and the panel indicates this. On a machine without a credential store, such as a headless Linux host without a Secret Service, the environment variable is the only option; the key is never written to a file. On macOS, the system may ask for permission the first time a newly built `pilotfish` reads the key.
+**The API key.** The key is read from `$TYPESAFE_API_KEY` when it is set, and otherwise from `[routing] api_key` in `~/.pilotfish/config.toml`. When neither holds one, the console asks for it: the panel opens directly into key entry when routing is enabled at start-up, when `/routing` is opened, and when routing is switched on. `s` enters a key at any time. The key can be pasted or typed and is displayed as dots; `enter` saves it to `~/.pilotfish/config.toml`, which is written readable only by you (mode 600). It never appears in the transcript or the command history, and the panel displays only its last four characters. An environment key takes precedence over the saved one, and the panel indicates which is in use.
 
 **The shortlist.** `m` lists every model in pi's catalogue as `provider:id`, with its name and price. Typing filters the list, `up` and `down` move, `enter` adds or removes the selected model, and `esc` saves the shortlist and returns to the panel. One routing decision can weigh at most 255 models, so the shortlist cannot exceed 255 entries. Entries in the configuration that no longer match any model in the catalogue are preserved. The catalogue is recorded when a worker starts, so the shortlist can be edited once at least one worker has run.
 

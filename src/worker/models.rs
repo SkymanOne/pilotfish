@@ -95,6 +95,15 @@ pub async fn ensure_pi_catalogue(fleet_dir: &Path, pi_spec: &str) -> Vec<WorkerM
     {
         return cache.available_models;
     }
+    refresh_pi_catalogue(fleet_dir, pi_spec).await
+}
+
+/// Ask pi for its catalogue now, whatever the cache holds, and merge the
+/// answers into it one field at a time (an empty answer replaces nothing).
+/// The write stamps `fetchedAt`, so a stale catalogue is fresh again after
+/// it. Returns the models pi answered with — empty when it could not be
+/// asked, which leaves the cache as it was.
+pub async fn refresh_pi_catalogue(fleet_dir: &Path, pi_spec: &str) -> Vec<WorkerModel> {
     let Some(fresh) = ask_pi_catalogue(fleet_dir, pi_spec).await else {
         return Vec::new();
     };

@@ -408,8 +408,9 @@ mod tests {
         let key = "ts_live_0123456789abcdef";
         console.set_routing_status(crate::tui::app::RoutingStatus {
             enabled: true,
-            key: crate::tui::app::KeyState::Store {
+            key: crate::tui::app::KeyState::Config {
                 masked: crate::secrets::Secret::new(key).masked(),
+                path: "~/.pilotfish/config.toml".into(),
             },
             candidates: Ok(12),
             threshold: 0.6,
@@ -424,7 +425,7 @@ mod tests {
         }
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
         assert_visible(&buf, "model routing");
-        assert_visible(&buf, "••••cdef, in the");
+        assert_visible(&buf, "••••cdef, in ~/.pilotfish/config.toml");
         assert_visible(&buf, "between 12 models");
         assert_visible(&buf, &"•".repeat(key.len()));
         let drawn = (0..buf.area.height)
