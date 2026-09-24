@@ -394,6 +394,16 @@ and branch; unmerged work is lost:\n{}",
     }
 
     /// `a`: answer the selected session's pending question or dialog.
+    /// Reopen whatever is waiting on the human: the orchestrator's pending
+    /// approval first, then a model choice. A frontend's "review" button.
+    pub fn review_waiting(&mut self) {
+        if !self.orch.pending_requests.is_empty() {
+            self.open_permission_overlay();
+        } else if !self.model_questions.is_empty() {
+            self.open_model_choice();
+        }
+    }
+
     /// Put the first pending request up. A question with no options is
     /// answered in your own words, so the overlay opens straight into its
     /// text field.

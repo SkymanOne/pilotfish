@@ -18,6 +18,7 @@ mod sheets;
 #[cfg(feature = "desktop-shots")]
 mod shots;
 pub mod theme;
+mod ui;
 
 use std::sync::Arc;
 
@@ -107,59 +108,62 @@ pub fn run(runtime: tokio::runtime::Runtime, options: TuiOptions) -> anyhow::Res
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let full_title = crate::tui::app::home_relative(&repo);
-    gpui_platform::application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        theme::install(cx);
-        bind_keys(cx);
-        let shared = cx.new(|_| Shared {
-            snap: Arc::new(Snapshot::default()),
-            cmds: cmd_tx.clone(),
-            palette: theme::Palette::new(true),
-        });
-        pump(shared.clone(), snap_rx, cx);
-        let quit = cmd_tx.clone();
-        cx.on_action(move |_: &Quit, _| {
-            let _ = quit.send(UiCmd::Quit);
-        });
-        // the main window closing is the console closing
-        let main_id = std::rc::Rc::new(std::cell::Cell::new(None));
-        let closing = cmd_tx.clone();
-        let watched = main_id.clone();
-        cx.on_window_closed(move |_, id| {
-            if watched.get() == Some(id) {
-                let _ = closing.send(UiCmd::Quit);
-            }
-        })
-        .detach();
+    gpui_platform::application()
+        .with_assets(theme::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            theme::install(cx);
+            bind_keys(cx);
+            let shared = cx.new(|_| Shared {
+                snap: Arc::new(Snapshot::default()),
+                cmds: cmd_tx.clone(),
+                palette: theme::Palette::new(true),
+            });
+            pump(shared.clone(), snap_rx, cx);
+            let quit = cmd_tx.clone();
+            cx.on_action(move |_: &Quit, _| {
+                let _ = quit.send(UiCmd::Quit);
+            });
+            // the main window closing is the console closing
+            let main_id = std::rc::Rc::new(std::cell::Cell::new(None));
+            let closing = cmd_tx.clone();
+            let watched = main_id.clone();
+            cx.on_window_closed(move |_, id| {
+                if watched.get() == Some(id) {
+                    let _ = closing.send(UiCmd::Quit);
+                }
+            })
+            .detach();
 
-        let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            window_min_size: Some(size(px(980.), px(560.))),
-            ..TitleBar::window_options()
-        };
-        let title = title.clone();
-        let full_title = full_title.clone();
-        let fleet_root = fleet.root().to_path_buf();
-        let opened = cx.open_window(options, |window, cx| {
-            window.set_window_title(&format!("pilotfish — {full_title}"));
-            theme::apply(window, cx);
-            let view = cx
-                .new(|cx| main_view::MainView::new(shared.clone(), title, &fleet_root, window, cx));
-            cx.new(|cx| Root::new(view, window, cx))
+            let bounds = Bounds::centered(None, size(px(1440.), px(900.)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(980.), px(560.))),
+                ..TitleBar::window_options()
+            };
+            let title = title.clone();
+            let full_title = full_title.clone();
+            let fleet_root = fleet.root().to_path_buf();
+            let opened = cx.open_window(options, |window, cx| {
+                window.set_window_title(&format!("pilotfish — {full_title}"));
+                theme::apply(window, cx);
+                let view = cx.new(|cx| {
+                    main_view::MainView::new(shared.clone(), title, &fleet_root, window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            });
+            match opened {
+                Ok(handle) => {
+                    main_id.set(Some(handle.window_id()));
+                    #[cfg(feature = "desktop-shots")]
+                    shots::start(handle.into(), cx);
+                }
+                Err(_) => {
+                    let _ = cmd_tx.send(UiCmd::Quit);
+                }
+            }
+            cx.activate(true);
         });
-        match opened {
-            Ok(handle) => {
-                main_id.set(Some(handle.window_id()));
-                #[cfg(feature = "desktop-shots")]
-                shots::start(handle.into(), cx);
-            }
-            Err(_) => {
-                let _ = cmd_tx.send(UiCmd::Quit);
-            }
-        }
-        cx.activate(true);
-    });
     Ok(ExitCode::Ok)
 }
 

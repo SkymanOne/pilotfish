@@ -47,6 +47,18 @@ pub enum UiCmd {
     Select(String),
     /// Follow this worker's patch in the changes pane.
     Diff(Option<String>),
+    /// Rename any session; an empty name clears it.
+    RenameSession(uuid::Uuid, String),
+    /// Merge a finished worker's branch into the checkout it came from.
+    Merge(String),
+    /// Show a path in Finder, or open a file in its default app.
+    Reveal(std::path::PathBuf),
+    /// The palette with only the models the selected session can switch to.
+    OpenModels,
+    /// The selected session's brief.
+    OpenBrief,
+    /// Reopen a pending approval or model choice.
+    ReviewWaiting,
     Quit,
 }
 
@@ -93,6 +105,11 @@ pub struct WorkerItem {
     pub model: Option<String>,
     pub question: Option<String>,
     pub error: Option<String>,
+    pub worktree: Option<String>,
+    pub thinking: Option<String>,
+    pub thinking_levels: Vec<String>,
+    /// Settled with a branch: something to merge.
+    pub mergeable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,9 +266,71 @@ impl Side {
                 self.patch_target = run_id;
                 self.refresh_patch().await;
             }
+            UiCmd::RenameSession(uuid, name) => {
+                match crate::orch::session::rename_session(driver.fleet().root(), uuid, &name) {
+                    Ok(session) => driver.console.toast(
+                        format!(
+                            "· renamed to {}",
+                            session_display_name(session.alias.as_deref(), session.uuid)
+                        ),
+                        false,
+                    ),
+                    Err(err) => driver.console.notice(format!("! {err:#}"), true),
+                }
+                // the open session's key follows on the next feed tick
+                driver.feed().await;
+                self.reload(driver.fleet());
+            }
+            UiCmd::Merge(run_id) => self.merge(driver, &run_id).await,
+            UiCmd::Reveal(path) => {
+                // `open` on a directory shows it in Finder; on a file it
+                // hands it to its default app
+                if let Err(err) = tokio::process::Command::new("open").arg(&path).spawn() {
+                    driver
+                        .console
+                        .notice(format!("! opening {}: {err}", path.display()), true);
+                }
+            }
+            UiCmd::OpenModels => {
+                let effects = driver.console.open_model_palette();
+                return driver.apply(effects).await;
+            }
+            UiCmd::ReviewWaiting => driver.console.review_waiting(),
+            UiCmd::OpenBrief => {
+                let effects = driver.console.open_brief();
+                return driver.apply(effects).await;
+            }
             UiCmd::Quit => return true,
         }
         false
+    }
+
+    /// Merge a finished worker into the checkout it was cut from, the way
+    /// `pilotfish merge` does; its words become notices.
+    async fn merge(&mut self, driver: &mut Driver, run_id: &str) {
+        let root = driver.fleet().root().to_path_buf();
+        let repo = root.parent().unwrap_or(&root).to_path_buf();
+        let fleet_dir = root.to_string_lossy().into_owned();
+        match crate::ops::integrate::merge_core_with_env(
+            run_id,
+            Some(&repo),
+            false,
+            Some(fleet_dir.as_str()),
+        )
+        .await
+        {
+            Ok(result) => {
+                for line in result.out {
+                    driver.console.notice(format!("· {line}"), false);
+                }
+                for line in result.err {
+                    driver.console.notice(format!("! {line}"), true);
+                }
+            }
+            Err(err) => driver.console.notice(format!("! merge: {err:#}"), true),
+        }
+        self.reload(driver.fleet());
+        self.refresh_patch().await;
     }
 
     /// Every session and every run, reread.
@@ -440,9 +519,16 @@ fn worker_item(
     Some(WorkerItem {
         session,
         session_name,
+        mergeable: view == DerivedView::Settled && state.branch.is_some(),
+        worktree: state.worktree.clone(),
+        thinking: state.thinking_level.clone(),
+        thinking_levels: crate::tui::app::worker_thinking_levels(state)
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
         row,
         lane,
-        model: state.model.clone(),
+        model: state.model_label().map(str::to_string),
         question: state
             .pending_question
             .as_ref()

@@ -680,7 +680,7 @@ impl Console {
     /// message. A worker's is its `taskBrief`; the orchestrator's is the
     /// rendered session `prompt.md`, or a dimmed placeholder when the
     /// monitor has not written it yet.
-    fn open_brief(&mut self) -> Vec<Effect> {
+    pub fn open_brief(&mut self) -> Vec<Effect> {
         let (text, placeholder) = match self.selected_target() {
             SessionTarget::Worker { run_id } => match self.run_state(&run_id) {
                 Some(state) if !state.task_brief.trim().is_empty() => {

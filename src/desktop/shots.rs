@@ -9,6 +9,7 @@
 //! - `type <text>` types text into whatever has focus
 //! - `click <x> <y>` clicks at a point in the main window (logical pixels)
 //! - `drag <x1> <y1> <x2> <y2>` drags with the left button held
+//! - `scroll <x> <y> <dy>` turns the wheel at a point (positive `dy` shows what is above)
 //! - `board` opens or closes the Board popup
 //! - `wait <ms>` pauses the script
 //!
@@ -19,7 +20,8 @@ use std::time::Duration;
 
 use gpui::{
     AnyWindowHandle, App, AsyncApp, Keystroke, Modifiers, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PlatformInput, point, px,
+    MouseMoveEvent, MouseUpEvent, PlatformInput, ScrollDelta, ScrollWheelEvent, TouchPhase, point,
+    px,
 };
 
 pub fn start(main: AnyWindowHandle, cx: &mut App) {
@@ -37,6 +39,8 @@ pub fn start(main: AnyWindowHandle, cx: &mut App) {
             let lines: Vec<String> = script.lines().map(str::to_string).collect();
             while done < lines.len() {
                 run(&lines[done], &dir, main, cx).await;
+                // a frame after every step, so animations start when they would on screen
+                let _ = main.update(cx, |_, window, cx| window.draw(cx).clear(cx));
                 done += 1;
                 let _ = std::fs::write(dir.join("done"), done.to_string());
             }
@@ -157,6 +161,26 @@ async fn run(line: &str, dir: &std::path::Path, main: AnyWindowHandle, cx: &mut 
                 );
             });
         }
+        "scroll" => {
+            let n: Vec<f32> = rest
+                .split_whitespace()
+                .filter_map(|n| n.parse::<f32>().ok())
+                .collect();
+            let [x, y, dy] = n[..] else {
+                return;
+            };
+            let _ = main.update(cx, |_, window, cx| {
+                window.dispatch_event(
+                    PlatformInput::ScrollWheel(ScrollWheelEvent {
+                        position: point(px(x), px(y)),
+                        delta: ScrollDelta::Pixels(point(px(0.), px(dy))),
+                        modifiers: Modifiers::default(),
+                        touch_phase: TouchPhase::Moved,
+                    }),
+                    cx,
+                );
+            });
+        }
         "shot" => {
             let name = rest.split_whitespace().next().unwrap_or("shot").to_string();
             let target = main;
@@ -164,7 +188,9 @@ async fn run(line: &str, dir: &std::path::Path, main: AnyWindowHandle, cx: &mut 
             cx.background_executor()
                 .timer(Duration::from_millis(150))
                 .await;
-            let _ = target.update(cx, |_, window, _| {
+            let _ = target.update(cx, |_, window, cx| {
+                // draw now: a hidden or occluded window gets no frames of its own
+                window.draw(cx).clear(cx);
                 if let Ok(image) = window.render_to_image() {
                     let _ = image.save(dir.join(format!("{name}.png")));
                 }

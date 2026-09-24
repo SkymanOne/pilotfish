@@ -187,6 +187,23 @@ impl ChangesState {
         }
     }
 
+    /// Fold every file, or unfold them all when all are folded.
+    pub fn toggle_all(&mut self) {
+        let Some(patch) = &self.patch else {
+            return;
+        };
+        let all = patch.files.iter().all(|f| self.folded.contains(&f.path));
+        for file in &patch.files {
+            self.touched.insert(file.path.clone());
+            if all {
+                self.folded.remove(&file.path);
+            } else {
+                self.folded.insert(file.path.clone());
+            }
+        }
+        self.rebuild();
+    }
+
     pub fn is_folded(&self, path: &str) -> bool {
         self.folded.contains(path)
     }
@@ -214,11 +231,12 @@ impl ChangesState {
                 let path = file.path.clone();
                 let folded = self.is_folded(&path);
                 base.id(("file", *f))
-                    .px(px(12.))
-                    .gap(px(6.))
+                    .px(px(16.))
+                    .gap(px(8.))
                     .border_t_1()
-                    .border_color(pal.line)
-                    .bg(pal.panel)
+                    .border_color(pal.hair)
+                    .bg(pal.sheet)
+                    .hover(|this| this.bg(pal.tint))
                     .cursor_pointer()
                     .on_click(move |_, _, cx| on_fold(path.clone(), cx))
                     .child(
@@ -240,8 +258,8 @@ impl ChangesState {
                     .into_any_element()
             }
             Some(Row::Hunk(f, h)) => base
-                .px(px(12.))
-                .bg(pal.panel)
+                .px(px(16.))
+                .bg(pal.tint)
                 .font_family(MONO)
                 .text_size(px(11.5))
                 .text_color(pal.muted)
@@ -250,8 +268,8 @@ impl ChangesState {
             Some(Row::Line(f, h, l)) => {
                 let line = &patch.files[*f].hunks[*h].lines[*l];
                 let (bg, sign, sign_color) = match line.kind {
-                    LineKind::Added => (Some(pal.add_bg), "+", pal.run),
-                    LineKind::Removed => (Some(pal.del_bg), "−", pal.fail),
+                    LineKind::Added => (Some(pal.add_bg), "+", pal.sea),
+                    LineKind::Removed => (Some(pal.del_bg), "−", pal.port),
                     LineKind::Context => (None, "", pal.muted),
                 };
                 let number = |n: Option<u32>| {
@@ -282,20 +300,20 @@ impl ChangesState {
                             .text_color(sign_color)
                             .child(sign),
                     )
-                    .child(div().text_color(pal.text).child(text))
+                    .child(div().text_color(pal.ink).child(text))
                     .into_any_element()
             }
             Some(Row::Truncated) => base
-                .px(px(12.))
+                .px(px(16.))
                 .text_size(px(12.))
-                .text_color(pal.wait)
+                .text_color(pal.buoy)
                 .child("Diff truncated at 512 KiB.")
                 .into_any_element(),
             Some(Row::UntrackedHeader) => base
-                .px(px(12.))
+                .px(px(16.))
                 .border_t_1()
-                .border_color(pal.line)
-                .bg(pal.panel)
+                .border_color(pal.hair)
+                .bg(pal.tint)
                 .text_size(px(12.))
                 .text_color(pal.muted)
                 .child("Untracked, not in the diff yet")
@@ -304,7 +322,7 @@ impl ChangesState {
                 .px(px(26.))
                 .font_family(MONO)
                 .text_size(px(11.5))
-                .text_color(pal.text)
+                .text_color(pal.ink)
                 .child(patch.untracked[*i].clone())
                 .into_any_element(),
             None => div().into_any_element(),
@@ -344,13 +362,7 @@ fn file_tag(file: &FileDiff, pal: &Palette) -> Option<AnyElement> {
     )
 }
 
-/// `+12 −3`, in the lane colours, tabular.
+/// `+12 −3`, in the diff colours.
 pub fn stat(added: usize, removed: usize, pal: &Palette) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_none()
-        .gap(px(4.))
-        .text_size(px(12.))
-        .child(div().text_color(pal.run).child(format!("+{added}")))
-        .child(div().text_color(pal.fail).child(format!("−{removed}")))
+    super::ui::stat(added, removed, pal)
 }

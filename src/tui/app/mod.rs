@@ -58,7 +58,7 @@ const RAISE_GRACE_MS: i64 = 600;
 const CAPABILITIES_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// What claude's own `/thinking` accepts; pi workers use [`THINKING_LEVELS`].
-const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+pub const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// Sent messages kept per session for `up`-recall.
 const HISTORY_CAP: usize = 100;
@@ -1679,6 +1679,11 @@ impl Console {
         self.composer.input = entries[at].clone();
         self.composer.cursor = self.composer.input.chars().count();
         self.composer.dismissed = true;
+    }
+
+    /// The palette with only the models the selected session can switch to.
+    pub fn open_model_palette(&mut self) -> Vec<Effect> {
+        self.open_palette(PaletteScope::Models)
     }
 
     /// Open the palette over the last-known capabilities, and ask for fresh

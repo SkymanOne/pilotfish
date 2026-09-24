@@ -4,8 +4,8 @@
 //! `TextView`, which also highlights fenced code.
 
 use gpui::{
-    AnyElement, App, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 use gpui_component::text::TextView;
 
@@ -78,67 +78,82 @@ pub fn groups(blocks: &[Block], partial: Option<&str>) -> Vec<Group> {
     out
 }
 
-/// Draw one group; a search match is tinted.
+/// Draw one group; a search match is tinted, and the reply still streaming
+/// fades in chunk by chunk.
 pub fn render(
     ix: usize,
     group: &Group,
     matched: bool,
+    streaming: bool,
     pal: &Palette,
     _: &mut Window,
     _: &mut App,
 ) -> AnyElement {
-    // prose stays a readable measure however wide the pane gets
+    // prose keeps a readable measure however wide the pane gets
     let body = div()
         .w_full()
-        .max_w(px(840.))
-        .px(px(22.))
-        .py(px(6.))
-        .when(matched, |this| this.bg(pal.select).rounded(px(6.)));
+        .max_w(px(760.))
+        .px(px(28.))
+        .py(px(7.))
+        .when(matched, |this| this.bg(pal.select).rounded(px(10.)));
     let text: SharedString = group.text.clone().into();
     match group.kind {
         BlockKind::User => body
+            .flex()
+            .justify_end()
             .child(
                 div()
-                    .border_l_2()
-                    .border_color(pal.accent)
-                    .pl(px(12.))
-                    .py(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(pal.accent)
-                            .child("You"),
-                    )
-                    .child(div().text_color(pal.text).child(text)),
+                    .max_w(relative(0.78))
+                    .px(px(14.))
+                    .py(px(9.))
+                    .rounded_tl(px(16.))
+                    .rounded_tr(px(16.))
+                    .rounded_bl(px(16.))
+                    .rounded_br(px(4.))
+                    .bg(pal.tint)
+                    .border_1()
+                    .border_color(pal.hair)
+                    .text_color(pal.ink)
+                    .child(text),
             )
             .into_any_element(),
         BlockKind::Text => body
             .child(
                 TextView::markdown(("md", ix), text)
                     .selectable(true)
-                    .text_color(pal.text),
+                    .stream_fade(streaming)
+                    .text_color(pal.ink),
             )
             .into_any_element(),
         BlockKind::Thinking => body
             .child(
                 div()
+                    .pl(px(12.))
+                    .border_l_2()
+                    .border_color(pal.hair)
                     .italic()
-                    .text_size(px(12.5))
+                    .text_size(px(13.))
                     .text_color(pal.muted)
                     .child(text),
             )
             .into_any_element(),
-        BlockKind::Tool | BlockKind::ToolResult => body
-            .py(px(2.))
-            .child(
-                div()
-                    .font_family(MONO)
-                    .text_size(px(12.))
-                    .text_color(pal.muted)
-                    .child(text),
-            )
-            .into_any_element(),
+        BlockKind::Tool | BlockKind::ToolResult => {
+            let (head, rest) = group.text.split_once(' ').unwrap_or((&group.text, ""));
+            let head = head.to_string();
+            let rest = rest.to_string();
+            body.py(px(1.))
+                .child(
+                    div()
+                        .font_family(MONO)
+                        .text_size(px(12.))
+                        .text_color(pal.muted)
+                        .flex()
+                        .gap(px(6.))
+                        .child(div().flex_none().child(head))
+                        .child(div().min_w_0().child(rest)),
+                )
+                .into_any_element()
+        }
         BlockKind::Fleet => body
             .py(px(4.))
             .child(
@@ -146,15 +161,15 @@ pub fn render(
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .px(px(10.))
-                    .py(px(4.))
-                    .rounded(px(7.))
+                    .px(px(12.))
+                    .py(px(6.))
+                    .rounded_full()
                     .border_1()
-                    .border_color(pal.line)
-                    .bg(pal.panel)
-                    .text_size(px(12.))
-                    .text_color(pal.text)
-                    .child(light(fleet_color(&group.text, pal), pal.dark, 8.))
+                    .border_color(pal.hair)
+                    .bg(pal.sheet)
+                    .text_size(px(12.5))
+                    .text_color(pal.ink)
+                    .child(super::ui::dot(fleet_color(&group.text, pal), 7.))
                     .child(group.text.trim_start_matches(['⚑', ' ']).to_string()),
             )
             .into_any_element(),
@@ -164,53 +179,23 @@ pub fn render(
             .into_any_element(),
         BlockKind::Error => body
             .py(px(2.))
-            .child(div().text_size(px(12.5)).text_color(pal.fail).child(text))
+            .child(div().text_size(px(12.5)).text_color(pal.port).child(text))
             .into_any_element(),
     }
 }
 
-/// A fleet event's light: a question waits on someone, a failure is port
-/// red, a finish is the masthead ring.
+/// A fleet event's light: a question is waiting on someone, a failure is
+/// port red, a finish is quiet.
 fn fleet_color(text: &str, pal: &Palette) -> gpui::Hsla {
     if text.contains("question") || text.contains("dialog") || text.contains("blocked") {
-        pal.wait
+        pal.buoy
     } else if text.contains("failed") || text.contains("error") || text.contains("dead") {
-        pal.fail
+        pal.port
     } else if text.contains("settled") || text.contains("stopped") {
-        pal.done
+        pal.muted
     } else {
-        pal.run
+        pal.ink
     }
-}
-
-/// A navigation light: a filled dot that glows in the dark look, a hollow
-/// ring for `done`-coloured states.
-pub fn light(color: gpui::Hsla, dark: bool, size: f32) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(size))
-        .rounded_full()
-        .bg(color)
-        .when(dark, |this| {
-            this.shadow(vec![gpui::BoxShadow {
-                color: super::theme::tint(color, 0.55),
-                offset: gpui::point(px(0.), px(0.)),
-                blur_radius: px(size * 0.8),
-                spread_radius: px(0.),
-                inset: false,
-            }])
-        })
-}
-
-/// The hollow masthead ring: finished, or a stopped monitor.
-pub fn ring(color: gpui::Hsla, size: f32, dashed: bool) -> impl IntoElement {
-    div()
-        .flex_none()
-        .size(px(size))
-        .rounded_full()
-        .border_1()
-        .when(dashed, |this| this.border_dashed())
-        .border_color(color)
 }
 
 #[cfg(test)]

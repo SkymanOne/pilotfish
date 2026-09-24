@@ -12,8 +12,8 @@ use gpui::{
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::backend::{Snapshot, UiCmd};
-use super::chat::light;
-use super::theme::{MONO, Palette};
+use super::theme::{DISPLAY, MONO, Palette};
+use super::ui::{self, Tone};
 use crate::orch::protocol::is_ask_user_question;
 use crate::tui::app::{KeyState, Overlay, questions_of};
 use crate::tui::transcript::tool_args_text;
@@ -33,7 +33,7 @@ pub fn render(
         Overlay::Confirm(state) => card(pal, "Confirm", 480.)
             .child(
                 div()
-                    .text_color(pal.fail)
+                    .text_color(pal.port)
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(state.message.clone()),
             )
@@ -109,7 +109,7 @@ pub fn render(
                     .text_color(if state.placeholder {
                         pal.muted
                     } else {
-                        pal.text
+                        pal.ink
                     })
                     .child(state.text.clone()),
             )
@@ -131,35 +131,31 @@ pub fn render(
             .pt(px(96.))
             .bg(super::theme::tint(
                 gpui::black(),
-                if pal.dark { 0.45 } else { 0.18 },
+                if pal.dark { 0.5 } else { 0.16 },
             ))
             .occlude()
-            .child(sheet)
+            .child(ui::rise(sheet, "sheet-rise"))
             .into_any_element(),
     )
 }
 
 fn card(pal: &Palette, title: &str, width: f32) -> Div {
-    div()
+    ui::sheet(pal)
         .w(px(width))
-        .max_h(px(640.))
+        .max_h(px(660.))
         .flex()
         .flex_col()
         .gap(px(6.))
-        .p(px(18.))
+        .p(px(24.))
         .overflow_hidden()
-        .rounded(px(12.))
-        .border_1()
-        .border_color(pal.line)
-        .bg(pal.raised)
-        .shadow_lg()
         .text_size(px(13.5))
-        .text_color(pal.text)
+        .text_color(pal.ink)
         .child(
             div()
-                .text_size(px(16.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .mb(px(4.))
+                .font_family(DISPLAY)
+                .text_size(px(26.))
+                .line_height(px(30.))
+                .mb(px(6.))
                 .child(title.to_string()),
         )
 }
@@ -188,10 +184,10 @@ fn field(pal: &Palette, prompt: &str, value: &str) -> Div {
         .items_center()
         .px(px(10.))
         .py(px(7.))
-        .rounded(px(7.))
+        .rounded(px(12.))
         .border_1()
-        .border_color(pal.accent)
-        .bg(pal.bg)
+        .border_color(pal.ink)
+        .bg(pal.tint)
         .when(!prompt.is_empty(), |this| {
             this.child(
                 div()
@@ -201,7 +197,7 @@ fn field(pal: &Palette, prompt: &str, value: &str) -> Div {
             )
         })
         .child(value.to_string())
-        .child(div().w(px(1.5)).h(px(15.)).bg(pal.accent))
+        .child(div().w(px(1.5)).h(px(15.)).bg(pal.ink))
 }
 
 fn buttons() -> Div {
@@ -216,25 +212,16 @@ fn button(
     send: Vec<KeyEvent>,
 ) -> impl IntoElement {
     let cmds = cmds.clone();
-    div()
-        .id(SharedString::from(format!("button-{text}")))
-        .px(px(12.))
-        .py(px(4.))
-        .rounded(px(6.))
-        .border_1()
-        .cursor_pointer()
-        .text_size(px(12.5))
-        .map(|this| {
-            if primary {
-                this.bg(pal.accent)
-                    .border_color(pal.accent)
-                    .text_color(pal.accent_ink)
-            } else {
-                this.border_color(pal.line).text_color(pal.text)
-            }
-        })
-        .on_click(move |_, _, _| send_keys(&cmds, &send))
-        .child(text.to_string())
+    let tone = if primary { Tone::Ink } else { Tone::Plain };
+    ui::pill(
+        SharedString::from(format!("button-{text}")),
+        text.to_string(),
+        tone,
+        pal,
+    )
+    .h(px(32.))
+    .px(px(14.))
+    .on_click(move |_, _, _| send_keys(&cmds, &send))
 }
 
 /// The one button that destroys work: port red, never the accent.
@@ -245,17 +232,15 @@ fn danger_button(
     send: Vec<KeyEvent>,
 ) -> impl IntoElement {
     let cmds = cmds.clone();
-    div()
-        .id(SharedString::from(format!("danger-{text}")))
-        .px(px(12.))
-        .py(px(4.))
-        .rounded(px(6.))
-        .cursor_pointer()
-        .text_size(px(12.5))
-        .bg(pal.fail)
-        .text_color(gpui::white())
-        .on_click(move |_, _, _| send_keys(&cmds, &send))
-        .child(text.to_string())
+    ui::pill(
+        SharedString::from(format!("danger-{text}")),
+        text.to_string(),
+        Tone::Danger,
+        pal,
+    )
+    .h(px(32.))
+    .px(px(14.))
+    .on_click(move |_, _, _| send_keys(&cmds, &send))
 }
 
 /// One pickable row.
@@ -278,7 +263,7 @@ fn option(
         .gap(px(10.))
         .px(px(9.))
         .py(px(6.))
-        .rounded(px(7.))
+        .rounded(px(10.))
         .cursor_pointer()
         .when(selected, |this| this.bg(pal.select))
         .hover(|this| this.bg(pal.select))
@@ -362,7 +347,7 @@ fn help(pal: &Palette) -> Div {
                         .w(px(120.))
                         .flex_none()
                         .font_family(MONO)
-                        .text_color(pal.text)
+                        .text_color(pal.ink)
                         .child(spec.name),
                 )
                 .child(
@@ -419,10 +404,10 @@ fn sheet_rows(pal: &Palette) -> Div {
                         .flex_none()
                         .font_family(MONO)
                         .text_size(px(12.))
-                        .text_color(pal.accent)
+                        .text_color(pal.ink)
                         .child(keys),
                 )
-                .child(div().text_color(pal.text).child(what)),
+                .child(div().text_color(pal.ink).child(what)),
         );
     }
     rows
@@ -442,14 +427,14 @@ fn fleet(snap: &Snapshot, pal: &Palette, cmds: &UnboundedSender<UiCmd>) -> Div {
             .find(|w| w.row.key == row.key)
             .map(|w| pal.lane(w.lane))
             .unwrap_or(if snap.facts.turn_active {
-                pal.run
+                pal.ink
             } else {
                 pal.muted
             });
         sheet = sheet.child(option(
             pal,
             ("fleet", at),
-            Some(light(lane, pal.dark, 8.).into_any_element()),
+            Some(ui::dot(lane, 8.).into_any_element()),
             &row.name,
             &row.detail,
             at == current,
@@ -529,10 +514,10 @@ fn permission(
         div()
             .px(px(11.))
             .py(px(9.))
-            .rounded(px(7.))
+            .rounded(px(12.))
             .border_1()
-            .border_color(pal.line)
-            .bg(pal.bg)
+            .border_color(pal.hair)
+            .bg(pal.tint)
             .font_family(MONO)
             .text_size(px(12.))
             .child(format!(
@@ -545,7 +530,7 @@ fn permission(
         sheet = sheet.child(div().text_color(pal.muted).child(description.clone()));
     }
     if let Some(reason) = &tool.decision_reason {
-        sheet = sheet.child(div().text_color(pal.fail).child(reason.clone()));
+        sheet = sheet.child(div().text_color(pal.port).child(reason.clone()));
     }
     if state.denying {
         return sheet
@@ -582,7 +567,7 @@ fn routing(
             .gap(px(12.))
             .py(px(5.))
             .border_b_1()
-            .border_color(pal.line)
+            .border_color(pal.hair)
             .child(
                 div()
                     .w(px(110.))
@@ -599,11 +584,7 @@ fn routing(
                 .child(row(
                     "Routing",
                     if status.enabled { "On" } else { "Off" }.into(),
-                    if status.enabled {
-                        pal.accent
-                    } else {
-                        pal.muted
-                    },
+                    if status.enabled { pal.sea } else { pal.muted },
                 ))
                 .child(row(
                     "TypeSafe key",
@@ -616,9 +597,9 @@ fn routing(
                         ),
                     },
                     if status.key == KeyState::None {
-                        pal.wait
+                        pal.buoy
                     } else {
-                        pal.text
+                        pal.ink
                     },
                 ))
                 .child(row(
@@ -628,9 +609,9 @@ fn routing(
                         Err(why) => why.clone(),
                     },
                     if status.candidates.is_ok() {
-                        pal.text
+                        pal.ink
                     } else {
-                        pal.wait
+                        pal.buoy
                     },
                 ))
                 .child(row(
@@ -640,12 +621,12 @@ fn routing(
                         1 => "1 model".to_string(),
                         n => format!("{n} models"),
                     },
-                    pal.text,
+                    pal.ink,
                 ))
                 .child(row(
                     "Ask me below",
                     format!("{:.0}% confidence", status.threshold * 100.0),
-                    pal.text,
+                    pal.ink,
                 ));
         }
     }
@@ -662,7 +643,7 @@ fn routing(
         return sheet.child(
             div()
                 .mt(px(8.))
-                .text_color(pal.fail)
+                .text_color(pal.port)
                 .child("Delete the stored key? y deletes it, any other key keeps it."),
         );
     }
@@ -712,10 +693,10 @@ fn shortlist(
         let tick = div()
             .size(px(14.))
             .flex_none()
-            .rounded(px(3.))
+            .rounded(px(4.))
             .border_1()
-            .border_color(if ticked { pal.accent } else { pal.line })
-            .when(ticked, |this| this.bg(pal.accent));
+            .border_color(if ticked { pal.ink } else { pal.hair })
+            .when(ticked, |this| this.bg(pal.ink));
         list = list.child(option(
             pal,
             ("shortlist", at),
