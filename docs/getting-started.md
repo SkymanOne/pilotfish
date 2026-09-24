@@ -56,17 +56,17 @@ These choices are recorded, so a restarted orchestrator resumes with the same mo
 
 Quitting closes only the console. Orchestrators and workers are detached processes that keep their state on disk, so `pilotfish` reopens the most recently used session, with its transcript replayed and any turn in progress still running. A permission prompt raised while no console was open is still waiting when the console returns.
 
-If the orchestrator is no longer running — after a reboot or a `/shutdown` — a new one resumes the same claude session beneath the existing transcript, and a line marks the point of resumption. `--fresh` starts over.
+If the orchestrator is no longer running, after a reboot or a `/shutdown` for example, a new one resumes the same claude session beneath the existing transcript, and a line marks the point of resumption. `--fresh` starts over.
 
 ## The orchestrator's limits
 
-The orchestrator coordinates work and does not write code: `Edit`, `Write` and `NotebookEdit` are disabled for it. It may read the repository and run read-only git commands without approval; anything else raises a prompt. Merge conflicts are returned to the worker as a rebase brief rather than resolved in place.
+The orchestrator coordinates work and does not write code: `Edit`, `Write` and `NotebookEdit` are disabled for it. It may read the repository and run read-only git commands without approval. Anything else raises a prompt. Merge conflicts are returned to the worker as a rebase brief rather than resolved in place.
 
 Its brief is embedded in the binary, and no file is copied into your project. To use a different brief, set `$PILOTFISH_PROMPT` to a file path, or place one at `<repo>/.pilotfish/orchestrator.md` or `~/.pilotfish/orchestrator.md`. The brief the orchestrator actually received, with placeholders filled in, is written to `.pilotfish/orchestrators/<session>/prompt.md` (one directory per orchestrator session).
 
 ## User configuration
 
-User-level defaults live in `~/.pilotfish/config.toml` (`$PILOTFISH_HOME` overrides the directory). A missing or empty file means defaults; a malformed one is reported as an error naming the file.
+User-level defaults live in `~/.pilotfish/config.toml` (`$PILOTFISH_HOME` overrides the directory). A missing or empty file means defaults, and a malformed one is reported as an error naming the file.
 
 | Setting | Meaning |
 | --- | --- |
@@ -81,8 +81,8 @@ User-level defaults live in `~/.pilotfish/config.toml` (`$PILOTFISH_HOME` overri
 
 The file is written readable only by its owner, since it can hold the TypeSafe API key.
 
-Routing is off unless enabled. `/routing` in the console enables it, edits the shortlist and the confidence limit, and saves the TypeSafe key you paste into it; see [the CLI reference](cli.md#routing-a-brief) for how it decides.
+Routing is off unless enabled. `/routing` in the console enables it, edits the shortlist and the confidence limit, and saves the TypeSafe key you paste into it. [The CLI reference](cli.md#routing-a-brief) explains how it decides.
 
 ## State
 
-State is kept in `<repo>/.pilotfish/`, which `pilotfish` creates and adds to `.gitignore`. It serves as an audit trail — reports, transcripts, mailboxes and raw logs, one directory per run — and nothing other than `pilotfish` needs to read it. The layout is documented in [AGENTS.md](../AGENTS.md).
+State is kept in `<repo>/.pilotfish/`, which `pilotfish` creates and adds to `.gitignore`. It serves as an audit trail of reports, transcripts, mailboxes and raw logs, one directory per run, and nothing other than `pilotfish` needs to read it. The layout is documented in [AGENTS.md](../AGENTS.md).

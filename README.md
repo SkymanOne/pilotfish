@@ -6,13 +6,13 @@
 
 ## How it works
 
-You describe the work to an **orchestrator**, a `claude -p` process that plans the change but cannot edit files. It writes a brief for each independent piece and spawns one **pi worker** per brief, each in its own git worktree and branch. Workers report back when they finish; the orchestrator reviews, merges and verifies their branches, and asks you when something is yours to decide.
+You describe the work to an **orchestrator**, a `claude -p` process that plans the change but cannot edit files. It writes a brief for each independent piece and spawns one **pi worker** per brief, each in its own git worktree and branch. Workers report back when they finish. The orchestrator then reviews, merges and verifies their branches, and asks you when something is yours to decide.
 
-* **Sessions.** One conversation with one orchestrator and its workers. A repository can hold several; you start each one yourself.
-* **Durable.** Every agent runs under a detached monitor that keeps its state in `.pilotfish/`. Close the window or the terminal mid-run and nothing stops; reopen it and the session is where you left it.
-* **In your hands.** Any worker can be opened, steered, answered, stopped, merged or removed directly, and the orchestrator is told what you did.
-* **Two front ends, one fleet.** The desktop window and the terminal console are the same console over the same state; one of them is open on a repository at a time. The `pilotfish` CLI drives the same fleet from scripts.
-* **Model routing** (optional). Each worker's model and thinking level can be chosen from its brief, weighing capability against cost, with uncertain choices referred to you.
+* A session is one conversation with one orchestrator and its workers. A repository can hold several, and you start each one yourself.
+* Every agent runs under a detached monitor that keeps its state in `.pilotfish/`. Close the window or the terminal mid-run and nothing stops. Reopen it and the session is where you left it.
+* Any worker can be opened, steered, answered, stopped, merged or removed directly, and the orchestrator is told what you did.
+* The desktop window and the terminal console are the same console over the same state, and only one of them can be open on a repository at a time. The `pilotfish` CLI drives the same fleet from scripts.
+* Optionally, each worker's model and thinking level can be chosen from its brief, weighing capability against cost, with uncertain choices referred to you.
 
 Requirements: a stable Rust toolchain, `pi` on your `PATH`, and Claude Code (`claude`, 2.1.x) signed in.
 
