@@ -466,6 +466,30 @@ pub fn write_pi_cache(fleet_dir: &Path, cache: &PiCache) -> std::io::Result<()> 
     atomic_write_json(&pi_cache_json_path(fleet_dir), &stamped)
 }
 
+/// Change the fleet's pi catalogue under its lock: read, change, write.
+/// Monitors and one-shot fetches learn different fields at different times;
+/// an unlocked read-modify-write let one writer's stale copy wipe the
+/// models another had just written. The lock is a sidecar, because the
+/// cache itself is replaced by rename on every write.
+///
+/// # Errors
+///
+/// When the lock or the cache cannot be written.
+pub fn update_pi_cache(fleet_dir: &Path, update: impl FnOnce(&mut PiCache)) -> std::io::Result<()> {
+    std::fs::create_dir_all(fleet_dir)?;
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(fleet_dir.join(format!("{}.lock", crate::paths::PI_CACHE_FILE)))?;
+    lock.lock()?;
+    let mut cache = read_pi_cache(fleet_dir).unwrap_or_default();
+    update(&mut cache);
+    let written = write_pi_cache(fleet_dir, &cache);
+    lock.unlock()?;
+    written
+}
+
 /// The read path for the pi catalogue: the fleet cache when it reads and
 /// parses, else empty. Legacy `run.json` values are never trusted and never
 /// re-persisted ([`save_state`] strips them); a missing or stale cache
@@ -995,6 +1019,40 @@ mod tests {
             let state = load_state(&run_dir).unwrap();
             assert!(state.available_models.is_empty());
             assert_eq!(state.id, "auth-20260828141530");
+        }
+        {
+            // writers of different fields, side by side, never lose each
+            // other's updates: the read-modify-write is locked
+            let fleet = fleet_dir("pilotfish-run-cache-race-");
+            let writers: Vec<_> = (0..2)
+                .map(|which| {
+                    let fleet = fleet.clone();
+                    std::thread::spawn(move || {
+                        for i in 0..40 {
+                            update_pi_cache(&fleet, |cache| {
+                                if which == 0 {
+                                    cache
+                                        .available_models
+                                        .push(WorkerModel::new("p", format!("m{i}")));
+                                } else {
+                                    cache.commands.push(WorkerCommand {
+                                        name: format!("c{i}"),
+                                        description: String::new(),
+                                        source: "test".into(),
+                                    });
+                                }
+                            })
+                            .unwrap();
+                        }
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap();
+            }
+            let cache = read_pi_cache(&fleet).unwrap();
+            assert_eq!(cache.available_models.len(), 40);
+            assert_eq!(cache.commands.len(), 40);
         }
     }
 

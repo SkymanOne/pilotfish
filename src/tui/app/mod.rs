@@ -63,6 +63,11 @@ const CLAUDE_EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"
 /// Sent messages kept per session for `up`-recall.
 const HISTORY_CAP: usize = 100;
 
+/// How long a thinking-level change may go unconfirmed by the monitor
+/// before the console stops showing it: long past a live monitor's poll,
+/// short enough that a dead one is noticed.
+const PENDING_CONFIRM_MS: i64 = 10_000;
+
 /// An overlay on top of the conversation; the renderer draws whichever is
 /// set. There is no second view: the console is one conversation, and the
 /// fleet is something you open over it.
@@ -593,10 +598,10 @@ pub struct Console {
     /// Rows the transcript pane shows; the runtime sets it, scrolling uses it.
     pub viewport_rows: usize,
     /// Transient optimistic effort, until the monitor's state confirms it.
-    pending_effort: Option<String>,
+    pending_effort: Option<(String, i64)>,
     /// Per-run optimistic thinking levels, until the worker monitor persists
     /// them into the run's state and the next poll confirms it.
-    pending_thinking: HashMap<String, String>,
+    pending_thinking: HashMap<String, (String, i64)>,
     /// A one-shot pi catalogue fetch in flight, and its result; see [`PiFetch`].
     pi_fetch: Arc<PiFetch>,
     /// Is the mouse ours? While it is, the wheel scrolls the transcript and
@@ -671,20 +676,36 @@ impl Console {
     /// Fold still-unconfirmed thinking cycles into the fresh states (the
     /// statusline reads `state.thinking_level`), and forget one the moment
     /// the polled state catches up to it — the monitor now owns that level.
+    ///
+    /// A change the monitor has not confirmed within [`PENDING_CONFIRM_MS`]
+    /// is given up on and said: a dead monitor never applies it, and showing
+    /// it anyway would claim a level the worker is not running.
     fn reconcile_pending_thinking(&mut self) {
-        let mut confirmed = Vec::new();
+        let now = now_ms();
+        let mut done = Vec::new();
+        let mut lapsed = Vec::new();
         for run in &mut self.runs {
-            let Some(pending) = self.pending_thinking.get(&run.run_id) else {
+            let Some((pending, at)) = self.pending_thinking.get(&run.run_id) else {
                 continue;
             };
             if run.state.thinking_level.as_deref() == Some(pending.as_str()) {
-                confirmed.push(run.run_id.clone());
+                done.push(run.run_id.clone());
+            } else if now.saturating_sub(*at) > PENDING_CONFIRM_MS {
+                done.push(run.run_id.clone());
+                lapsed.push(format!(
+                    "{} did not take thinking {pending}",
+                    run.state.name
+                ));
             } else {
                 run.state.thinking_level = Some(pending.clone());
             }
         }
-        for run_id in confirmed {
-            self.pending_thinking.remove(&run_id);
+        let known: std::collections::HashSet<&str> =
+            self.runs.iter().map(|r| r.run_id.as_str()).collect();
+        self.pending_thinking
+            .retain(|run_id, _| known.contains(run_id.as_str()) && !done.contains(run_id));
+        for note in lapsed {
+            self.toast(format!("! {note}"), true);
         }
     }
 
@@ -700,8 +721,14 @@ impl Console {
         // the pending effort stays optimistic until the polled state confirms
         // it, like the worker path's reconcile_pending_thinking: a stale poll
         // must not erase a change the monitor has not applied yet
-        if self.pending_effort.as_deref() == self.orch.effort.as_deref() {
-            self.pending_effort = None;
+        if let Some((level, at)) = &self.pending_effort {
+            if self.orch.effort.as_deref() == Some(level.as_str()) {
+                self.pending_effort = None;
+            } else if now_ms().saturating_sub(*at) > PENDING_CONFIRM_MS {
+                let note = format!("! the orchestrator did not take thinking {level}");
+                self.pending_effort = None;
+                self.toast(note, true);
+            }
         }
         self.refresh_rows();
         self.raise_waiting();
@@ -745,14 +772,16 @@ impl Console {
         if typing {
             return;
         }
-        if let Some(request) = self.orch.pending_requests.first() {
-            if !self.raised_permissions.insert(request.request_id.clone()) {
-                return;
-            }
+        if let Some(request) = self.orch.pending_requests.first()
+            && self.raised_permissions.insert(request.request_id.clone())
+        {
             self.open_permission_overlay();
             self.raised_at = Some(now_ms());
             return;
         }
+        // a permission prompt raised once and dismissed waits in the status
+        // line; it must not keep a model question down — a spawn is waiting
+        // on that one, and would otherwise sit out its whole timeout
         if let Some(question) = self.model_questions.first()
             && self.raised_model_questions.insert(question.id.clone())
         {
@@ -1083,7 +1112,8 @@ impl Console {
     #[must_use]
     pub fn effort(&self) -> Option<&str> {
         self.pending_effort
-            .as_deref()
+            .as_ref()
+            .map(|(level, _)| level.as_str())
             .or(self.orch.effort.as_deref())
     }
 

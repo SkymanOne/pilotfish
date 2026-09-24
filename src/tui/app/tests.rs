@@ -2157,6 +2157,21 @@ fn model_questions() {
         c.set_model_questions(Vec::new());
         assert!(c.overlay().is_none());
     }
+    {
+        // a permission prompt raised once and dismissed does not keep a
+        // model question down: the spawn behind the question is waiting
+        let mut c = setup_with_worker();
+        c.set_orchestrator_state(bash_request("req_1"));
+        assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+        c.handle_key(esc());
+        c.last_key_at = 0;
+        c.set_model_questions(vec![model_question("q9")]);
+        assert!(
+            matches!(c.overlay(), Some(Overlay::ModelChoice(s)) if s.id == "q9"),
+            "{:?}",
+            c.overlay()
+        );
+    }
 }
 
 #[test]
@@ -2424,4 +2439,43 @@ fn console_with_user_config(config: &str) -> Console {
     )
     .unwrap();
     c
+}
+
+#[test]
+fn unconfirmed_thinking_lapses() {
+    let now = crate::util::now_ms();
+    let mut c = setup_with_worker();
+    // the orchestrator never applied it: the console stops claiming it
+    c.pending_effort = Some(("max".into(), now - 60_000));
+    c.set_orchestrator_state(OrchestratorState {
+        effort: Some("low".into()),
+        permission_mode: "default".into(),
+        ..OrchestratorState::default()
+    });
+    assert_eq!(c.effort(), Some("low"));
+    assert!(
+        c.flash()
+            .unwrap()
+            .text
+            .contains("did not take thinking max"),
+        "{:?}",
+        c.flash()
+    );
+    // the same for a worker, while a fresh change still shows
+    let run_id = "db-20260829120000".to_string();
+    c.pending_thinking
+        .insert(run_id.clone(), ("xhigh".into(), now - 60_000));
+    c.set_runs(vec![running_run(&run_id, "db")]);
+    assert!(c.pending_thinking.is_empty());
+    assert_ne!(
+        c.run_state(&run_id).unwrap().thinking_level.as_deref(),
+        Some("xhigh")
+    );
+    c.pending_thinking
+        .insert(run_id.clone(), ("high".into(), crate::util::now_ms()));
+    c.set_runs(vec![running_run(&run_id, "db")]);
+    assert_eq!(
+        c.run_state(&run_id).unwrap().thinking_level.as_deref(),
+        Some("high")
+    );
 }

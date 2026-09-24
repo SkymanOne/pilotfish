@@ -102,6 +102,17 @@ pub(crate) async fn spawn_core_with_dirs(
     if request.brief.trim().is_empty() {
         anyhow::bail!("spawn: task brief required after \"--\"");
     }
+    // A relative session path means the same file to this check and to pi,
+    // which runs in the worker's worktree: anchor it where the spawn points.
+    let mut request = request;
+    if let Some(session) = request.session.take() {
+        let base = request
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
+        request.session = Some(anchor_session(&session, &base));
+    }
     // A session that cannot be resumed is refused before anything exists —
     // no worktree, no run record, no monitor. (Exit 1, like the cap.)
     if let Some(session) = request.session.as_deref()
@@ -120,11 +131,15 @@ pub(crate) async fn spawn_core_with_dirs(
         .root()
         .to_path_buf();
     let session = super::acting_session(&fleet_dir);
-    // Routing goes first. It can wait on the network, and between counting
-    // the live workers and creating the new one nothing slow may happen, or
-    // two parallel spawns both pass a cap only one of them fits under.
-    // What it picks is what gets validated below.
-    let mut request = request;
+    // A full session is refused before anything slow or paid happens: no
+    // Jev calls, no model question put to the human only to refuse after.
+    if let Some(refusal) = cap_refusal(&config, &fleet_dir, session) {
+        return Ok(refusal);
+    }
+    // Routing and the model check go next. Both can take seconds, and
+    // between the final count of live workers and creating the new one
+    // nothing slow may happen, or two parallel spawns both pass a cap only
+    // one of them fits under. What routing picks is what gets validated.
     let in_flight = super::live_runs_for_session(&fleet_dir, session);
     let routing = route_request(
         &mut request,
@@ -134,42 +149,16 @@ pub(crate) async fn spawn_core_with_dirs(
         model_ask_timeout_ms(),
     )
     .await;
-    let cap = config.max_workers_per_session();
-    let live = super::live_runs_for_session(&fleet_dir, session);
-    if live.len() >= cap {
-        let holders = live
-            .iter()
-            .map(|s| {
-                format!(
-                    "  {} ({}) — {}",
-                    s.id,
-                    s.name,
-                    run::derive_view(s, run::is_alive, crate::util::now_ms())
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let hint = if live.is_empty() {
-            "the cap is set to 0 — raise [limits] max_workers_per_session in the \
-user config (~/.pilotfish/config.toml) to spawn at all."
-        } else {
-            "finish or clean up one of these before spawning another."
-        };
-        return Ok(fail(
-            ExitCode::Error,
-            vec![format!(
-                "spawn: refused — this session already has {} live worker(s), the \
-per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}",
-                live.len()
-            )],
-        ));
-    }
     // The resolved model is the one the monitor will actually run, so a bad
     // name from the config is refused here too — before a worktree exists.
     let model = config.worker_model(request.model.as_deref());
     let pi_bin = pi_bin_spec();
     if let Some(bad) = check_model(&pi_bin, model).await? {
         return Ok(fail(ExitCode::NoReport, vec![format!("spawn: {bad}")]));
+    }
+    // the count that decides, right before the run is created
+    if let Some(refusal) = cap_refusal(&config, &fleet_dir, session) {
+        return Ok(refusal);
     }
     let mut created = create_run_with_env(&request, pilotfish_dir, user_config_dir).await?;
     if let Some(routing) = routing.clone() {
@@ -590,13 +579,72 @@ one live run; stop or clean it first, or use another name.",
 /// directory that no longer exists is refused — pi exits at boot in both
 /// cases, and the usual cause is `fleet_cleanup` having removed the old
 /// run's worktree.
-fn check_session(session: &str) -> Option<String> {
-    let path = std::path::Path::new(session);
-    let looks_like_path = path.is_absolute()
+/// The per-session cap: `[limits] max_workers_per_session` (default 3)
+/// live workers per session — settled, archived and dead runs free their
+/// slot, and zero means no spawning at all. The refusal names every run
+/// holding a slot.
+fn cap_refusal(
+    config: &crate::paths::UserConfig,
+    fleet_dir: &Path,
+    session: uuid::Uuid,
+) -> Option<CommandResult<SpawnData>> {
+    let cap = config.max_workers_per_session();
+    let live = super::live_runs_for_session(fleet_dir, session);
+    if live.len() < cap {
+        return None;
+    }
+    let holders = live
+        .iter()
+        .map(|s| {
+            format!(
+                "  {} ({}) — {}",
+                s.id,
+                s.name,
+                run::derive_view(s, run::is_alive, crate::util::now_ms())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hint = if live.is_empty() {
+        "the cap is set to 0 — raise [limits] max_workers_per_session in the \
+user config (~/.pilotfish/config.toml) to spawn at all."
+    } else {
+        "finish or clean up one of these before spawning another."
+    };
+    Some(fail(
+        ExitCode::Error,
+        vec![format!(
+            "spawn: refused — this session already has {} live worker(s), the \
+per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}",
+            live.len()
+        )],
+    ))
+}
+
+/// A `--session` that is a relative path, made absolute against `base`
+/// (where the spawn points); ids and absolute paths pass through. pi runs in
+/// the worker's worktree, so a path left relative would name another file
+/// there than the one checked here — or none at all.
+fn anchor_session(session: &str, base: &Path) -> String {
+    let path = Path::new(session);
+    if looks_like_session_path(session) && path.is_relative() {
+        base.join(path).to_string_lossy().into_owned()
+    } else {
+        session.to_string()
+    }
+}
+
+/// Whether `--session` names a file rather than a pi session id.
+fn looks_like_session_path(session: &str) -> bool {
+    Path::new(session).is_absolute()
         || session.contains('/')
         || session.starts_with('.')
-        || session.ends_with(".jsonl");
-    if !looks_like_path && !path.is_file() {
+        || session.ends_with(".jsonl")
+}
+
+fn check_session(session: &str) -> Option<String> {
+    let path = std::path::Path::new(session);
+    if !looks_like_session_path(session) && !path.is_file() {
         return None;
     }
     if !path.is_file() {
@@ -901,6 +949,48 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_session_skips_routing() {
+        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-full-");
+        let (url, mut requests) = crate::route::test_support::stub(vec![unsure()]).await;
+        let home = tmp_dir("pilotfish-route-full-home-");
+        std::fs::write(
+            home.join("config.toml"),
+            format!(
+                "[limits]\nmax_workers_per_session = 0\n\n[routing]\nenabled = true\napi_key = \"k\"\nendpoint = \"{url}\"\n"
+            ),
+        )
+        .unwrap();
+        let result = spawn_core_with_dirs(
+            request("full", "do a thing", &root, true),
+            Some(&fleet_dir.to_string_lossy()),
+            Some(&home),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.code, ExitCode::Error, "{:?}", result.err);
+        assert!(result.err[0].contains("cap is 0"), "{:?}", result.err);
+        assert!(
+            requests.try_recv().is_err(),
+            "a spawn the cap refuses asks Jev nothing"
+        );
+    }
+
+    #[test]
+    fn session_paths_anchor() {
+        let base = Path::new("/repo");
+        assert_eq!(
+            anchor_session("runs/x/session/s.jsonl", base),
+            "/repo/runs/x/session/s.jsonl"
+        );
+        assert_eq!(anchor_session("/abs/s.jsonl", base), "/abs/s.jsonl");
+        assert_eq!(
+            anchor_session("abc123", base),
+            "abc123",
+            "an id is not a path"
+        );
     }
 
     #[tokio::test]

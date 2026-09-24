@@ -67,6 +67,8 @@ pub async fn remove_session(
     key: &SessionKey,
 ) -> anyhow::Result<CommandResult<RemovedSession>> {
     let paths = FleetPaths::new(fleet_dir);
+    // the fleet's own worktrees directory, never one a run.json names
+    let worktrees_dir = paths.root().join("worktrees");
     let label = key.alias.clone().unwrap_or_else(|| key.dir_name());
     let mut data = RemovedSession::default();
     let mut err: Vec<String> = Vec::new();
@@ -89,7 +91,19 @@ removing its directory stops it"
             state,
         };
         match cleanup_one(&target, true, false).await {
-            CleanupOutcome::AlreadyArchived | CleanupOutcome::Archived { .. } => {}
+            CleanupOutcome::Archived { .. } => {}
+            // an archived run can still own a worktree and a branch — a
+            // namesake archived by a later spawn, or an unmerged branch a
+            // plain cleanup kept — and once its record is gone nothing
+            // would ever point at them again
+            CleanupOutcome::AlreadyArchived => {
+                let problems = force_remove_run(&target, &worktrees_dir).await;
+                err.extend(
+                    problems
+                        .into_iter()
+                        .map(|note| format!("session remove: {} — {note}", target.run_id)),
+                );
+            }
             CleanupOutcome::Skipped { note }
             | CleanupOutcome::Refused { note }
             | CleanupOutcome::Failed { note } => {
@@ -97,7 +111,7 @@ removing its directory stops it"
                     "session remove: forcing {} — {note}",
                     target.run_id
                 ));
-                let problems = force_remove_run(&target).await;
+                let problems = force_remove_run(&target, &worktrees_dir).await;
                 err.extend(
                     problems
                         .into_iter()
@@ -182,7 +196,7 @@ async fn stop_orchestrator(paths: &FleetPaths, key: &SessionKey) -> bool {
 /// what `git` still refuses is deleted and pruned. A worktree or branch the
 /// run.json did not legitimately own is left alone and the refusal is
 /// returned, never read as success.
-async fn force_remove_run(target: &RunRef) -> Vec<String> {
+async fn force_remove_run(target: &RunRef, worktrees_dir: &Path) -> Vec<String> {
     let mut problems = Vec::new();
     if let Some(pid) = target.state.pid
         && runs_marked(pid, &format!("--run {}", target.run_id))
@@ -199,8 +213,7 @@ async fn force_remove_run(target: &RunRef) -> Vec<String> {
     };
     let repo = Path::new(repo_root);
     let tree = Path::new(worktree);
-    let worktrees_dir = Path::new(&target.state.fleet_dir).join("worktrees");
-    if let Err(err) = git::check_worktree_path(&worktrees_dir, repo, tree) {
+    if let Err(err) = git::check_worktree_path(worktrees_dir, repo, tree) {
         problems.push(format!("{err:#}"));
     } else {
         if tree.exists() {
@@ -439,7 +452,7 @@ mod tests {
             state,
         };
 
-        force_remove_run(&target).await;
+        force_remove_run(&target, &fleet_dir.join("worktrees")).await;
         let status = waiter.join().unwrap();
         assert_eq!(status.signal(), Some(9), "killed, not asked");
         assert!(!tree.exists());
@@ -473,7 +486,8 @@ mod tests {
             state,
         };
 
-        let problems = force_remove_run(&target).await;
+        let worktrees = fleet_dir.join("worktrees");
+        let problems = force_remove_run(&target, &worktrees).await;
         assert_eq!(problems.len(), 2, "{problems:?}");
         assert!(problems[0].contains("repo root"), "{problems:?}");
         assert!(
@@ -483,5 +497,35 @@ mod tests {
         // The checkout and its branch survive.
         assert!(root.join("seed.txt").is_file());
         assert!(branch_exists(&root, "main"));
+
+        // `..` climbing out of the worktrees directory is refused before
+        // any prefix comparison could be fooled by it
+        let mut state = target.state.clone();
+        state.worktree = Some(worktrees.join("../../src").to_string_lossy().into_owned());
+        state.branch = None;
+        let climbing = RunRef { state, ..target };
+        let problems = force_remove_run(&climbing, &worktrees).await;
+        assert!(problems[0].contains("`..`"), "{problems:?}");
+    }
+
+    #[tokio::test]
+    async fn remove_archived_leftovers() {
+        let root = init_repo("pilotfish-session-archived-");
+        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        let done = session::create_session(&fleet_dir, Some("old")).unwrap();
+        let (run_id, tree, branch) = finished_worker(&root, &fleet_dir, "stale", done.uuid);
+        // archived with its worktree and branch still there, the way a later
+        // namesake's spawn archives a finished run
+        let run_dir = fleet_dir.join("runs").join(&run_id);
+        let mut state = run::load_state(&run_dir).unwrap();
+        state.status = crate::fleet::run::RunStatus::Archived;
+        run::save_state(&run_dir, &state).unwrap();
+
+        let result = remove_session(&fleet_dir, &done.key()).await.unwrap();
+        assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
+        assert!(!tree.exists(), "the archived run's worktree goes too");
+        assert!(!branch_exists(&root, &branch), "and its branch");
+        assert!(!run_dir.exists());
     }
 }

@@ -596,30 +596,36 @@ pub fn set_routing(user_dir: &Path, key: &str, value: toml_edit::Item) -> anyhow
         .with_context(|| format!("writing user config {}", path.display()))
 }
 
-/// Write `contents` to `path` readable and writable by its owner only. An
-/// existing file is narrowed *before* the write, so the key is never on
-/// disk under wider permissions, not even for a moment.
+/// Write `contents` to `path` readable and writable by its owner only, by
+/// rename: a reader never sees a truncated or half-written config (a hard
+/// parse error, or silently the defaults), a crash mid-write loses nothing,
+/// and the temp file is created owner-only, so the key is never on disk
+/// under wider permissions, not even for a moment.
 fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .map_or_else(|| "config".into(), |n| n.to_string_lossy()),
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&tmp);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        if path.exists() {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        file.write_all(contents)
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    {
-        let mut file = std::fs::File::create(path)?;
-        file.write_all(contents)
+    let written = options.open(&tmp).and_then(|mut file| {
+        file.write_all(contents)?;
+        file.sync_all()
+    });
+    if let Err(err) = written.and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
     }
+    Ok(())
 }
 
 /// Append `entry` to `<root>/.gitignore` unless a line already covers it.
@@ -976,6 +982,15 @@ mod tests {
                 let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
                 assert_eq!(mode, 0o600, "a file holding the key is its owner's alone");
             }
+            let strays: Vec<String> = std::fs::read_dir(tmp.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".tmp"))
+                .collect();
+            assert!(
+                strays.is_empty(),
+                "written by rename, nothing left over: {strays:?}"
+            );
             set_routing(tmp.path(), "api_key", toml_edit::Item::None).unwrap();
             let raw = std::fs::read_to_string(&path).unwrap();
             assert!(!raw.contains("api_key"), "removed, not blanked: {raw}");

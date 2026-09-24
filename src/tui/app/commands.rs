@@ -529,7 +529,7 @@ and branch; unmerged work is lost:\n{}",
             SessionTarget::Orchestrator(_) => {
                 let current = self.effort().map(str::to_string);
                 let next = next_level(&CLAUDE_EFFORT_LEVELS, current.as_deref());
-                self.pending_effort = Some(next.clone());
+                self.pending_effort = Some((next.clone(), now_ms()));
                 self.toast(format!("· thinking {next}"), false);
                 vec![Effect::SetEffort(next)]
             }
@@ -552,13 +552,14 @@ and branch; unmerged work is lost:\n{}",
                 let current = self
                     .pending_thinking
                     .get(&run_id)
-                    .map(String::as_str)
+                    .map(|(level, _)| level.as_str())
                     .or(state.thinking_level.as_deref());
                 let next = next_level(&worker_thinking_levels(&state), current);
                 // optimistic, like the orchestrator's pending_effort: the
                 // statusline reads it via the state overlay in set_runs, and
                 // the next press advances from it instead of the stale state
-                self.pending_thinking.insert(run_id.clone(), next.clone());
+                self.pending_thinking
+                    .insert(run_id.clone(), (next.clone(), now_ms()));
                 self.toast(format!("· {} thinking {next}", state.name), false);
                 vec![Effect::WorkerThinking {
                     run_id,
@@ -847,7 +848,8 @@ and branch; unmerged work is lost:\n{}",
                     }
                     self.notice(format!("→ {} thinking level → {level}", state.name), false);
                     let run_id = run_id.to_string();
-                    self.pending_thinking.insert(run_id.clone(), level.clone());
+                    self.pending_thinking
+                        .insert(run_id.clone(), (level.clone(), now_ms()));
                     vec![Effect::WorkerThinking { run_id, level }]
                 }
                 "/model" => {
@@ -949,7 +951,7 @@ and branch; unmerged work is lost:\n{}",
                         );
                         return Vec::new();
                     }
-                    self.pending_effort = Some(level.clone());
+                    self.pending_effort = Some((level.clone(), now_ms()));
                     self.toast(format!("· thinking {level}"), false);
                     vec![Effect::SetEffort(level)]
                 }

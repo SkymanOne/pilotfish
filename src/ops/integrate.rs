@@ -283,14 +283,15 @@ pub(crate) async fn merge_core_with_env(
             ));
         }
     }
-    // A merge already in progress is the human's: `git merge` would fail and
-    // the conflict listing + `--abort` would discard their resolutions.
-    if git::merge_in_progress(&repo_root).await {
+    // Whatever the human is in the middle of is theirs: `git merge` would
+    // fail, its conflict listing would name the human's files as the
+    // worker's, and `--abort` would discard their resolutions.
+    if let Some(what) = git::operation_in_progress(&repo_root).await {
         return Ok(fail(
             ExitCode::Error,
             vec![format!(
-                "merge: a merge is already in progress in {} (MERGE_HEAD present); \
-resolve or abort it yourself first — pilotfish will not abort another merge.",
+                "merge: a {what} is already in progress in {}; finish or abort it yourself \
+first — pilotfish will not merge over it.",
                 repo_root.display()
             )],
         ));
@@ -544,8 +545,15 @@ pub(super) async fn cleanup_one(target: &RunRef, force: bool, all: bool) -> Clea
         target.state.repo_root.clone(),
     ) {
         // A corrupt or hand-edited run.json must never aim a worktree remove,
-        // `remove_dir_all` or a branch delete at the human's checkout.
-        let worktrees_dir = Path::new(&target.state.fleet_dir).join("worktrees");
+        // `remove_dir_all` or a branch delete at the human's checkout. The
+        // worktrees directory comes from where the record actually lives
+        // (`<fleet>/runs/<id>`), never from the record's own `fleetDir`.
+        let worktrees_dir = target
+            .run_dir
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| Path::new(&target.state.fleet_dir))
+            .join("worktrees");
         if let Err(err) =
             git::check_worktree_path(&worktrees_dir, Path::new(&repo_root), Path::new(&worktree))
         {

@@ -277,6 +277,17 @@ pub fn check_worktree_path(
     repo_root: &Path,
     worktree: &Path,
 ) -> anyhow::Result<()> {
+    // `..` is resolved by the filesystem, not by a prefix comparison: a path
+    // that climbs out can look like it sits under the worktrees directory
+    if worktree
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        anyhow::bail!(
+            "worktree field {} contains `..` — refusing to remove it",
+            worktree.display()
+        );
+    }
     if worktree == repo_root {
         anyhow::bail!(
             "worktree field {} is the repo root {} — refusing to remove it",
@@ -323,12 +334,37 @@ pub fn check_branch(branch: &str) -> anyhow::Result<()> {
     anyhow::bail!("branch field {branch} is not a pilotfish/ branch — refusing to touch it")
 }
 
-/// Is a merge already in progress in `repo` (`MERGE_HEAD` present)? A
-/// human's in-progress merge must never be aborted by the fleet.
-pub async fn merge_in_progress(repo: &Path) -> bool {
-    git_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], repo)
-        .await
-        .ok()
+/// What the human is in the middle of in `repo`, if anything: a merge, a
+/// cherry-pick, a revert, a rebase, or conflicts left unresolved. A merge
+/// on top of any of them would report the human's conflicts as the
+/// worker's, and its `--abort` would throw the human's work away.
+pub async fn operation_in_progress(repo: &Path) -> Option<&'static str> {
+    for (head, what) in [
+        ("MERGE_HEAD", "merge"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+    ] {
+        if git_raw(&["rev-parse", "-q", "--verify", head], repo)
+            .await
+            .ok()
+        {
+            return Some(what);
+        }
+    }
+    for dir in ["rebase-merge", "rebase-apply"] {
+        let path = git_raw(&["rev-parse", "--git-path", dir], repo).await;
+        let path = Path::new(path.stdout.trim());
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            repo.join(path)
+        };
+        if path.is_dir() {
+            return Some("rebase");
+        }
+    }
+    let unmerged = git_raw(&["diff", "--name-only", "--diff-filter=U"], repo).await;
+    (!unmerged.stdout.trim().is_empty()).then_some("conflict resolution")
 }
 
 /// What [`merge_branch`] decided.
@@ -681,6 +717,25 @@ mod tests {
 
             let failed = merge_branch(&root, "pilotfish/never-existed", false, false).await;
             assert!(matches!(failed, MergeOutcome::Failed(_)));
+        }
+        {
+            // a cherry-pick stopped on conflicts is not a merge, but it is the
+            // human's all the same: a merge on top would report their
+            // conflicts as the worker's
+            let root = init_repo("pilotfish-git-busy-");
+            git_sync(&root, &["config", "user.name", "t"]);
+            git_sync(&root, &["config", "user.email", "t@t"]);
+            git_sync(&root, &["checkout", "-q", "-b", "side"]);
+            std::fs::write(root.join("seed.txt"), "side\n").unwrap();
+            git_sync(&root, &["commit", "-qam", "side"]);
+            git_sync(&root, &["checkout", "-q", "main"]);
+            std::fs::write(root.join("seed.txt"), "main\n").unwrap();
+            git_sync(&root, &["commit", "-qam", "main"]);
+            assert_eq!(operation_in_progress(&root).await, None);
+            assert!(!git_raw(&["cherry-pick", "side"], &root).await.ok());
+            assert_eq!(operation_in_progress(&root).await, Some("cherry-pick"));
+            git_sync(&root, &["cherry-pick", "--abort"]);
+            assert_eq!(operation_in_progress(&root).await, None);
         }
     }
 }

@@ -28,7 +28,7 @@ use crate::cli::ExitCode;
 use crate::fleet::envelope::{Decoded, Envelope};
 use crate::fleet::run::{
     PendingDialog, PendingQuestion, PiCache, RunState, RunStatus, WorkerActivity, load_state,
-    read_pi_cache, record_steering, record_tool_activity, save_state, write_pi_cache,
+    record_steering, record_tool_activity, save_state, update_pi_cache,
 };
 use crate::paths::{FleetPaths, env_var};
 use crate::util::{append_json_line, append_text, now_iso, now_ms, read_new_lines};
@@ -1170,9 +1170,7 @@ impl Monitor {
     /// Best-effort: a failed write degrades to an older catalogue, never an
     /// error path for the run, and is logged to `pi.log` for diagnosis.
     fn persist_pi_cache(&self, update: impl FnOnce(&mut PiCache)) {
-        let mut cache = read_pi_cache(&self.fleet_dir).unwrap_or_default();
-        update(&mut cache);
-        if let Err(err) = write_pi_cache(&self.fleet_dir, &cache) {
+        if let Err(err) = update_pi_cache(&self.fleet_dir, update) {
             let _ = append_text(
                 &self.pi_log_path,
                 &format!("[monitor] failed to write pi-cache.json: {err}\n"),

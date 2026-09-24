@@ -15,7 +15,7 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::process::Command;
 
-use crate::fleet::run::{PiCache, WorkerCommand, WorkerModel, read_pi_cache, write_pi_cache};
+use crate::fleet::run::{PiCache, WorkerCommand, WorkerModel, read_pi_cache};
 use crate::paths::{FleetPaths, env_var};
 use crate::worker::monitor::materialize_worker_files;
 use crate::worker::rpc::{CommandEntry, ModelRef, RpcMessage, parse_line};
@@ -110,18 +110,19 @@ pub async fn refresh_pi_catalogue(fleet_dir: &Path, pi_spec: &str) -> Vec<Worker
     if fresh.available_models.is_empty() && fresh.commands.is_empty() {
         return Vec::new();
     }
-    // read-modify-write, one field per answer: a monitor that just wrote a
-    // field must not be clobbered, and a field pi did not answer is left as
-    // it was
-    let mut cache = read_pi_cache(fleet_dir).unwrap_or_default();
-    if !fresh.available_models.is_empty() {
-        cache.available_models = fresh.available_models.clone();
-    }
-    if !fresh.commands.is_empty() {
-        cache.commands = fresh.commands;
-    }
-    let _ = write_pi_cache(fleet_dir, &cache);
-    fresh.available_models
+    // read-modify-write under the cache's lock, one field per answer: a
+    // monitor that just wrote a field must not be clobbered, and a field pi
+    // did not answer is left as it was
+    let models = fresh.available_models.clone();
+    let _ = crate::fleet::run::update_pi_cache(fleet_dir, |cache| {
+        if !fresh.available_models.is_empty() {
+            cache.available_models = fresh.available_models;
+        }
+        if !fresh.commands.is_empty() {
+            cache.commands = fresh.commands;
+        }
+    });
+    models
 }
 
 /// One `get_available_models` + `get_commands` round trip against a fresh
