@@ -155,12 +155,7 @@ pub(crate) async fn diff_core_with_env(
             vec![text.to_string()],
         ));
     };
-    let base = state
-        .base_commit
-        .clone()
-        .or_else(|| state.base.clone())
-        .unwrap_or_else(|| "HEAD".to_string());
-    let text = match git::diff_against_base(&worktree, &base, name_only).await {
+    let text = match git::diff_against_base(&worktree, state.diff_base(), name_only).await {
         Ok(out) if out.is_empty() => "(no changes)".to_string(),
         Ok(text) => text,
         Err(err) => return Ok(fail(ExitCode::Error, vec![format!("{err:#}")])),

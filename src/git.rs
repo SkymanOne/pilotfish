@@ -227,6 +227,26 @@ pub async fn diff_against_base(
     }
 }
 
+/// The full patch of a worktree against `base`: commits and uncommitted
+/// edits to tracked files alike (`git diff <base>`, not `<base>...HEAD`),
+/// renames detected. Untracked files are not in it — see [`dirty_files`].
+///
+/// # Errors
+///
+/// Fails when git cannot diff against `base`, with git's stderr.
+pub async fn diff_patch(worktree: &Path, base: &str) -> anyhow::Result<String> {
+    let r = git_raw(
+        &["diff", "--no-color", "--no-ext-diff", "-M", base, "--"],
+        worktree,
+    )
+    .await;
+    if r.ok() {
+        Ok(r.stdout)
+    } else {
+        anyhow::bail!("diff: {}", r.stderr.trim())
+    }
+}
+
 /// Uncommitted paths in a worktree (whole `--porcelain` lines): invisible to
 /// diff/merge, lost by `cleanup --force`.
 pub async fn dirty_files(worktree: &Path) -> Vec<String> {
@@ -584,6 +604,72 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn worker_patch() {
+        use crate::patch::{FileStatus, LineKind};
+        let root = init_repo("pilotfish-git-patch");
+        std::fs::write(root.join("auth.rs"), "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        std::fs::write(root.join("old.rs"), "moved\n").unwrap();
+        git_sync(&root, &["add", "."]);
+        git_sync(&root, &["commit", "-qm", "base"]);
+        let base = resolve_commit(&root, "HEAD").await.unwrap();
+
+        // committed: an edit and a rename; uncommitted: a tracked edit;
+        // untracked: a new file
+        std::fs::write(root.join("auth.rs"), "fn a() {}\nfn b2() {}\nfn c() {}\n").unwrap();
+        git_sync(&root, &["mv", "old.rs", "new.rs"]);
+        git_sync(&root, &["commit", "-qam", "work"]);
+        std::fs::write(root.join("seed.txt"), "seed\nmore\n").unwrap();
+        std::fs::write(root.join("fresh.rs"), "fn fresh() {}\n").unwrap();
+
+        let patch = crate::patch::load(&root, &base).await.unwrap();
+        assert!(!patch.truncated);
+        assert_eq!(patch.untracked, vec!["fresh.rs".to_string()]);
+        let auth = patch.files.iter().find(|f| f.path == "auth.rs").unwrap();
+        assert_eq!((auth.added, auth.removed), (1, 1));
+        let lines = &auth.hunks[0].lines;
+        let removed = lines.iter().find(|l| l.kind == LineKind::Removed).unwrap();
+        let added = lines.iter().find(|l| l.kind == LineKind::Added).unwrap();
+        assert_eq!(
+            (removed.old, removed.new, removed.text.as_str()),
+            (Some(2), None, "fn b() {}")
+        );
+        assert_eq!(
+            (added.old, added.new, added.text.as_str()),
+            (None, Some(2), "fn b2() {}")
+        );
+        let renamed = patch.files.iter().find(|f| f.path == "new.rs").unwrap();
+        assert_eq!(renamed.status, FileStatus::Renamed);
+        assert_eq!(renamed.old_path.as_deref(), Some("old.rs"));
+        let seed = patch.files.iter().find(|f| f.path == "seed.txt").unwrap();
+        assert_eq!((seed.added, seed.removed), (1, 0));
+        assert_eq!((patch.added(), patch.removed()), (2, 1));
+
+        // the parser alone: a new binary, a deletion, a mode change, and a
+        // quoted path
+        let parsed = crate::patch::parse(
+            "diff --git a/logo.png b/logo.png\nnew file mode 100644\nBinary files /dev/null and b/logo.png differ\n\
+             diff --git a/gone.rs b/gone.rs\ndeleted file mode 100644\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-fn gone() {}\n\
+             diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n\
+             diff --git \"a/tab\\there.rs\" \"b/tab\\there.rs\"\n--- \"a/tab\\there.rs\"\n+++ \"b/tab\\there.rs\"\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        let [logo, gone, script, tabbed] = parsed.files.as_slice() else {
+            panic!("{parsed:?}");
+        };
+        assert!(logo.binary && logo.status == FileStatus::Added);
+        assert_eq!(
+            (gone.path.as_str(), gone.status, gone.removed),
+            ("gone.rs", FileStatus::Deleted, 1)
+        );
+        assert!(script.mode_change && script.hunks.is_empty());
+        assert_eq!(tabbed.path, "tab\there.rs");
+
+        // past the cap: cut on a line boundary, and said so
+        let big = "+é line\n".repeat(crate::patch::PATCH_CAP / 8);
+        let (cut, truncated) = crate::patch::cap(&big);
+        assert!(truncated && cut.len() <= crate::patch::PATCH_CAP && cut.ends_with('\n'));
     }
 
     #[tokio::test]

@@ -421,6 +421,16 @@ impl RunState {
         }
     }
 
+    /// What the worker's changes are measured against: the commit its
+    /// worktree was cut from, else the ref it was cut from, else `HEAD`.
+    #[must_use]
+    pub fn diff_base(&self) -> &str {
+        self.base_commit
+            .as_deref()
+            .or(self.base.as_deref())
+            .unwrap_or("HEAD")
+    }
+
     /// What to show as the run's model: what pi resolved, else the requested
     /// pattern.
     #[must_use]

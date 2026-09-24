@@ -13,6 +13,7 @@ pub mod git;
 pub mod mcp;
 pub mod ops;
 pub mod orch;
+pub mod patch;
 pub mod paths;
 pub mod route;
 pub mod secrets;
