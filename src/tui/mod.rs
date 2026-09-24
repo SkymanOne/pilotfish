@@ -1,8 +1,9 @@
 //! The console: a ratatui TUI with an orchestrator-and-workers dashboard,
 //! per-session drill-down, and modal (normal/insert) keys. The state half
 //! (this module's `app`/`model`/`keys`/`palette`/`completions`/`transcript`)
-//! is pure and testable without a terminal; `view/`, `markdown`, `theme` and
-//! `runtime` draw it.
+//! is pure and testable without a terminal; `driver` runs the loop around it
+//! (lock, poll, fleet watcher, session anchoring) for any frontend, and
+//! `view/`, `markdown`, `theme` and `runtime` draw it in a terminal.
 //!
 //! # For the rendering worker — the view model you consume
 //!
@@ -58,6 +59,7 @@
 
 pub mod app;
 pub mod completions;
+pub mod driver;
 pub mod keys;
 pub mod markdown;
 pub mod model;

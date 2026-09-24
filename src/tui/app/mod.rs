@@ -2460,7 +2460,7 @@ pub async fn run_app(options: TuiOptions) -> anyhow::Result<crate::cli::ExitCode
     fleet
         .ensure()
         .context("creating the fleet state directory")?;
-    let lock = crate::tui::runtime::ConsoleLock::acquire(&fleet)?;
+    let lock = crate::tui::driver::ConsoleLock::acquire(&fleet)?;
     crate::tui::runtime::install_panic_hook();
     let mut terminal = crate::tui::runtime::enter()?;
 
@@ -2473,7 +2473,7 @@ pub async fn run_app(options: TuiOptions) -> anyhow::Result<crate::cli::ExitCode
 
     let code = result?;
     // what is left running decides the goodbye
-    let orch_key = crate::tui::runtime::resolve_console_key(&fleet);
+    let orch_key = crate::tui::driver::resolve_console_key(&fleet);
     let orchestrator_exited = std::fs::read_to_string(fleet.orchestrator_state(&orch_key))
         .ok()
         .and_then(|raw| serde_json::from_str::<OrchestratorState>(&raw).ok())
