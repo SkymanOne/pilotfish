@@ -222,6 +222,7 @@ impl Monitor {
                     .into_owned()
             });
         let cwd = PathBuf::from(&cwd_string);
+        let adopted = stored.is_some();
         let mut record = stored.unwrap_or_else(|| session::OrchestratorSession::new(&cwd_string));
         let key = record.key();
         std::fs::create_dir_all(paths.orchestrator_dir(&key))?;
@@ -233,6 +234,11 @@ impl Monitor {
         // The pid's own start time, for the orphan reaper: a pid recycled
         // onto a later process must never be reaped as this monitor.
         record.pid_started_at = crate::orch::health::process_started_at(record.pid.unwrap_or(0));
+        if !adopted {
+            // a monitor started on no session writes its row once, here;
+            // later saves only update it, so a removed row stays removed
+            session::with_store_mutation(fleet_dir, |store| store.upsert(record.clone()))?;
+        }
 
         // The prompt is read by the claude child, so it lives beside it;
         // render the current override (or the embedded template) fresh.
@@ -375,9 +381,9 @@ impl Monitor {
         // `fresh` is a one-shot launch instruction: consume it so a restarted
         // monitor resumes instead of starting over.
         let fresh = { self.shared().record.launch.fresh.take().unwrap_or(false) };
-        if fresh {
-            self.save_record();
-        }
+        // the pid goes on record now, so the session reads as running before
+        // claude's first init (which only comes with the first message)
+        self.save_record();
         let mut rx = self.start_child(fresh);
         self.spawn_timers();
 
@@ -1062,24 +1068,25 @@ impl Monitor {
             records::write_capabilities(&self.paths.orchestrator_capabilities(&self.key), &sh.caps);
     }
 
-    /// Persist the session record (id, pid, model, launch flags, heartbeat
-    /// timestamp): merge the working copy into a fresh, locked read of
-    /// `fleet.json` and write it back, so N monitors sharing the store
-    /// never clobber each other's rows the way an unlocked snapshot would.
-    /// The heartbeat is stamped straight into the store (not this working
-    /// copy), so the on-disk value is carried over — writing the bare
-    /// record would erase a fresh stamp.
+    /// Persist what the monitor owns of its session row (claude's session
+    /// id, the pids, the model, the launch flags) into a fresh, locked read
+    /// of `fleet.json`, so N monitors sharing the store never clobber each
+    /// other's rows. Everything else is the console's and stays as it is on
+    /// disk: the name (a rename), recency, the watcher's cursors, and the
+    /// heartbeat, which is stamped straight into the store. A row that is
+    /// gone was removed, and stays gone: the monitor never recreates it.
     fn save_record(&self) {
-        let sh = self.shared();
-        let mut record = sh.record.clone();
+        let record = self.shared().record.clone();
         let _ = session::with_store_mutation(&self.fleet_dir, |store| {
-            if record.last_heartbeat.is_none() {
-                record.last_heartbeat = store
-                    .sessions
-                    .get(&record.uuid)
-                    .and_then(|s| s.last_heartbeat.clone());
-            }
-            store.upsert(record);
+            let Some(row) = store.sessions.get_mut(&record.uuid) else {
+                return;
+            };
+            row.session_id = record.session_id;
+            row.pid = record.pid;
+            row.pid_started_at = record.pid_started_at;
+            row.model = record.model;
+            row.claude_version = record.claude_version;
+            row.launch = record.launch;
         });
     }
 }
@@ -1220,6 +1227,17 @@ mod tests {
                     .orchestrator_state(&session::OrchestratorSession::new("/x").key())
                     .is_file()
             );
+            // The monitor saves only its own fields: a rename made while it
+            // runs survives its next save, and a removed row stays removed.
+            session::rename_session(&fleet, wanted_uuid, "renamed").unwrap();
+            monitor.save_record();
+            let row = session::session_by_key(&fleet, &wanted_uuid.to_string()).unwrap();
+            assert_eq!(row.alias.as_deref(), Some("renamed"));
+            assert_eq!(row.pid, Some(monitor.pid));
+            session::with_store_mutation(&fleet, |store| store.sessions.remove(&wanted_uuid))
+                .unwrap();
+            monitor.save_record();
+            assert!(session::session_by_key(&fleet, &wanted_uuid.to_string()).is_none());
         }
         {
             let tmp = tempfile::tempdir().unwrap();

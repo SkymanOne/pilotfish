@@ -972,8 +972,8 @@ fn orchestrator_layout() {
     .to_envelope(pilotfish::fleet::envelope::Party::Console);
     pilotfish::fleet::envelope::append_envelope(&inbox, &user).unwrap();
 
-    // the store is created before the session row is upserted into it, so
-    // waiting for the file alone can catch it empty
+    // the row is written at boot and claude's session id lands in it with
+    // the first init, so waiting for the file or the row alone is too early
     let fleet_json = fleet_dir.join("fleet.json");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let store: Value = loop {
@@ -981,7 +981,9 @@ fn orchestrator_layout() {
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
         if let Some(store) = store
-            && store["sessions"].as_object().is_some_and(|s| !s.is_empty())
+            && store["sessions"]
+                .as_object()
+                .is_some_and(|s| s.values().any(|row| row["sessionId"].is_string()))
         {
             break store;
         }
