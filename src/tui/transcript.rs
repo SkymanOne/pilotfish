@@ -1077,9 +1077,12 @@ impl Transcript {
         self.gap();
         let shown = lines.len().min(THINKING_LINES);
         for (i, line) in lines.iter().take(shown).enumerate() {
+            // scrubbed like every other agent-written block: a control
+            // character here would tear the frame it is drawn into
+            let body = crate::util::visible_line(line);
             self.blocks.push(Block {
                 kind: BlockKind::Thinking,
-                text: format!("{}{line}", if i == 0 { "✻ " } else { "  " }),
+                text: format!("{}{body}", if i == 0 { "✻ " } else { "  " }),
             });
         }
         if lines.len() > shown {
@@ -1486,6 +1489,24 @@ mod tests {
                 Some("inflight"),
                 "the in-flight line is scrubbed too"
             );
+        }
+        {
+            // reasoning replayed whole (a turn that never streamed any) goes
+            // through push_thinking, and is scrubbed like every other block
+            let mut t = Transcript::new();
+            t.apply_claude_message(&serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "mulling \u{1b}[2Kit\rover\u{1b}[0m"},
+                ]},
+            }));
+            let thinking: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Thinking)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(thinking, vec!["✻ over"], "{thinking:?}");
         }
     }
 
