@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 description = "A fleet of headless pi coding agents in your terminal, orchestrated by Claude Code."
 repository = "https://github.com/SkymanOne/pilotfish"
+license = "MIT"
 
 [[bin]]
 name = "pilotfish"
