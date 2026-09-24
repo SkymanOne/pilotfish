@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  check:
+    name: Clippy and tests
+    # macOS: the desktop feature is part of every check, and it builds only there
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Metal toolchain (GPUI compiles its shaders with it)
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+      - name: Git identity for the tests' throwaway repositories
+        run: |
+          git config --global user.name "pilotfish CI"
+          git config --global user.email "ci@pilotfish.invalid"
+      - name: The default build carries no GUI
+        run: "! cargo tree -e normal | grep gpui"
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: PILOTFISH_DIR="$RUNNER_TEMP/pilotfish-canary" cargo test --all-features
+      - name: The tests left no fleet state behind
+        run: test -z "$(ls -A "$RUNNER_TEMP/pilotfish-canary" 2>/dev/null)"

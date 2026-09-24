@@ -246,7 +246,7 @@ cargo test --all-features
 cargo build --release
 ```
 
-The gates build the `desktop` feature, so they need the Metal toolchain on macOS. `cargo tree -e normal | grep gpui` must print nothing: the default build carries no GUI.
+CI (`.github/workflows/ci.yml`) runs them on every push to `main` and every pull request: `fmt` on Linux, and clippy, the tests and the canary check on macOS, since the gates build the `desktop` feature and it needs the Metal toolchain. `cargo tree -e normal | grep gpui` must print nothing: the default build carries no GUI.
 
 ## Tests
 
