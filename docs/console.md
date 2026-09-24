@@ -1,6 +1,6 @@
 # The console
 
-The console presents one conversation: the selected session's transcript fills the screen, with a composer below it and a status line at the bottom. The fleet is an overlay, opened on demand, rather than a permanent column beside the transcript.
+The console presents one conversation: the selected session's transcript fills the screen, with a composer below it and a status line at the bottom. The fleet is an overlay, opened on demand, rather than a permanent column beside the transcript. [The desktop window](desktop.md) is the same console with its panes side by side; its commands, prompts and routing are the ones described here.
 
 ![The console: the orchestrator's conversation, with the composer and status line below](../imgs/main.png)
 

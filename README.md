@@ -13,6 +13,7 @@ You describe the work to an orchestrator. It plans the change, writes a brief fo
 * **Separation of duties.** The orchestrator reads, plans, merges and verifies; `Edit` and `Write` are disabled for it. Only workers modify code, each on a dedicated branch.
 * **No agent-side setup.** The orchestrator is a `claude -p` process managed by `pilotfish`, and the pi worker extension is embedded in the binary.
 * **Model routing.** Optionally, each worker's model and reasoning level are chosen from its brief, weighing capability against cost. Uncertain choices are referred to you.
+* **Desktop window.** Optionally, `pilotfish desktop` opens the same console in a macOS window: sessions, workers, the conversation and the selected worker's live diff side by side, with a Board of every worker by state.
 * **Scriptable.** The console is one client among several. `pilotfish spawn`, `status`, `merge` and related commands operate on the same fleet from a shell.
 
 ## Installation
@@ -111,6 +112,19 @@ models = ["anthropic:claude-opus-5", "anthropic:claude-sonnet-5", "opencode-go:d
 
 A single decision can weigh at most 255 models, so the shortlist is capped at 255 entries.
 
+### Desktop window
+
+![The desktop window: sessions, workers, the orchestrator's plan in markdown, and a worker's diff](imgs/desktop.png)
+
+`pilotfish desktop` shows the console as a window: sessions on the left, then the open session's workers, the conversation, and the selected worker's changes, which update as it works. ⌘B opens a Board of every session's workers in four lanes: started, waiting on you, failed and finished. Panes resize by dragging and fold with ⌘1–⌘3. The window is an optional feature:
+
+```bash
+xcodebuild -downloadComponent MetalToolchain        # once, on macOS
+cargo install --locked --git https://github.com/SkymanOne/pilotfish --features desktop
+```
+
+See [the desktop window](docs/desktop.md) for the rest.
+
 ### Long-running sessions
 
 Sessions manage their own size. After `[session] auto_compact_turns` turns (60 by default; `0` disables it), the orchestrator's context is summarised with claude's `/compact`, and the transcript file is capped on disk. Older reasoning and tool output are collapsed to one line each, and `ctrl-o` expands them. `/clear` empties the view and `/trim` shortens the file.
@@ -135,5 +149,6 @@ Every command accepts `--help`. The exit codes are the same values the orchestra
 
 * [Getting started](docs/getting-started.md): installation, launch options, user configuration, and where state is stored
 * [The console](docs/console.md): keys and commands, the fleet, the palette, permissions, routing, and the transcript
+* [The desktop window](docs/desktop.md): `pilotfish desktop`, its panes, the Board and its keys
 * [Headless commands](docs/cli.md): the CLI, its exit codes, and how routing decides
 * [AGENTS.md](AGENTS.md): the reference for contributors, human or agent — module layout, the on-disk contract, verified facts about the pi and claude protocols, and the reasoning behind the design

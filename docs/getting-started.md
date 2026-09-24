@@ -5,6 +5,7 @@
 * A current stable Rust toolchain (the crate uses edition 2024)
 * `pi` on your `PATH`
 * `claude` (Claude Code 2.1.x) on your `PATH` and signed in
+* For the optional desktop window: macOS with Xcode, and its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 
 ## Installation
 
@@ -13,6 +14,8 @@ cargo install --locked --git https://github.com/SkymanOne/pilotfish   # or, from
 cargo install --locked --path .                                  # or: cargo build --release  →  target/release/pilotfish
 pilotfish --help                                                      # verify the installation
 ```
+
+Add `--features desktop` to either `cargo install` line to include [the desktop window](desktop.md) (`pilotfish desktop`).
 
 `--locked` builds against the versions in `Cargo.lock`. Without it, Cargo resolves the newest compatible versions of every dependency, which have not necessarily been tested with `pilotfish`.
 
@@ -39,7 +42,7 @@ Describe the task to the orchestrator, for example: *"Add token refresh to the a
 | `--budget <usd>` | Stop the orchestrator after the given spend |
 | `--progress-events` | Forward workers' progress notes to the orchestrator (off by default because of their volume) |
 
-These choices are recorded, so a restarted orchestrator resumes with the same model, permission mode and Remote Control setting.
+These choices are recorded, so a restarted orchestrator resumes with the same model, permission mode and Remote Control setting. `pilotfish desktop` takes the same options.
 
 ## Closing and reopening
 

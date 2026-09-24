@@ -8,7 +8,7 @@ Working notes for whoever builds on this repository, human or agent. Keep it fac
 
 The Rust rewrite of the original TypeScript implementation (with `ratatui`) is the only implementation; the TypeScript tree was deleted at cutover on 2026-08-30. Repository, crate, binary and state directory share the name. It was `parl` until 2026-09-24, when the crate name turned out to be taken: everything moved to `pilotfish` (the GitHub repository included, which redirects from the old URL). Nothing migrates — as with `.pi-fleet`, an old `.parl/` or `~/.parl/` is simply ignored, `PARL_*` variables are no longer read, and a TypeSafe key stored under the keychain service `parl` is no longer read (the credential store itself was dropped the same day; see Routing a brief). The MCP server name stays `fleet`, so its tools stay `mcp__fleet__*`.
 
-The user-facing docs are [README.md](README.md) and [docs/](docs/) (getting started, the console, the CLI). Keep product behaviour documented there and the contracts here; neither should repeat the other.
+The user-facing docs are [README.md](README.md) and [docs/](docs/) (getting started, the console, the desktop window, the CLI). Keep product behaviour documented there and the contracts here; neither should repeat the other.
 
 ## Architecture
 
@@ -31,7 +31,9 @@ Single crate `pilotfish`, lib + bin. The library is the contract, and the binary
 | `src/secrets.rs` | the TypeSafe key: `$TYPESAFE_API_KEY` first, then `[routing] api_key` in the user config. `Secret` never prints, config included. |
 | `src/ops/` | the shared operation layer both the CLI and the MCP tools call: `spawn.rs`, `query.rs` (status/output/logs/report/wait/attach), `steer.rs` (send/followup/answer/stop), `integrate.rs` (diff/merge/cleanup), `session.rs` (removing a whole session, forced all the way down: stop its monitor — ask, then the reaper's SIGTERM, then `killpg` SIGKILL of the monitor's group — `cleanup_one` every run it owns with force, and for a run that still will not go, `killpg` its monitor (guarded by `--run <id>` in its command line), `git worktree remove --force --force`, delete-and-prune, `branch -D`; then delete the run records, `orchestrators/<key>/` and the `fleet.json` row). Monitors are process-group leaders (`process_group(0)`), which is what lets one `killpg` take pi, or claude and its MCP server, with them. The CLI-shaped signatures live beside `_core` variants that take a `Party` source, so the console and MCP can attribute actions honestly. |
 | `src/mcp/` | the stdio MCP server (`server.rs`), one tool per op, built on `rmcp`. Server name stays `fleet` so tools stay `mcp__fleet__*`. |
-| `src/tui/` | the console: state and update loop (`app/mod.rs`, with the overlay handlers in `app/overlays.rs` and the composer's commands in `app/commands.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), crossterm runtime (`runtime.rs`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
+| `src/tui/` | the console: state and update loop (`app/mod.rs`, with the overlay handlers in `app/overlays.rs` and the composer's commands in `app/commands.rs`), view model (`model.rs`), keys (`keys.rs`), palette (`palette.rs`), completions (`completions.rs`), transcript (`transcript.rs`), markdown rendering (`markdown.rs`), theme (`theme.rs`), the frontend-agnostic loop (`driver.rs`: `ConsoleLock`, the `.pilotfish` poll, the session-scoped fleet watcher, session anchoring and the orchestrator monitor launch, behind `Driver`), crossterm runtime (`runtime.rs`, a terminal loop over `Driver`), and `view/` draw functions (session, dashboard, composer, overlay, statusline). |
+| `src/desktop/` | `pilotfish desktop`, behind the `desktop` feature. `backend.rs` runs a `Driver` on the tokio runtime plus what only the window shows (every session, every session's runs for the Board, the selected worker's `patch::load`) and publishes an `Arc<Snapshot>` on a `watch` channel after every change; the window sends `UiCmd`s on an `mpsc`. The GPUI half never reads a file or runs git: `main_view.rs` (panes, resize/fold, composer with completions), `chat.rs`, `changes.rs` (the diff pane), `board.rs` (the ⌘B popup), `sheets.rs` (one sheet per `Overlay`), `keys.rs` (GPUI keystroke → crossterm `KeyEvent`, so overlays read keys through `Console::handle_key` exactly as in the TUI), `theme.rs`. `shots.rs` is test tooling, only under `desktop-shots`. |
+| `src/patch.rs` | a worker's changes as data: `git::diff_patch` (base → worktree, committed and uncommitted, renames), capped at 512 KiB on a line boundary, parsed into files, hunks and numbered lines, plus untracked paths. |
 | `pi/`, `prompts/` | TypeScript on purpose, embedded with `include_str!` and materialised into `.pilotfish/pi/` at worker boot: `pi/extensions/fleet-worker.ts`, `pi/skills/fleet-worker-report/SKILL.md`, `prompts/orchestrator.md`. |
 
 ## The orchestrator contract
@@ -77,6 +79,7 @@ Single crate `pilotfish`, lib + bin, edition 2024, version 0.2.0. `Cargo.lock` i
 | Routing | `reqwest` (`json`, `rustls-tls`, no default features) | the only HTTP in the tree: `src/route.rs` calls TypeSafe's System One, since it has no Rust SDK |
 | Config edits | `toml_edit` | `set_routing` edits `[routing]` keys in `~/.pilotfish/config.toml` in place, keeping the user's comments and order; `toml` still does the reading |
 | Misc | `regex`, `dirs` (home lookup for the `~/.pilotfish` user dir), `rand`, `toml` (user config), `futures` | `StreamExt` over the crossterm event stream |
+| Desktop (feature `desktop`) | `gpui` = `gpui-pre` =0.3.6, `gpui_platform` = `gpui-pre-platform` =0.3.6 (`font-kit`), `gpui-component` =0.6.6 (nine tree-sitter grammars) | `gpui-pre` is a weekly snapshot of Zed's GPUI and breaks between snapshots, so all three are pinned with `=` and move together. Not `gpui-kit`: its manifest turns on `runtime_shaders`, and a feature cannot be turned back off; without it the build compiles the shaders, which needs the Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on any machine building the feature, the `--all-features` gates included. AppKit owns the main thread, so `main.rs` takes the `desktop` arm before `block_on` and hands the runtime over; on macOS `run` may never return, so the quit path saves cursors and prefs before `cx.quit()`. The fonts (IBM Plex Sans Condensed, IBM Plex Mono, OFL, `assets/fonts/`) are embedded with `include_bytes!` |
 
 git is the git CLI, not `git2`: everything goes through `git_raw`, which trusts the real exit code, because merge conflicts print to stdout and sniffing stderr gets it wrong. The two agents are subprocesses, not libraries: `claude -p` over stream-json, `pi --mode rpc` over its own RPC; neither SDK is linked in.
 
@@ -110,8 +113,10 @@ git is the git CLI, not `git2`: everything goes through `git_raw`, which trusts 
                         launch record; unknown top-level keys (console prefs under "console") round-trip
   fleet.json.lock       lock sidecar for store mutations — the store is written by atomic rename, so
                         flocking the store file itself would lock a fresh inode every write
-  console.lock          single-instance lock for the TUI; a spawn also reads it to learn whether anyone is
-                        there to ask (fresh heartbeat = a console is open)
+  console.lock          single-instance lock for the console, terminal or desktop (one of them at a time);
+                        a spawn also reads it to learn whether anyone is there to ask (fresh heartbeat =
+                        a console is open)
+  desktop.json          the desktop window's pane widths and folds
   routing/              model choices a waiting spawn put to the human: `<id>.json` (candidates, asker pid,
                         deadline) and `<id>.answer.json` from the console; the spawn removes both (lazy)
   pi-cache.json.lock    lock sidecar for the catalogue's read-modify-write (the cache is replaced by rename)
@@ -218,6 +223,8 @@ Each of these cost a debugging session once already.
 - `session::save` destroyed every key it did not model. The console keeps prefs under a `"console"` key in the same `fleet.json`, so the monitor's 5 s heartbeat erased the console's keys continuously. `FleetSessions` now carries `#[serde(flatten)] extra` so unknown top-level keys round-trip. This passed a full green suite because nothing asserted that one writer preserves another writer's keys.
 - A test that returns right after `shutdown()` drops a temp dir its monitor is still writing into. The removal can fail half-way (`ENOTEMPTY` — the monitor created a file mid-walk), the directory survives, and a monitor whose directory survives never learns to stop: two leaked this way and ran a compaction loop for two days. Tests wait for the monitor pid to go (`stop_and_wait` in `tests/orch_monitor.rs`), and removals under a live monitor retry.
 - `fleet.json` is written by atomic rename, so an flock on the store file locks a fresh inode every write. Mutations go through `session::with_store_mutation`, which locks a stable `fleet.json.lock` sidecar.
+- `--all-features` turns on `serde_json`'s `preserve_order` (something in the GPUI tree asks for it), so a `serde_json::Map` iterates in insertion order under the gates and sorted without the feature. A test that compared `keys()` to a sorted list passed in one build and failed in the other; compare sets, or sort first.
+- The console used to call the CLI-shaped `ops::steer::send`/`followup`/`answer`/`stop` and `integrate::cleanup`: they `println!` under the alternate screen, drop refusals, and sign every steer as the orchestrator, so the watcher never reported `console_steer`. `Console::execute` calls the `*_core_with_env` forms with `Party::Console`, pinned to its own fleet, and shows `err` as a notice. Its `FleetWatcher` also had no `owner` and forwarded other sessions' worker events; `driver::session_watcher` sets it.
 
 ## Conventions
 
@@ -232,6 +239,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 cargo build --release
 ```
+
+The gates build the `desktop` feature, so they need the Metal toolchain on macOS. `cargo tree -e normal | grep gpui` must print nothing: the default build carries no GUI.
 
 ## Tests
 
@@ -256,6 +265,8 @@ Knobs, all derived from `ENV_PREFIX`:
 | `PILOTFISH_RUN` | the run a worker's extension reports into |
 | `TYPESAFE_API_KEY` | the routing key; wins over `[routing] api_key`, and with neither routing is inert |
 | `PILOTFISH_TYPESAFE_URL` | points routing at another endpoint (a proxy, or a test stub) |
+| `PILOTFISH_APPEARANCE` | `dark` or `light` pins the desktop window's look instead of following macOS |
+| `PILOTFISH_SHOTS` | a directory; with the `desktop-shots` feature, the window runs the `script` lines appended there (`shot`, `key`, `type`, `click`, `drag`, `board`, `wait`) and renders `shot`s offscreen to PNG. No Screen Recording or Accessibility permission is involved, which is how the UI is checked from a background session |
 
 Run the full suite the sanctioned way, into a throwaway fleet dir, and check it stayed empty:
 
