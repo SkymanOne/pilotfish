@@ -133,10 +133,17 @@ impl ShortlistEditor {
     /// bare ids included) already ticked.
     #[must_use]
     pub fn new(catalogue: Vec<crate::fleet::run::WorkerModel>, models: &[String]) -> Self {
-        let chosen = crate::route::narrow(&catalogue, None, models)
-            .iter()
-            .map(crate::fleet::run::WorkerModel::key)
-            .collect();
+        // `narrow` reads an empty list as "every model", which is what
+        // routing does without a shortlist — but a shortlist is picked by
+        // hand, so no list yet means nothing ticked
+        let chosen = if models.is_empty() {
+            std::collections::BTreeSet::new()
+        } else {
+            crate::route::narrow(&catalogue, None, models)
+                .iter()
+                .map(crate::fleet::run::WorkerModel::key)
+                .collect()
+        };
         let kept = models
             .iter()
             .filter(|want| {

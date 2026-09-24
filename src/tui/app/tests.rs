@@ -2413,3 +2413,15 @@ fn a_status_reload_never_starts_a_catalogue_fetch() {
     );
     assert!(c.pi_fetch.result.lock().unwrap().is_none(), "reported once");
 }
+
+#[test]
+fn a_shortlist_starts_empty_when_none_is_saved() {
+    let catalogue = vec![
+        priced_model("anthropic", "claude-opus-5"),
+        priced_model("openrouter", "deepseek-v4-flash"),
+    ];
+    let editor = ShortlistEditor::new(catalogue, &[]);
+    assert!(editor.chosen.is_empty(), "every tick is the user's own");
+    assert_eq!(editor.count(), 0);
+    assert_eq!(editor.visible.len(), 2, "all of them still listed");
+}
