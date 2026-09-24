@@ -261,6 +261,76 @@ pub async fn delete_branch(repo: &Path, branch: &str, force: bool) -> bool {
     git_raw(&["branch", delete, branch], repo).await.ok()
 }
 
+/// Check a recorded worktree path before a destructive op touches it.
+///
+/// `worktree` must lie under `worktrees_dir` (the fleet's worktrees
+/// directory) and must not be `repo_root` itself. Comparison is on
+/// canonicalized paths when the worktree exists — a symlink or `..`-laden
+/// path resolves before it is trusted; a missing path is still checked
+/// lexically, because nothing may ever hand it to `remove_dir_all`.
+///
+/// # Errors
+///
+/// Names the `worktree` field and its value when it is unsafe.
+pub fn check_worktree_path(
+    worktrees_dir: &Path,
+    repo_root: &Path,
+    worktree: &Path,
+) -> anyhow::Result<()> {
+    if worktree == repo_root {
+        anyhow::bail!(
+            "worktree field {} is the repo root {} — refusing to remove it",
+            worktree.display(),
+            repo_root.display()
+        );
+    }
+    if let (Ok(w), Ok(r)) = (worktree.canonicalize(), repo_root.canonicalize())
+        && w == r
+    {
+        anyhow::bail!(
+            "worktree field {} resolves to the repo root {} — refusing to remove it",
+            worktree.display(),
+            repo_root.display()
+        );
+    }
+    let under = match (worktree.canonicalize(), worktrees_dir.canonicalize()) {
+        (Ok(w), Ok(b)) => w.starts_with(&b),
+        _ => worktree.starts_with(worktrees_dir),
+    };
+    if !under {
+        anyhow::bail!(
+            "worktree field {} is outside the worktrees directory {} — refusing to remove it",
+            worktree.display(),
+            worktrees_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// Check a recorded branch before `branch -D` or `git merge` touches it.
+///
+/// A run may only ever name a `pilotfish/` branch the fleet itself created;
+/// a hand-edited `run.json` naming `main` (or anything else) must never
+/// reach a destructive git call.
+///
+/// # Errors
+///
+/// Names the `branch` field and its value.
+pub fn check_branch(branch: &str) -> anyhow::Result<()> {
+    if branch.starts_with("pilotfish/") {
+        return Ok(());
+    }
+    anyhow::bail!("branch field {branch} is not a pilotfish/ branch — refusing to touch it")
+}
+
+/// Is a merge already in progress in `repo` (`MERGE_HEAD` present)? A
+/// human's in-progress merge must never be aborted by the fleet.
+pub async fn merge_in_progress(repo: &Path) -> bool {
+    git_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], repo)
+        .await
+        .ok()
+}
+
 /// What [`merge_branch`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MergeOutcome {

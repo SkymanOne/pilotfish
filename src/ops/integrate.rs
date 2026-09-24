@@ -248,6 +248,9 @@ pub(crate) async fn merge_core_with_env(
             )],
         ));
     };
+    if let Err(err) = git::check_branch(&branch) {
+        return Ok(fail(ExitCode::Error, vec![format!("merge: {err:#}")]));
+    }
     // The orchestrating checkout is the repo the run was spawned from,
     // wherever we're invoked from.
     let Some(repo_root) = state.repo_root.as_deref().map(PathBuf::from) else {
@@ -279,6 +282,18 @@ pub(crate) async fn merge_core_with_env(
                 "they are not part of the branch",
             ));
         }
+    }
+    // A merge already in progress is the human's: `git merge` would fail and
+    // the conflict listing + `--abort` would discard their resolutions.
+    if git::merge_in_progress(&repo_root).await {
+        return Ok(fail(
+            ExitCode::Error,
+            vec![format!(
+                "merge: a merge is already in progress in {} (MERGE_HEAD present); \
+resolve or abort it yourself first — pilotfish will not abort another merge.",
+                repo_root.display()
+            )],
+        ));
     }
     let outcome = git::merge_branch(&repo_root, &branch, no_commit, true).await;
     Ok(merge_outcome_result(
@@ -528,6 +543,23 @@ pub(super) async fn cleanup_one(target: &RunRef, force: bool, all: bool) -> Clea
         target.state.worktree.clone(),
         target.state.repo_root.clone(),
     ) {
+        // A corrupt or hand-edited run.json must never aim a worktree remove,
+        // `remove_dir_all` or a branch delete at the human's checkout.
+        let worktrees_dir = Path::new(&target.state.fleet_dir).join("worktrees");
+        if let Err(err) =
+            git::check_worktree_path(&worktrees_dir, Path::new(&repo_root), Path::new(&worktree))
+        {
+            return CleanupOutcome::Failed {
+                note: format!("{err:#}"),
+            };
+        }
+        if let Some(branch) = target.state.branch.as_deref()
+            && let Err(err) = git::check_branch(branch)
+        {
+            return CleanupOutcome::Failed {
+                note: format!("{err:#}"),
+            };
+        }
         let removed = match git::remove_worktree(
             Path::new(&repo_root),
             Path::new(&worktree),
@@ -827,6 +859,70 @@ mod tests {
             assert!(status.stdout.contains('A'), "{}", status.stdout);
             git_sync(&dir, &["merge", "--abort"]);
         }
+        {
+            // A hand-edited run.json naming `main` as the branch must never
+            // reach `git merge`.
+            let dir = init_repo("pilotfish-int-mergemain-");
+            let (_fleet, target) = make_run(&dir, "worker", true).await;
+            settle(&target.run_dir);
+            let mut state = run::load_state(&target.run_dir).unwrap();
+            state.branch = Some("main".to_string());
+            run::save_state(&target.run_dir, &state).unwrap();
+
+            let result = merge_core_with_env("worker", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            assert!(
+                result.err[0].contains("not a pilotfish/ branch"),
+                "{}",
+                result.err[0]
+            );
+        }
+        {
+            // A merge already in progress in the checkout is the human's —
+            // the op must refuse (exit 1) and never abort it.
+            let dir = init_repo("pilotfish-int-inprog-");
+            let (_fleet, target) = make_run(&dir, "worker", true).await;
+            settle(&target.run_dir);
+            // A second branch edits seed.txt; main moves on, then the merge
+            // conflicts and is left in progress (MERGE_HEAD present).
+            git_sync(&dir, &["checkout", "-q", "-b", "feature"]);
+            std::fs::write(dir.join("seed.txt"), "feature version\n").unwrap();
+            git_sync(&dir, &["commit", "-qam", "feature version"]);
+            git_sync(&dir, &["checkout", "-q", "main"]);
+            std::fs::write(dir.join("seed.txt"), "main version\n").unwrap();
+            git_sync(&dir, &["commit", "-qam", "main version"]);
+            let merged = git::git_raw(&["merge", "feature"], &dir).await;
+            assert!(!merged.ok(), "the setup merge must conflict");
+            assert!(
+                git::git_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], &dir)
+                    .await
+                    .ok(),
+                "setup left MERGE_HEAD behind"
+            );
+            let seed = std::fs::read_to_string(dir.join("seed.txt")).unwrap();
+            assert!(seed.contains("<<<<<<< HEAD"), "{seed}");
+
+            let result = merge_core_with_env("worker", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Error, "{:?}", result.err);
+            assert!(
+                result.err[0].contains("already in progress"),
+                "{}",
+                result.err[0]
+            );
+            // The human's merge is intact: MERGE_HEAD present, conflicts kept.
+            assert!(
+                git::git_raw(&["rev-parse", "-q", "--verify", "MERGE_HEAD"], &dir)
+                    .await
+                    .ok(),
+                "the human's merge was not aborted"
+            );
+            let seed = std::fs::read_to_string(dir.join("seed.txt")).unwrap();
+            assert!(seed.contains("<<<<<<< HEAD"), "{seed}");
+        }
     }
 
     #[tokio::test]
@@ -951,6 +1047,32 @@ mod tests {
         assert!(!worktree.exists());
         let state = run::load_state(&target.run_dir).unwrap();
         assert_eq!(state.status, RunStatus::Archived);
+    }
+
+    #[tokio::test]
+    async fn cleanup_refuses_unsafe_worktree() {
+        let dir = init_repo("pilotfish-int-hostile-");
+        let (fleet, target) = make_run(&dir, "worker", true).await;
+        settle(&target.run_dir);
+        // A hand-edited run.json naming the checkout itself as the worktree.
+        let mut state = run::load_state(&target.run_dir).unwrap();
+        state.worktree = Some(dir.to_string_lossy().into_owned());
+        run::save_state(&target.run_dir, &state).unwrap();
+
+        let result = cleanup_runs(&fleet, "worker", true).await.unwrap();
+        assert_eq!(result.code, ExitCode::Error);
+        assert_eq!(result.data.failed.len(), 1);
+        assert!(
+            result.err.iter().any(|e| e.contains("repo root")),
+            "{:?}",
+            result.err
+        );
+        // The checkout survives and the run is not archived.
+        assert!(dir.join("seed.txt").is_file());
+        assert_eq!(
+            run::load_state(&target.run_dir).unwrap().status,
+            RunStatus::Settled
+        );
     }
 
     #[tokio::test]

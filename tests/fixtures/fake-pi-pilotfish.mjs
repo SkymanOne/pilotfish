@@ -54,6 +54,11 @@ const thinkingLevelMap = Object.fromEntries(
 const fleetDir = process.env.PILOTFISH_DIR;
 const runId = process.env.PILOTFISH_RUN;
 const delay = Number(process.env.FAKE_PI_DELAY_MS || 300);
+// FAKE_PI_TURN_ERROR=1: the (single) turn ends with an errored turn_end.
+// FAKE_PI_RETRY_AFTER_ERROR=1: an errored turn first, then pi retries and
+// a second, clean turn ends before settling (like pi's own auto-retry).
+const turnError = process.env.FAKE_PI_TURN_ERROR === "1";
+const retryAfterError = process.env.FAKE_PI_RETRY_AFTER_ERROR === "1";
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- mailbox (same envelope shape as src/fleet/envelope.rs) ---
@@ -161,6 +166,12 @@ async function askQuestion() {
 
 async function runTask() {
   send({ type: "agent_start" });
+  if (retryAfterError) {
+    // A first turn that fails; pi would then retry on its own.
+    send({ type: "turn_start" });
+    send({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorMessage: "402: in_flight_budget_exhausted" } });
+    send({ type: "auto_retry_start" });
+  }
   send({ type: "turn_start" });
   // FAKE_PI_THINK_MS: reason for a while first, like a model with thinking on
   const thinkMs = Number(process.env.FAKE_PI_THINK_MS || 0);
@@ -186,7 +197,11 @@ async function runTask() {
   if (process.env.FAKE_PI_ASK === "1" && fleetDir && runId) await askQuestion();
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "wrote hello.txt" } });
   send({ type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: "Working: wrote hello.txt" } });
-  send({ type: "turn_end", message: { role: "assistant" } });
+  if (turnError) {
+    send({ type: "turn_end", message: { role: "assistant", stopReason: "error", errorMessage: "402: in_flight_budget_exhausted" } });
+  } else {
+    send({ type: "turn_end", message: { role: "assistant" } });
+  }
   writeReport();
   setTimeout(() => {
     if (aborted) return;
