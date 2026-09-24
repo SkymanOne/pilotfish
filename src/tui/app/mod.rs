@@ -697,7 +697,12 @@ impl Console {
 
     pub fn set_orchestrator_state(&mut self, state: OrchestratorState) {
         self.orch = state;
-        self.pending_effort = None;
+        // the pending effort stays optimistic until the polled state confirms
+        // it, like the worker path's reconcile_pending_thinking: a stale poll
+        // must not erase a change the monitor has not applied yet
+        if self.pending_effort.as_deref() == self.orch.effort.as_deref() {
+            self.pending_effort = None;
+        }
         self.refresh_rows();
         self.raise_waiting();
     }

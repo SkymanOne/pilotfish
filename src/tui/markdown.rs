@@ -424,7 +424,10 @@ pub fn wrap_spans(spans: &[Span<'_>], width: usize) -> Vec<Vec<Span<'static>>> {
                     let mut piece_end = 0usize;
                     for (byte_idx, ch) in rest.char_indices() {
                         let ch_width = width_of(ch.encode_utf8(&mut [0; 4]));
-                        if piece_width + ch_width > width {
+                        // the first char always goes in: a width-2 char at
+                        // width 1 would otherwise leave the piece empty and
+                        // the breaker spinning forever
+                        if !piece.is_empty() && piece_width + ch_width > width {
                             break;
                         }
                         piece.push(ch);
@@ -870,6 +873,31 @@ mod tests {
                 rx.recv_timeout(std::time::Duration::from_secs(2)),
                 Ok(Vec::new())
             );
+        }
+        {
+            // width 1 against width-2 chars: the breaker must take one char
+            // per line rather than spin pushing empty lines forever
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(wrap_spans(&[Span::raw("你好世界")], 1));
+            });
+            let Ok(lines) = rx.recv_timeout(std::time::Duration::from_secs(2)) else {
+                panic!("wrap_spans at width 1 must return");
+            };
+            let joined: String = lines
+                .iter()
+                .map(|l| l.iter().map(|s| s.content.as_ref()).collect::<String>())
+                .collect();
+            assert_eq!(joined, "你好世界", "no char lost or repeated: {lines:?}");
+            for line in &lines {
+                assert_eq!(
+                    line.iter()
+                        .map(|s| s.content.chars().count())
+                        .sum::<usize>(),
+                    1,
+                    "{lines:?}"
+                );
+            }
         }
         {
             assert!(plain("", 80).is_empty());

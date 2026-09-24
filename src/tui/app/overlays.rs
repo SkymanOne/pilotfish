@@ -15,6 +15,7 @@ use crate::paths::SessionKey;
 use crate::tui::completions::resolve_command;
 use crate::tui::keys::KeyAction;
 use crate::tui::palette::{PaletteAction, PaletteScope};
+use crate::util::now_ms;
 
 use crate::secrets::Secret;
 
@@ -379,6 +380,13 @@ impl Console {
         if state.at >= self.orch.pending_requests.len() {
             self.overlay = None;
         } else {
+            // the next request is being shown now: mark it raised (dismissing
+            // it with `esc` must not make raise_waiting open it again) and
+            // give it a fresh grace window, as raise_waiting would
+            if let Some(request) = self.orch.pending_requests.get(state.at) {
+                self.raised_permissions.insert(request.request_id.clone());
+            }
+            self.raised_at = Some(now_ms());
             self.overlay = Some(Overlay::Permission(state));
         }
     }
@@ -459,6 +467,9 @@ impl Console {
             PaletteAction::JumpTo(index) => {
                 if index < self.rows.len() {
                     self.selected = index;
+                    // the search, the pinned scroll and last_session belonged
+                    // to the session that was open
+                    self.on_selection_changed();
                 }
                 Vec::new()
             }

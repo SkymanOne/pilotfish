@@ -567,6 +567,26 @@ fn palette_actions() {
         assert_eq!(c.selected(), 1, "the jump landed on the worker row");
     }
     {
+        // a jump forgets the search and the pinned scroll of the session it
+        // left, as every other selection move does
+        let mut c = setup_with_worker();
+        select_row(&mut c, 1);
+        c.scroll = Some(3);
+        c.search = Some(SearchState {
+            query: "db".into(),
+            matches: vec![1, 2],
+            current: Some(0),
+        });
+        c.run_palette_action(PaletteAction::JumpTo(0));
+        assert_eq!(c.selected(), 0);
+        assert!(c.search.is_none() && c.scroll.is_none());
+        assert_eq!(
+            c.prefs.last_session.as_deref(),
+            Some("orchestrator"),
+            "the jump is remembered"
+        );
+    }
+    {
         let mut c = setup_with_worker();
         c.handle_key(ctrl('k'));
         let Overlay::Palette(mut palette) = c.overlay().unwrap().clone() else {
@@ -842,6 +862,26 @@ fn fleet_letters() {
             ),
             "max wraps to off: {next:?}"
         );
+    }
+    {
+        // the orchestrator's pending effort survives a stale poll and is
+        // cleared only when the polled state confirms the change
+        let mut c = setup_with_worker();
+        let effects = fleet_key(&mut c, 't');
+        assert_eq!(effects, vec![Effect::SetEffort("low".to_string())]);
+        c.set_orchestrator_state(OrchestratorState::default());
+        assert_eq!(
+            c.effort(),
+            Some("low"),
+            "a stale poll must not erase the pending change"
+        );
+        let confirmed = OrchestratorState {
+            effort: Some("low".into()),
+            ..OrchestratorState::default()
+        };
+        c.set_orchestrator_state(confirmed);
+        assert_eq!(c.effort(), Some("low"));
+        assert!(c.pending_effort.is_none(), "the monitor owns the level now");
     }
     {
         let mut c = setup_with_worker();
@@ -1242,6 +1282,42 @@ fn permission_prompts() {
         read_the_prompt(&mut c);
         let effects = c.handle_key(ch('y'));
         assert!(matches!(&effects[0], Effect::ResolvePermission { .. }));
+    }
+    {
+        // two queued prompts: answering the first shows the second; the
+        // second counts as raised, so `esc` does not raise it again, and it
+        // gets a fresh grace window of its own
+        let mut c = setup_with_worker();
+        let request = |id: &str| PermissionRequest {
+            request_id: id.into(),
+            request: CanUseToolRequest {
+                tool_name: "Bash".into(),
+                input: serde_json::json!({"command": "git push --force"}),
+                tool_use_id: "t1".into(),
+                ..CanUseToolRequest::default()
+            },
+            received_at: crate::util::now_iso(),
+        };
+        let state = OrchestratorState {
+            pending_requests: vec![request("req_11"), request("req_12")],
+            ..OrchestratorState::default()
+        };
+        c.set_orchestrator_state(state);
+        assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+        read_the_prompt(&mut c);
+        let effects = c.handle_key(ch('y'));
+        assert!(matches!(&effects[0], Effect::ResolvePermission { .. }));
+        assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+        // a key this soon after the advance was meant for the composer
+        let effects = c.handle_key(ch('a'));
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(matches!(c.overlay(), Some(Overlay::Permission(_))));
+        // `esc` dismisses the second prompt; a poll must not reopen it
+        c.handle_key(esc());
+        assert!(c.overlay().is_none());
+        c.last_key_at = 0;
+        c.raise_waiting();
+        assert!(c.overlay().is_none(), "dismissed is dismissed");
     }
     {
         let mut c = setup_with_worker();
