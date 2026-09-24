@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used)]
 
 //! Port of `tests/mcp-server.test.ts` and `tests/mcp-stdio.test.ts` against
-//! the real `parl mcp` binary over stdio, with the scripted fake pi
-//! (`tests/fixtures/fake-pi-parl.mjs`): the spawn → wait → report → status →
+//! the real `pilotfish mcp` binary over stdio, with the scripted fake pi
+//! (`tests/fixtures/fake-pi-pilotfish.mjs`): the spawn → wait → report → status →
 //! refusal → cleanup flow, a merge conflict ending in exit 5, the
-//! `PARL_DIR`-derived fleet directory, malformed input not killing the
+//! `PILOTFISH_DIR`-derived fleet directory, malformed input not killing the
 //! server, and proof that nothing but protocol reaches stdout. Hermetic: no
 //! network, no tokens.
 
@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
-use parl::fleet::run::{self, RunState};
-use parl::paths::FleetPaths;
+use pilotfish::fleet::run::{self, RunState};
+use pilotfish::paths::FleetPaths;
 use serde_json::{Value, json};
 
 /// The fake pi settles this long after its work turn.
@@ -33,7 +33,7 @@ fn serial() -> MutexGuard<'static, ()> {
 }
 
 fn fake_pi() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-parl.mjs")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-pilotfish.mjs")
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -88,20 +88,20 @@ struct McpClient {
 }
 
 impl McpClient {
-    /// Spawn `parl mcp [--cwd root]` with the given extra environment.
+    /// Spawn `pilotfish mcp [--cwd root]` with the given extra environment.
     fn spawn(root: Option<&Path>, extra_env: &[(&str, &str)]) -> Self {
-        let mut command = Command::new(assert_cmd::cargo_bin!("parl"));
+        let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
         command.args(["mcp"]);
         if let Some(root) = root {
-            // The child must never inherit an ambient PARL_DIR: its fleet is
+            // The child must never inherit an ambient PILOTFISH_DIR: its fleet is
             // the one this test created, resolved from `--cwd`.
             command
                 .arg("--cwd")
                 .arg(root)
-                .env("PARL_DIR", root.join(parl::paths::STATE_DIR_NAME));
+                .env("PILOTFISH_DIR", root.join(pilotfish::paths::STATE_DIR_NAME));
         }
         command
-            .env("PARL_PI_BIN", format!("node {}", fake_pi().display()))
+            .env("PILOTFISH_PI_BIN", format!("node {}", fake_pi().display()))
             .env("FAKE_PI_DELAY_MS", FAKE_PI_DELAY_MS)
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -172,7 +172,7 @@ impl McpClient {
             &json!({
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
-                "clientInfo": {"name": "parl-test", "version": "0"},
+                "clientInfo": {"name": "pilotfish-test", "version": "0"},
             }),
         );
         assert_eq!(result["protocolVersion"], "2025-06-18", "{result}");
@@ -244,7 +244,7 @@ fn text_of(result: &Value) -> String {
 // tests — the stdio halves of tests/mcp-stdio.test.ts
 // ---------------------------------------------------------------------------
 
-/// `parl mcp` speaks MCP over stdio and stdout carries protocol only.
+/// `pilotfish mcp` speaks MCP over stdio and stdout carries protocol only.
 #[test]
 fn speaks_mcp_over_stdio_with_a_clean_stdout() {
     let _serial = serial();
@@ -256,7 +256,7 @@ fn speaks_mcp_over_stdio_with_a_clean_stdout() {
         .filter_map(|tool| tool["name"].as_str())
         .collect();
     names.sort_unstable();
-    let mut expected = parl::mcp::server::FLEET_TOOL_NAMES.to_vec();
+    let mut expected = pilotfish::mcp::server::FLEET_TOOL_NAMES.to_vec();
     expected.sort_unstable();
     assert_eq!(names, expected, "{names:?}");
 
@@ -266,13 +266,13 @@ fn speaks_mcp_over_stdio_with_a_clean_stdout() {
     client.assert_pure_stdout();
 }
 
-/// The fleet directory comes from `PARL_DIR` when `--cwd` is absent — the
+/// The fleet directory comes from `PILOTFISH_DIR` when `--cwd` is absent — the
 /// narrow environment claude actually spawns the server with.
 #[test]
-fn derives_the_fleet_from_parl_dir_when_cwd_is_absent() {
+fn derives_the_fleet_from_pilotfish_dir_when_cwd_is_absent() {
     let _serial = serial();
     let root = plain_dir();
-    let paths = FleetPaths::new(root.join(parl::paths::STATE_DIR_NAME));
+    let paths = FleetPaths::new(root.join(pilotfish::paths::STATE_DIR_NAME));
     let run_id = "w-20260828141530";
     std::fs::create_dir_all(paths.run_dir(run_id)).unwrap();
     let mut state = RunState::new(
@@ -294,11 +294,11 @@ fn derives_the_fleet_from_parl_dir_when_cwd_is_absent() {
         None,
     );
     // A live pid past the starting grace reads as running.
-    state.status = parl::fleet::run::RunStatus::Running;
+    state.status = pilotfish::fleet::run::RunStatus::Running;
     state.pid = Some(1);
     run::save_state(&paths.run_dir(run_id), &state).unwrap();
 
-    let mut client = McpClient::spawn(None, &[("PARL_DIR", paths.root().to_str().unwrap())]);
+    let mut client = McpClient::spawn(None, &[("PILOTFISH_DIR", paths.root().to_str().unwrap())]);
     let status = client.call_tool("fleet_status", &json!({}));
     assert_eq!(status["isError"], json!(false), "{status}");
     let text = text_of(&status);
@@ -502,7 +502,10 @@ fn fleet_merge_aborts_on_conflict_and_leaves_the_checkout_clean() {
         text.contains("merge was aborted; the checkout is clean"),
         "{text}"
     );
-    assert!(text.contains("rebase its branch parl/hello-"), "{text}");
+    assert!(
+        text.contains("rebase its branch pilotfish/hello-"),
+        "{text}"
+    );
     assert!(text.ends_with("exit: 5"), "{text}");
 
     // The checkout is clean apart from the gitignore spawn introduced.

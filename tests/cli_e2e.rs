@@ -1,9 +1,9 @@
 #![allow(clippy::unwrap_used)]
 
-//! End-to-end tests driving the built `parl` binary the way a user (or the
+//! End-to-end tests driving the built `pilotfish` binary the way a user (or the
 //! orchestrator's scripts) invokes it: every subcommand dispatched, the
 //! exit-code contract, a full worker lifecycle against the scripted fake pi,
-//! the `.parl` layout on disk, and the requirements that travel inside the
+//! the `.pilotfish` layout on disk, and the requirements that travel inside the
 //! binary (the orchestrator prompt and the pi worker extension). Hermetic:
 //! no real `pi`, no real `claude`, no network, no tokens — everything runs
 //! against `tests/fixtures/` fakes, like `mcp_stdio.rs` and
@@ -37,12 +37,12 @@ fn serial() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-fn parl() -> assert_cmd::Command {
-    let mut command = assert_cmd::Command::new(assert_cmd::cargo_bin!("parl"));
+fn pilotfish() -> assert_cmd::Command {
+    let mut command = assert_cmd::Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
-        // No child inherits an ambient PARL_DIR; the helpers that know the
+        // No child inherits an ambient PILOTFISH_DIR; the helpers that know the
         // test's own fleet dir pin it explicitly below.
-        .env_remove("PARL_DIR")
+        .env_remove("PILOTFISH_DIR")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
@@ -57,7 +57,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn fake_pi() -> PathBuf {
-    fixture("fake-pi-parl.mjs")
+    fixture("fake-pi-pilotfish.mjs")
 }
 
 /// pi replacement that dies immediately (the monitor's error path).
@@ -75,7 +75,7 @@ fn fake_claude() -> PathBuf {
     fixture("fake-claude.mjs")
 }
 
-/// `PARL_PI_BIN` is an executable spec split on spaces.
+/// `PILOTFISH_PI_BIN` is an executable spec split on spaces.
 fn pi_spec(path: &Path) -> String {
     format!("node {}", path.display())
 }
@@ -89,16 +89,16 @@ fn plain_dir() -> (tempfile::TempDir, PathBuf) {
 
 /// Run a subcommand and return (exit code, stdout, stderr).
 fn run(root: &Path, args: &[&str]) -> (i32, String, String) {
-    let output = parl()
+    let output = pilotfish()
         .args(args)
         .current_dir(root)
         // The fleet dir this root resolves to — canonicalized, like the
         // product's own resolution, so path assertions read the same strings.
         .env(
-            "PARL_DIR",
+            "PILOTFISH_DIR",
             root.canonicalize()
                 .unwrap()
-                .join(parl::paths::STATE_DIR_NAME),
+                .join(pilotfish::paths::STATE_DIR_NAME),
         )
         .output()
         .unwrap();
@@ -127,7 +127,7 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 /// A git repo with one committed seed file and no `.gitignore` yet — spawn
-/// adds the `.parl/` entry itself, which the gitignore and conflict tests
+/// adds the `.pilotfish/` entry itself, which the gitignore and conflict tests
 /// assert against.
 fn init_repo() -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
@@ -149,18 +149,18 @@ fn spawn_ok(
     extra_env: &[(&str, &str)],
     flags: &[&str],
 ) -> String {
-    let output = parl()
+    let output = pilotfish()
         .args(["spawn", name])
         .args(flags)
         .args(["--", brief])
         .current_dir(root)
         .env(
-            "PARL_DIR",
+            "PILOTFISH_DIR",
             root.canonicalize()
                 .unwrap()
-                .join(parl::paths::STATE_DIR_NAME),
+                .join(pilotfish::paths::STATE_DIR_NAME),
         )
-        .env("PARL_PI_BIN", pi_spec(pi))
+        .env("PILOTFISH_PI_BIN", pi_spec(pi))
         .envs(extra_env.iter().copied())
         .output()
         .unwrap();
@@ -180,16 +180,16 @@ fn spawn_ok(
         .to_string()
 }
 
-/// Parsed `parl status <name> --json` (the single-run state object).
+/// Parsed `pilotfish status <name> --json` (the single-run state object).
 fn status_json(root: &Path, name: &str) -> Value {
-    let output = parl()
+    let output = pilotfish()
         .args(["status", name, "--json"])
         .current_dir(root)
         .env(
-            "PARL_DIR",
+            "PILOTFISH_DIR",
             root.canonicalize()
                 .unwrap()
-                .join(parl::paths::STATE_DIR_NAME),
+                .join(pilotfish::paths::STATE_DIR_NAME),
         )
         .output()
         .unwrap();
@@ -199,7 +199,7 @@ fn status_json(root: &Path, name: &str) -> Value {
         .unwrap_or_else(|err| panic!("status {name} was not one JSON object: {err}: {stdout}"))
 }
 
-/// Poll `parl status <name> --json` until `check` holds or the timeout lapses.
+/// Poll `pilotfish status <name> --json` until `check` holds or the timeout lapses.
 fn poll_status(
     root: &Path,
     name: &str,
@@ -220,7 +220,7 @@ fn poll_status(
     }
 }
 
-/// Wait for any terminal state (what `parl wait` exits on).
+/// Wait for any terminal state (what `pilotfish wait` exits on).
 fn settled(root: &Path, name: &str) -> Value {
     poll_status(root, name, SETTLE, |state| {
         matches!(
@@ -230,16 +230,16 @@ fn settled(root: &Path, name: &str) -> Value {
     })
 }
 
-/// `parl wait`'s exit code, for the exit-code matrix.
+/// `pilotfish wait`'s exit code, for the exit-code matrix.
 fn wait_code(root: &Path, name: &str, timeout_secs: u64) -> i32 {
-    parl()
+    pilotfish()
         .args(["wait", name, "--timeout", &timeout_secs.to_string()])
         .current_dir(root)
         .env(
-            "PARL_DIR",
+            "PILOTFISH_DIR",
             root.canonicalize()
                 .unwrap()
-                .join(parl::paths::STATE_DIR_NAME),
+                .join(pilotfish::paths::STATE_DIR_NAME),
         )
         .output()
         .unwrap()
@@ -258,14 +258,14 @@ fn monitor_pid(run_json: &Path) -> Option<i32> {
 
 /// Block until the run's detached monitor is gone, so a test never leaves a
 /// stray process behind; a SIGKILL is the last resort. The monitor is
-/// orphaned (its parent, `parl spawn`, has exited), so an exited pid is
+/// orphaned (its parent, `pilotfish spawn`, has exited), so an exited pid is
 /// reaped by launchd and `kill(pid, 0)` reads it as gone — checked with the
 /// product's own liveness rule.
 fn reap_monitor(root: &Path, run_id: &str) {
     let run_json = root
         .canonicalize()
         .unwrap()
-        .join(parl::paths::STATE_DIR_NAME)
+        .join(pilotfish::paths::STATE_DIR_NAME)
         .join("runs")
         .join(run_id)
         .join("run.json");
@@ -274,7 +274,7 @@ fn reap_monitor(root: &Path, run_id: &str) {
         let Some(pid) = monitor_pid(&run_json) else {
             return;
         };
-        if !parl::fleet::run::is_alive(Some(pid)) {
+        if !pilotfish::fleet::run::is_alive(Some(pid)) {
             return;
         }
         if std::time::Instant::now() >= deadline {
@@ -296,7 +296,7 @@ impl Drop for ReapOnDrop {
     fn drop(&mut self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while let Some(pid) = monitor_pid(&self.run_json) {
-            if !parl::fleet::run::is_alive(Some(pid)) {
+            if !pilotfish::fleet::run::is_alive(Some(pid)) {
                 return;
             }
             if std::time::Instant::now() >= deadline {
@@ -314,7 +314,7 @@ impl Drop for ReapOnDrop {
 
 #[test]
 fn help_and_version_exit_zero_and_hide_the_internal_monitors() {
-    let help = parl().arg("--help").output().unwrap();
+    let help = pilotfish().arg("--help").output().unwrap();
     assert_eq!(help.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&help.stdout);
     for public in [
@@ -326,28 +326,28 @@ fn help_and_version_exit_zero_and_hide_the_internal_monitors() {
             "--help mentions {public}: {stdout}"
         );
     }
-    assert!(stdout.contains("Usage: parl"), "{stdout}");
+    assert!(stdout.contains("Usage: pilotfish"), "{stdout}");
     // The two internal monitors are hidden from the public help…
     assert!(!stdout.contains("orchestrator-monitor"), "{stdout}");
     assert!(!stdout.contains("fleet-dir"), "{stdout}");
 
-    let version = parl().arg("--version").output().unwrap();
+    let version = pilotfish().arg("--version").output().unwrap();
     assert_eq!(version.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&version.stdout);
     assert!(
-        stdout.contains("parl") && stdout.contains("0.2.0"),
+        stdout.contains("pilotfish") && stdout.contains("0.2.0"),
         "{stdout}"
     );
 
     // …but respond to --help themselves: they parse.
-    let monitor = parl().args(["monitor", "--help"]).output().unwrap();
+    let monitor = pilotfish().args(["monitor", "--help"]).output().unwrap();
     assert_eq!(monitor.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&monitor.stdout);
     assert!(
         stdout.contains("--fleet-dir") && stdout.contains("--run"),
         "{stdout}"
     );
-    let orch = parl()
+    let orch = pilotfish()
         .args(["orchestrator-monitor", "--help"])
         .output()
         .unwrap();
@@ -373,7 +373,7 @@ fn unknown_subcommand_and_missing_required_arguments_exit_one() {
         vec!["monitor"],       // --run required for the internal monitor
     ] {
         let (code, _, stderr) = run(&std::env::temp_dir(), &args);
-        assert_eq!(code, 1, "parl {args:?} → {code}: {stderr}");
+        assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
     }
 }
 
@@ -409,7 +409,7 @@ fn every_public_subcommand_reaches_its_implementation() {
     assert!(stderr.contains("unknown model"), "{stderr}");
     // The model check happens before anything is created.
     assert_eq!(
-        root.join(parl::paths::STATE_DIR_NAME)
+        root.join(pilotfish::paths::STATE_DIR_NAME)
             .join("runs")
             .read_dir()
             .map(std::iter::Iterator::count)
@@ -435,10 +435,10 @@ fn every_public_subcommand_reaches_its_implementation() {
         vec!["cleanup", "ghost"],
     ] {
         let (code, _, stderr) = run(&root, &args);
-        assert_eq!(code, 1, "parl {args:?} → {code}: {stderr}");
+        assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
         assert!(
             stderr.contains("No run found matching \"ghost\""),
-            "parl {args:?}: {stderr}"
+            "pilotfish {args:?}: {stderr}"
         );
     }
 }
@@ -448,7 +448,7 @@ fn every_public_subcommand_reaches_its_implementation() {
 #[test]
 fn the_hidden_worker_monitor_reaches_its_implementation() {
     let (_tmp, root) = plain_dir();
-    let fleet_dir = root.join(parl::paths::STATE_DIR_NAME);
+    let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
     std::fs::create_dir_all(&fleet_dir).unwrap();
     let (code, _, stderr) = run(
         &root,
@@ -470,12 +470,12 @@ fn the_hidden_worker_monitor_reaches_its_implementation() {
 #[test]
 fn the_hidden_orchestrator_monitor_reaches_its_implementation() {
     let (_tmp, root) = plain_dir();
-    let fleet_dir = root.join(parl::paths::STATE_DIR_NAME);
-    let output = StdCommand::new(assert_cmd::cargo_bin!("parl"))
+    let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
+    let output = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
         .args(["orchestrator-monitor", "--fleet-dir"])
         .arg(&fleet_dir)
-        .env("PARL_DIR", &fleet_dir)
-        .env("PARL_CLAUDE_BIN", "definitely-not-a-real-claude")
+        .env("PILOTFISH_DIR", &fleet_dir)
+        .env("PILOTFISH_CLAUDE_BIN", "definitely-not-a-real-claude")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -490,36 +490,36 @@ fn the_hidden_orchestrator_monitor_reaches_its_implementation() {
     // The boot state landed in the documented layout (the monitor's own
     // session directory), and the failure was diagnosed in the raw
     // protocol log.
-    let key = parl::orch::session::resolve_session(&fleet_dir)
+    let key = pilotfish::orch::session::resolve_session(&fleet_dir)
         .expect("boot writes the session row")
         .key();
     assert!(
-        parl::paths::FleetPaths::new(&fleet_dir)
+        pilotfish::paths::FleetPaths::new(&fleet_dir)
             .orchestrator_state(&key)
             .is_file(),
         "the boot state landed in the documented layout"
     );
     let claude_log =
-        std::fs::read_to_string(parl::paths::FleetPaths::new(&fleet_dir).claude_log(&key))
+        std::fs::read_to_string(pilotfish::paths::FleetPaths::new(&fleet_dir).claude_log(&key))
             .unwrap_or_default();
     assert!(claude_log.contains("could not spawn"), "{claude_log}");
 }
 
-/// `parl mcp` serves the fleet tools over stdio; a clean disconnect exits 0.
+/// `pilotfish mcp` serves the fleet tools over stdio; a clean disconnect exits 0.
 #[test]
 fn mcp_serves_the_fleet_tools_over_stdio() {
     let _serial = serial();
     let (_tmp, root) = plain_dir();
-    let mut child = StdCommand::new(assert_cmd::cargo_bin!("parl"))
+    let mut child = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
         .arg("mcp")
         .current_dir(&root)
         .env(
-            "PARL_DIR",
+            "PILOTFISH_DIR",
             root.canonicalize()
                 .unwrap()
-                .join(parl::paths::STATE_DIR_NAME),
+                .join(pilotfish::paths::STATE_DIR_NAME),
         )
-        .env("PARL_PI_BIN", pi_spec(&fake_pi()))
+        .env("PILOTFISH_PI_BIN", pi_spec(&fake_pi()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -538,7 +538,7 @@ fn mcp_serves_the_fleet_tools_over_stdio() {
             "jsonrpc": "2.0", "id": 1, "method": "initialize",
             "params": {
                 "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "parl-e2e", "version": "0"},
+                "clientInfo": {"name": "pilotfish-e2e", "version": "0"},
             },
         }),
     );
@@ -567,7 +567,7 @@ fn mcp_serves_the_fleet_tools_over_stdio() {
         .filter_map(|tool| tool["name"].as_str())
         .collect();
     names.sort_unstable();
-    let mut expected = parl::mcp::server::FLEET_TOOL_NAMES.to_vec();
+    let mut expected = pilotfish::mcp::server::FLEET_TOOL_NAMES.to_vec();
     expected.sort_unstable();
     assert_eq!(names, expected, "{names:?}");
 
@@ -587,22 +587,22 @@ fn mcp_serves_the_fleet_tools_over_stdio() {
     assert_eq!(code, Some(0));
 }
 
-/// A spawned `parl` writes only into the fleet dir it was given: `PARL_DIR`
+/// A spawned `pilotfish` writes only into the fleet dir it was given: `PILOTFISH_DIR`
 /// is pinned to one temp dir (the fleet) while the canary stays completely
 /// empty. The canary is also the child's cwd, so it traps both failure modes
-/// this suite once suffered: an inherited ambient `PARL_DIR` and a
-/// `<cwd>/.parl` fallback.
+/// this suite once suffered: an inherited ambient `PILOTFISH_DIR` and a
+/// `<cwd>/.pilotfish` fallback.
 #[test]
 fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
     let _serial = serial();
     let fleet = tempfile::tempdir().unwrap();
     let canary = tempfile::tempdir().unwrap();
 
-    let output = parl()
+    let output = pilotfish()
         .args(["spawn", "isolated", "--no-worktree", "--", "b"])
         .current_dir(canary.path())
-        .env("PARL_DIR", fleet.path())
-        .env("PARL_PI_BIN", pi_spec(&fake_pi()))
+        .env("PILOTFISH_DIR", fleet.path())
+        .env("PILOTFISH_PI_BIN", pi_spec(&fake_pi()))
         .output()
         .unwrap();
     assert_eq!(
@@ -635,7 +635,7 @@ fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
     // dir; wait for it to be gone before the temp tree drops.
     let deadline = std::time::Instant::now() + MONITOR_EXIT;
     while let Some(pid) = monitor_pid(&run_json) {
-        if !parl::fleet::run::is_alive(Some(pid)) {
+        if !pilotfish::fleet::run::is_alive(Some(pid)) {
             break;
         }
         assert!(
@@ -654,14 +654,14 @@ fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
 /// placeholder substituted.
 #[test]
 fn the_embedded_orchestrator_prompt_renders_with_placeholders_substituted() {
-    use parl::orch::prompt::{PromptVars, render_orchestrator_prompt};
+    use pilotfish::orch::prompt::{PromptVars, render_orchestrator_prompt};
 
     assert!(
-        parl::orch::prompt::ORCHESTRATOR_PROMPT_TEMPLATE.contains("{{FLEET_DIR}}"),
+        pilotfish::orch::prompt::ORCHESTRATOR_PROMPT_TEMPLATE.contains("{{FLEET_DIR}}"),
         "the shipped template is the placeholdered source"
     );
     let rendered = render_orchestrator_prompt(&PromptVars {
-        fleet_dir: "/repo/.parl".into(),
+        fleet_dir: "/repo/.pilotfish".into(),
         repo_root: "/repo".into(),
         max_workers: Some(2),
         bin_name: None,
@@ -671,28 +671,28 @@ fn the_embedded_orchestrator_prompt_renders_with_placeholders_substituted() {
         !rendered.contains("{{"),
         "all placeholders rendered: {rendered}"
     );
-    assert!(rendered.contains("`/repo/.parl`"), "{rendered}");
+    assert!(rendered.contains("`/repo/.pilotfish`"), "{rendered}");
     assert!(rendered.contains("`/repo`"), "{rendered}");
     assert!(rendered.contains("At most 2 workers"), "{rendered}");
-    assert!(rendered.contains("`parl`"), "{rendered}");
+    assert!(rendered.contains("`pilotfish`"), "{rendered}");
 }
 
-/// The override chain: `$PARL_PROMPT` wins, then `<repo>/.parl/orchestrator.md`,
+/// The override chain: `$PILOTFISH_PROMPT` wins, then `<repo>/.pilotfish/orchestrator.md`,
 /// then `~/.config/parl/orchestrator.md`, then the embedded copy. A dangling
-/// `$PARL_PROMPT` is an error, never a silent fallback. The home directory is
+/// `$PILOTFISH_PROMPT` is an error, never a silent fallback. The home directory is
 /// injected, so the real `$HOME` is never touched.
 #[test]
 fn the_prompt_override_chain_resolves_in_order() {
-    use parl::orch::prompt::resolve_prompt_source;
+    use pilotfish::orch::prompt::resolve_prompt_source;
 
     let (_tmp, repo) = plain_dir();
-    let parl_dir = repo.join(parl::paths::STATE_DIR_NAME);
-    std::fs::create_dir_all(&parl_dir).unwrap();
-    // A legacy config home plus a new `~/.parl`, both fabricated.
+    let pilotfish_dir = repo.join(pilotfish::paths::STATE_DIR_NAME);
+    std::fs::create_dir_all(&pilotfish_dir).unwrap();
+    // A legacy config home plus a new `~/.pilotfish`, both fabricated.
     let home_tmp = tempfile::tempdir().unwrap();
     let home = home_tmp.path();
     let user_root = tempfile::tempdir().unwrap();
-    let user_dir = user_root.path().join(parl::paths::STATE_DIR_NAME);
+    let user_dir = user_root.path().join(pilotfish::paths::STATE_DIR_NAME);
     std::fs::create_dir_all(&user_dir).unwrap();
 
     // Nothing anywhere: the embedded copy.
@@ -701,7 +701,7 @@ fn the_prompt_override_chain_resolves_in_order() {
         None
     );
 
-    // ~/.parl/orchestrator.md next, the new user location.
+    // ~/.pilotfish/orchestrator.md next, the new user location.
     let user = user_dir.join("orchestrator.md");
     std::fs::write(&user, "user override").unwrap();
     assert_eq!(
@@ -720,15 +720,15 @@ fn the_prompt_override_chain_resolves_in_order() {
         None
     );
 
-    // <repo>/.parl/orchestrator.md beats the user config.
-    let repo_override = parl_dir.join("orchestrator.md");
+    // <repo>/.pilotfish/orchestrator.md beats the user config.
+    let repo_override = pilotfish_dir.join("orchestrator.md");
     std::fs::write(&repo_override, "repo override").unwrap();
     assert_eq!(
         resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
         Some(repo_override.clone())
     );
 
-    // $PARL_PROMPT (a path) beats everything.
+    // $PILOTFISH_PROMPT (a path) beats everything.
     let env_file = repo.join("custom.md");
     std::fs::write(&env_file, "env override").unwrap();
     assert_eq!(
@@ -736,7 +736,7 @@ fn the_prompt_override_chain_resolves_in_order() {
         Some(env_file)
     );
 
-    // A dangling $PARL_PROMPT is user intent gone wrong: an error.
+    // A dangling $PILOTFISH_PROMPT is user intent gone wrong: an error.
     let err = resolve_prompt_source(
         Some(repo.join("missing.md").to_str().unwrap()),
         &repo,
@@ -745,10 +745,10 @@ fn the_prompt_override_chain_resolves_in_order() {
     .unwrap_err();
     assert!(err.to_string().contains("not a file"), "{err}");
 
-    // The rendered prompt honours the repo override (no $PARL_PROMPT in this
+    // The rendered prompt honours the repo override (no $PILOTFISH_PROMPT in this
     // environment), so what claude reads is the override, rendered.
-    if std::env::var_os(parl::paths::env_var("PROMPT")).is_none() {
-        let rendered = parl::orch::prompt::render_prompt(&parl_dir, &repo).unwrap();
+    if std::env::var_os(pilotfish::paths::env_var("PROMPT")).is_none() {
+        let rendered = pilotfish::orch::prompt::render_prompt(&pilotfish_dir, &repo).unwrap();
         assert!(
             rendered.contains("repo override") && !rendered.contains("{{"),
             "{rendered}"
@@ -790,14 +790,14 @@ fn spawning_copies_nothing_into_the_project() {
 /// left alone.
 #[test]
 fn the_worker_extension_is_materialized_from_the_binary() {
-    use parl::worker::monitor::{FLEET_EXTENSION_TS, FLEET_SKILL_MD};
+    use pilotfish::worker::monitor::{FLEET_EXTENSION_TS, FLEET_SKILL_MD};
 
     let _serial = serial();
     let (_tmp, root) = init_repo();
     let fleet = root
         .canonicalize()
         .unwrap()
-        .join(parl::paths::STATE_DIR_NAME);
+        .join(pilotfish::paths::STATE_DIR_NAME);
     let extension = fleet.join("pi/extensions/fleet-worker.ts");
     let skill = fleet.join("pi/skills/fleet-worker-report/SKILL.md");
 
@@ -854,7 +854,7 @@ fn the_worker_extension_is_materialized_from_the_binary() {
     assert_eq!(pair("--skill"), Some(skill.to_str().unwrap()), "{argv:?}");
     assert!(extension.starts_with(&fleet), "{extension:?}");
     // The materialized files are the worker protocol: the skill keeps the
-    // report template, the extension speaks the PARL layout.
+    // report template, the extension speaks the PILOTFISH layout.
     assert!(
         FLEET_SKILL_MD.starts_with("---\nname: fleet-worker-report\n"),
         "the skill keeps its frontmatter"
@@ -864,8 +864,8 @@ fn the_worker_extension_is_materialized_from_the_binary() {
         "the skill keeps the report template"
     );
     assert!(
-        FLEET_EXTENSION_TS.contains("PARL_RUN"),
-        "the extension speaks the PARL layout"
+        FLEET_EXTENSION_TS.contains("PILOTFISH_RUN"),
+        "the extension speaks the PILOTFISH layout"
     );
     assert!(
         !FLEET_EXTENSION_TS.contains("PI_FLEET"),
@@ -874,10 +874,10 @@ fn the_worker_extension_is_materialized_from_the_binary() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. The `.parl` layout — gitignore hygiene and the orchestrator's half.
+// 4. The `.pilotfish` layout — gitignore hygiene and the orchestrator's half.
 // ---------------------------------------------------------------------------
 
-/// `spawn` adds `.parl/` to the repository `.gitignore` without disturbing
+/// `spawn` adds `.pilotfish/` to the repository `.gitignore` without disturbing
 /// existing entries, and never adds it twice.
 #[test]
 fn spawn_gitignores_the_state_dir_without_disturbing_existing_entries() {
@@ -891,14 +891,17 @@ fn spawn_gitignores_the_state_dir_without_disturbing_existing_entries() {
     let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
     assert!(gitignore.contains("node_modules/"), "{gitignore}");
     assert!(gitignore.contains("*.log"), "{gitignore}");
-    assert!(gitignore.contains("# parl\n.parl/"), "{gitignore}");
-    assert_eq!(gitignore.matches(".parl/").count(), 1, "{gitignore}");
+    assert!(
+        gitignore.contains("# pilotfish\n.pilotfish/"),
+        "{gitignore}"
+    );
+    assert_eq!(gitignore.matches(".pilotfish/").count(), 1, "{gitignore}");
     reap_monitor(&root, &first);
 
     let second = spawn_ok(&root, "ignored2", "b", &fake_pi(), &[], &["--no-worktree"]);
     let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
     assert_eq!(
-        gitignore.matches(".parl/").count(),
+        gitignore.matches(".pilotfish/").count(),
         1,
         "still one entry: {gitignore}"
     );
@@ -952,7 +955,7 @@ fn cleanup_refuses_a_running_worker_and_forces_with_the_flag() {
 }
 
 /// The orchestrator side completes the documented layout: booted exactly as
-/// the console boots it (`parl orchestrator-monitor`), one user message
+/// the console boots it (`pilotfish orchestrator-monitor`), one user message
 /// makes the fake claude report init, and the monitor then keeps
 /// `fleet.json`, the rendered prompt (the embedded template, placeholders
 /// substituted), the transcript, the raw protocol log and the state file —
@@ -962,12 +965,12 @@ fn cleanup_refuses_a_running_worker_and_forces_with_the_flag() {
 fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     let _serial = serial();
     let (tmp, root) = plain_dir();
-    let fleet_dir = root.join(parl::paths::STATE_DIR_NAME);
-    let mut monitor = StdCommand::new(assert_cmd::cargo_bin!("parl"))
+    let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
+    let mut monitor = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
         .args(["orchestrator-monitor", "--fleet-dir"])
         .arg(&fleet_dir)
-        .env("PARL_DIR", &fleet_dir)
-        .env("PARL_CLAUDE_BIN", pi_spec(&fake_claude()))
+        .env("PILOTFISH_DIR", &fleet_dir)
+        .env("PILOTFISH_CLAUDE_BIN", pi_spec(&fake_claude()))
         .env("FAKE_CLAUDE_SESSION_ID", "sess-e2e-12345678")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -990,11 +993,11 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     }
     let session_path = session_dir(&fleet_dir);
     let inbox = session_path.join("inbox.jsonl");
-    let user = parl::orch::records::OrchestratorCommand::User {
+    let user = pilotfish::orch::records::OrchestratorCommand::User {
         text: "hello fleet".into(),
     }
-    .to_envelope(parl::fleet::envelope::Party::Console);
-    parl::fleet::envelope::append_envelope(&inbox, &user).unwrap();
+    .to_envelope(pilotfish::fleet::envelope::Party::Console);
+    pilotfish::fleet::envelope::append_envelope(&inbox, &user).unwrap();
 
     // the store is created before the session row is upserted into it, so
     // waiting for the file alone can catch it empty
@@ -1024,12 +1027,12 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     assert_eq!(session["cwd"], root.to_string_lossy().as_ref());
     assert!(session["uuid"].is_string(), "{store}");
     let key =
-        parl::paths::SessionKey::new(None, session["uuid"].as_str().unwrap().parse().unwrap());
+        pilotfish::paths::SessionKey::new(None, session["uuid"].as_str().unwrap().parse().unwrap());
     // `fleet.json` is written just before `state.json`, so seeing the one
     // does not mean the other has landed yet
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let state = loop {
-        let state = parl::orch::monitor::load_orchestrator_state(&fleet_dir, &key);
+        let state = pilotfish::orch::monitor::load_orchestrator_state(&fleet_dir, &key);
         if state.as_ref().is_some_and(|s| s.session_id.is_some()) {
             break state.unwrap();
         }
@@ -1074,9 +1077,9 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     );
 
     // A stop command ends the monitor (and its claude child) cleanly.
-    let stop = parl::orch::records::OrchestratorCommand::Stop
-        .to_envelope(parl::fleet::envelope::Party::Console);
-    parl::fleet::envelope::append_envelope(&inbox, &stop).unwrap();
+    let stop = pilotfish::orch::records::OrchestratorCommand::Stop
+        .to_envelope(pilotfish::fleet::envelope::Party::Console);
+    pilotfish::fleet::envelope::append_envelope(&inbox, &stop).unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let code = loop {
         if let Some(status) = monitor.try_wait().unwrap() {
@@ -1092,7 +1095,7 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
     let _ = monitor.wait(); // reap: no zombie
 
     // The state records the ended session for the next console open.
-    let ended = parl::orch::monitor::load_orchestrator_state(&fleet_dir, &key).unwrap();
+    let ended = pilotfish::orch::monitor::load_orchestrator_state(&fleet_dir, &key).unwrap();
     assert!(
         ended.exited.is_some(),
         "the state records the ended child: {ended:?}"
@@ -1119,7 +1122,7 @@ fn session_dir(fleet_dir: &Path) -> PathBuf {
 /// spawn → status (table and --json) → send → answer a fleet_ask question →
 /// wait → report → output/logs/attach → diff → merge → cleanup, then the
 /// on-disk proof: the branch really merged, the worktree and branch are
-/// gone, the run reads `archived`, and `.parl` holds exactly the documented
+/// gone, the run reads `archived`, and `.pilotfish` holds exactly the documented
 /// tree — none of the removed one.
 #[test]
 fn full_worker_lifecycle_happy_path() {
@@ -1146,7 +1149,7 @@ fn full_worker_lifecycle_happy_path() {
     let fleet = root
         .canonicalize()
         .unwrap()
-        .join(parl::paths::STATE_DIR_NAME);
+        .join(pilotfish::paths::STATE_DIR_NAME);
     let run_dir = fleet.join("runs").join(&run_id);
     let _reap_guard = ReapOnDrop {
         run_json: run_dir.join("run.json"),
@@ -1158,7 +1161,7 @@ fn full_worker_lifecycle_happy_path() {
     assert_eq!(state["taskBrief"], "create hello.txt with greeting content");
     let worktree = PathBuf::from(state["worktree"].as_str().unwrap());
     let branch = state["branch"].as_str().unwrap().to_string();
-    assert!(branch.starts_with("parl/alpha-"), "{branch}");
+    assert!(branch.starts_with("pilotfish/alpha-"), "{branch}");
     assert!(
         worktree.join("seed.txt").exists(),
         "the worktree is a checkout"
@@ -1251,7 +1254,7 @@ fn full_worker_lifecycle_happy_path() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("static tail — run `parl` for the live console"),
+        stderr.contains("static tail — run `pilotfish` for the live console"),
         "{stderr}"
     );
 
@@ -1321,7 +1324,7 @@ fn full_worker_lifecycle_happy_path() {
     reap_monitor(&root, &run_id);
 
     // ------------------------------------------------------------------
-    // The `.parl` layout is what AGENTS.md says it is.
+    // The `.pilotfish` layout is what AGENTS.md says it is.
     // ------------------------------------------------------------------
     for path in [
         run_dir.join("run.json"),
@@ -1404,7 +1407,7 @@ fn refusal_exit_codes_on_a_running_then_stopped_run() {
     let _reap_guard = ReapOnDrop {
         run_json: tmp
             .path()
-            .join(parl::paths::STATE_DIR_NAME)
+            .join(pilotfish::paths::STATE_DIR_NAME)
             .join("runs")
             .join(&run_id)
             .join("run.json"),
@@ -1451,7 +1454,7 @@ fn refusal_exit_codes_on_a_running_then_stopped_run() {
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("steering refused"), "{stderr}");
     assert!(
-        stderr.contains("parl spawn slowpoke-2 --session"),
+        stderr.contains("pilotfish spawn slowpoke-2 --session"),
         "carries the resume hint: {stderr}"
     );
 
@@ -1469,7 +1472,7 @@ fn an_error_run_names_its_cause_and_report_is_exit_two() {
     let _reap_guard = ReapOnDrop {
         run_json: tmp
             .path()
-            .join(parl::paths::STATE_DIR_NAME)
+            .join(pilotfish::paths::STATE_DIR_NAME)
             .join("runs")
             .join(&run_id)
             .join("run.json"),
@@ -1511,7 +1514,7 @@ fn a_conflicting_branch_merges_with_exit_five_and_a_clean_checkout() {
         run_json: root
             .canonicalize()
             .unwrap()
-            .join(parl::paths::STATE_DIR_NAME)
+            .join(pilotfish::paths::STATE_DIR_NAME)
             .join("runs")
             .join(&run_id)
             .join("run.json"),
@@ -1521,7 +1524,7 @@ fn a_conflicting_branch_merges_with_exit_five_and_a_clean_checkout() {
     assert_eq!(state["status"], "settled", "{state}");
     let branch = state["branch"].as_str().unwrap().to_string();
     let worktree = PathBuf::from(state["worktree"].as_str().unwrap());
-    assert!(branch.starts_with("parl/conflicter-"), "{branch}");
+    assert!(branch.starts_with("pilotfish/conflicter-"), "{branch}");
 
     // The fake wrote hello.txt but did not commit; the worker commits.
     git(&worktree, &["add", "."]);

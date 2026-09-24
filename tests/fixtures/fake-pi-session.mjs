@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // e2e-only pi stand-in: real pi writes JSONL session files into the
-// --session-dir it is given; the scripted fake (fake-pi-parl.mjs) does not.
+// --session-dir it is given; the scripted fake (fake-pi-pilotfish.mjs) does not.
 // This wrapper materializes one session file the way pi would, then
-// delegates to fake-pi-parl.mjs with the same argv, env and stdio, exiting
-// with its code — so `parl spawn` end-to-end tests see the documented
+// delegates to fake-pi-pilotfish.mjs with the same argv, env and stdio, exiting
+// with its code — so `pilotfish spawn` end-to-end tests see the documented
 // `runs/<id>/session/` layout without touching the shared fixture.
 import { spawn as spawnChild } from "node:child_process";
 import fsSync from "node:fs";
@@ -21,7 +21,7 @@ if (at !== -1 && argv[at + 1]) {
   );
 }
 
-const target = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-pi-parl.mjs");
+const target = path.join(path.dirname(fileURLToPath(import.meta.url)), "fake-pi-pilotfish.mjs");
 const child = spawnChild(process.execPath, [target, ...argv], { stdio: "inherit" });
 child.on("exit", (code, signal) => {
   if (signal) process.kill(process.pid, signal);

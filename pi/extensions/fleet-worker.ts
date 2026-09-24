@@ -1,7 +1,7 @@
 /**
- * parl worker protocol (pi extension).
+ * pilotfish worker protocol (pi extension).
  *
- * When pi runs as a fleet worker (PARL_RUN + PARL_DIR set by `parl`'s
+ * When pi runs as a fleet worker (PILOTFISH_RUN + PILOTFISH_DIR set by `pilotfish`'s
  * monitor) this extension:
  *  - appends the report protocol to the system prompt (`before_agent_start`), so
  *    report-writing does not depend on the model discovering the skill;
@@ -50,15 +50,15 @@ done | blocked | failed
 (one concrete next action for the orchestrator)`;
 
 export interface FleetEnv {
-  PARL_RUN?: string;
-  PARL_DIR?: string;
-  PARL_ASK_POLL_MS?: string;
-  PARL_ASK_TIMEOUT_MS?: string;
+  PILOTFISH_RUN?: string;
+  PILOTFISH_DIR?: string;
+  PILOTFISH_ASK_POLL_MS?: string;
+  PILOTFISH_ASK_TIMEOUT_MS?: string;
 }
 
 export function buildFleetProtocol(env: FleetEnv, cwd: string): string | null {
-  const runId = env.PARL_RUN;
-  const fleetDir = env.PARL_DIR;
+  const runId = env.PILOTFISH_RUN;
+  const fleetDir = env.PILOTFISH_DIR;
   if (!runId || !fleetDir) return null;
   const reportPath = `${fleetDir}/runs/${runId}/report.md`;
   return [
@@ -231,15 +231,15 @@ export async function askOrchestrator(
   params: AskParams,
   opts: { signal?: AbortSignal; onWaiting?: (questionId: string) => void } = {},
 ): Promise<AskResult> {
-  const fleetDir = env.PARL_DIR!;
-  const runId = env.PARL_RUN!;
+  const fleetDir = env.PILOTFISH_DIR!;
+  const runId = env.PILOTFISH_RUN!;
   const pollMs =
-    Number(env.PARL_ASK_POLL_MS) > 0
-      ? Number(env.PARL_ASK_POLL_MS)
+    Number(env.PILOTFISH_ASK_POLL_MS) > 0
+      ? Number(env.PILOTFISH_ASK_POLL_MS)
       : DEFAULT_ASK_POLL_MS;
   const timeoutMs =
-    Number(env.PARL_ASK_TIMEOUT_MS) > 0
-      ? Number(env.PARL_ASK_TIMEOUT_MS)
+    Number(env.PILOTFISH_ASK_TIMEOUT_MS) > 0
+      ? Number(env.PILOTFISH_ASK_TIMEOUT_MS)
       : DEFAULT_ASK_TIMEOUT_MS;
   const inbox = inboxPath(fleetDir, runId);
   // Answers can only arrive after the question is posted, so start reading at the current end.
@@ -292,8 +292,8 @@ export async function askOrchestrator(
 
 /** Append a milestone to the outbox. */
 export function noteProgress(env: FleetEnv, message: string): OutboxLine {
-  const fleetDir = env.PARL_DIR!;
-  const runId = env.PARL_RUN!;
+  const fleetDir = env.PILOTFISH_DIR!;
+  const runId = env.PILOTFISH_RUN!;
   return appendOutbox(fleetDir, runId, {
     type: "progress",
     payload: { message },
@@ -391,7 +391,7 @@ export default function fleetWorker(pi: ExtensionAPI): void {
     if (event.systemPrompt.includes(FLEET_PROTOCOL_MARKER)) return;
     return { systemPrompt: `${event.systemPrompt}\n\n${block}` };
   });
-  if (process.env.PARL_RUN && process.env.PARL_DIR) {
+  if (process.env.PILOTFISH_RUN && process.env.PILOTFISH_DIR) {
     for (const tool of fleetTools(process.env)) pi.registerTool(tool as any);
   }
 }

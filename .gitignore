@@ -6,6 +6,8 @@
 # out — do not remove this entry yet.
 .pi-fleet/
 node_modules
-# parl
+# pilotfish
+.pilotfish/
+# the previous name's state; a fleet may still be running out of it
 .parl/
 .lavish/

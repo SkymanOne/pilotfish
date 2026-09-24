@@ -423,7 +423,7 @@ const SKIP_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     "dist",
-    ".parl",
+    ".pilotfish",
     ".pi-fleet",
     ".next",
     "build",

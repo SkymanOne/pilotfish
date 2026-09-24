@@ -409,7 +409,7 @@ pub enum Effect {
     SaveTypesafeKey(Secret),
     /// Remove the stored TypeSafe key.
     DeleteTypesafeKey,
-    /// Switch `[routing] enabled` in `~/.parl/config.toml`.
+    /// Switch `[routing] enabled` in `~/.pilotfish/config.toml`.
     SetRouting(bool),
     /// Set `[routing] confidence_threshold`: below it, the human chooses.
     SetRoutingThreshold(f64),
@@ -1835,7 +1835,7 @@ impl Console {
                 }
                 Effect::SetRouting(on) => {
                     let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
                     };
                     crate::paths::set_routing(&dir, "enabled", toml_edit::value(on))?;
                     self.toast(
@@ -1850,7 +1850,7 @@ impl Console {
                 }
                 Effect::SetRoutingThreshold(limit) => {
                     let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
                     };
                     crate::paths::set_routing(
                         &dir,
@@ -1861,7 +1861,7 @@ impl Console {
                 }
                 Effect::SetRoutingModels(models) => {
                     let Some(dir) = crate::paths::user_dir() else {
-                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                        anyhow::bail!("no home directory to keep ~/.pilotfish/config.toml in");
                     };
                     let count = models.len();
                     crate::paths::set_routing(
@@ -2175,7 +2175,7 @@ pub async fn run_app(options: TuiOptions) -> anyhow::Result<crate::cli::ExitCode
         anyhow::bail!(
             "the fleet console needs an interactive terminal.\n\
              Run it in one, or drive the fleet headlessly: \
-             `parl spawn <name> -- \"<brief>\"`, `parl status`, `parl report <name>`."
+             `pilotfish spawn <name> -- \"<brief>\"`, `pilotfish status`, `pilotfish report <name>`."
         );
     }
     let fleet = FleetPaths::discover(&cwd);
@@ -2203,13 +2203,13 @@ pub async fn run_app(options: TuiOptions) -> anyhow::Result<crate::cli::ExitCode
         .is_some();
     if orchestrator_exited {
         println!(
-            "Shutdown requested; the orchestrator is stopping. `parl status` shows the workers. \
+            "Shutdown requested; the orchestrator is stopping. `pilotfish status` shows the workers. \
              Worktrees and branches are kept."
         );
     } else {
         println!(
-            "The orchestrator and its workers keep running. `parl` reopens this console where \
-             you left it; `parl status` lists the workers. `/shutdown` inside the console stops \
+            "The orchestrator and its workers keep running. `pilotfish` reopens this console where \
+             you left it; `pilotfish status` lists the workers. `/shutdown` inside the console stops \
              everything."
         );
     }

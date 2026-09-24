@@ -42,26 +42,26 @@ const BASE_ENV_KEYS: &[&str] = &[
 
 /// Dev/test knobs, so workers spawned through MCP behave like ones spawned
 /// from the CLI under test.
-const PARL_ENV_KEYS: &[&str] = &[
-    "PARL_DEV",
-    "PARL_PI_BIN",
-    "PARL_ASK_POLL_MS",
-    "PARL_ASK_TIMEOUT_MS",
+const PILOTFISH_ENV_KEYS: &[&str] = &[
+    "PILOTFISH_DEV",
+    "PILOTFISH_PI_BIN",
+    "PILOTFISH_ASK_POLL_MS",
+    "PILOTFISH_ASK_TIMEOUT_MS",
 ];
 
 /// This binary, as the MCP config should spawn it.
 ///
-/// The `parl mcp` server: no shell is involved (argv arrays), so paths with
+/// The `pilotfish mcp` server: no shell is involved (argv arrays), so paths with
 /// spaces need no quoting.
 ///
 /// # Errors
 ///
 /// Returns an error when the current executable cannot be located.
-pub fn parl_binary() -> anyhow::Result<PathBuf> {
-    std::env::current_exe().context("locate the parl binary for the fleet MCP server")
+pub fn pilotfish_binary() -> anyhow::Result<PathBuf> {
+    std::env::current_exe().context("locate the pilotfish binary for the fleet MCP server")
 }
 
-/// The `--mcp-config` document that makes claude spawn `parl mcp` over stdio,
+/// The `--mcp-config` document that makes claude spawn `pilotfish mcp` over stdio,
 /// with the environment inherited from this process.
 ///
 /// # Errors
@@ -95,7 +95,7 @@ fn fleet_mcp_config_with(
         env_var("DIR"),
         Value::String(fleet_dir.to_string_lossy().into_owned()),
     );
-    for key in BASE_ENV_KEYS.iter().chain(PARL_ENV_KEYS.iter()) {
+    for key in BASE_ENV_KEYS.iter().chain(PILOTFISH_ENV_KEYS.iter()) {
         if let Some(value) = lookup(key) {
             passthrough.insert((*key).to_string(), Value::String(value));
         }
@@ -135,31 +135,31 @@ mod tests {
     }
 
     #[test]
-    fn fleet_mcp_config_points_claude_at_parl_mcp_with_basics_and_dev_knobs() {
+    fn fleet_mcp_config_points_claude_at_pilotfish_mcp_with_basics_and_dev_knobs() {
         let env = env_of(&[
-            ("PARL_DEV", "1"),
-            ("PARL_PI_BIN", "node fake.mjs"),
+            ("PILOTFISH_DEV", "1"),
+            ("PILOTFISH_PI_BIN", "node fake.mjs"),
             ("HOME", "/h"),
             ("PATH", "/bin"),
             ("ANTHROPIC_API_KEY", "secret"),
         ]);
         let cfg = fleet_mcp_config_with_env(
-            Path::new("/usr/local/bin/parl"),
-            Path::new("/repo/.parl"),
+            Path::new("/usr/local/bin/pilotfish"),
+            Path::new("/repo/.pilotfish"),
             &env,
         );
         let fleet = &cfg["mcpServers"]["fleet"];
         assert_eq!(fleet["type"], "stdio");
-        assert_eq!(fleet["command"], "/usr/local/bin/parl");
+        assert_eq!(fleet["command"], "/usr/local/bin/pilotfish");
         assert_eq!(fleet["args"], json!(["mcp"]));
         assert_eq!(
             fleet["env"],
             json!({
-                "PARL_DIR": "/repo/.parl",
+                "PILOTFISH_DIR": "/repo/.pilotfish",
                 "PATH": "/bin",
                 "HOME": "/h",
-                "PARL_DEV": "1",
-                "PARL_PI_BIN": "node fake.mjs",
+                "PILOTFISH_DEV": "1",
+                "PILOTFISH_PI_BIN": "node fake.mjs",
             })
         );
         assert!(
@@ -175,13 +175,14 @@ mod tests {
 
     #[test]
     fn empty_and_missing_env_values_are_omitted() {
-        let env = env_of(&[("PATH", "/bin"), ("PARL_DEV", ""), ("TMPDIR", " ")]);
-        let cfg = fleet_mcp_config_with_env(Path::new("/parl"), Path::new("/repo/.parl"), &env);
+        let env = env_of(&[("PATH", "/bin"), ("PILOTFISH_DEV", ""), ("TMPDIR", " ")]);
+        let cfg =
+            fleet_mcp_config_with_env(Path::new("/pilotfish"), Path::new("/repo/.pilotfish"), &env);
         // TMPDIR is " " — non-empty, so it passes through verbatim; the empty
-        // PARL_DEV does not.
+        // PILOTFISH_DEV does not.
         assert_eq!(
             cfg["mcpServers"]["fleet"]["env"],
-            json!({"PARL_DIR": "/repo/.parl", "PATH": "/bin", "TMPDIR": " "})
+            json!({"PILOTFISH_DIR": "/repo/.pilotfish", "PATH": "/bin", "TMPDIR": " "})
         );
     }
 }

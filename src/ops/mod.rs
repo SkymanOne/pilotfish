@@ -69,7 +69,7 @@ pub fn print_result<T>(result: CommandResult<T>) -> ExitCode {
 }
 
 /// Where a fleet's state lives once `cwd` is anchored: the repo root when the
-/// target is inside one, the target itself otherwise (and `PARL_DIR` wins over
+/// target is inside one, the target itself otherwise (and `PILOTFISH_DIR` wins over
 /// both — see [`FleetPaths::discover`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedFleet {
@@ -87,10 +87,10 @@ pub struct ResolvedFleet {
 ///
 /// Fails when the target does not exist; git probe errors propagate.
 pub async fn resolve_fleet_dir(cwd: Option<&Path>) -> anyhow::Result<ResolvedFleet> {
-    resolve_fleet_dir_with_env(cwd, ambient_parl_dir().as_deref()).await
+    resolve_fleet_dir_with_env(cwd, ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`resolve_fleet_dir`] with the `$PARL_DIR` value injected, mirroring
+/// [`resolve_fleet_dir`] with the `$PILOTFISH_DIR` value injected, mirroring
 /// [`FleetPaths::discover_with_env`]: production passes the real environment
 /// value; tests pass `None` so resolution can never leave the caller's own
 /// directories by inheriting an ambient variable.
@@ -100,7 +100,7 @@ pub async fn resolve_fleet_dir(cwd: Option<&Path>) -> anyhow::Result<ResolvedFle
 /// Fails when the target does not exist; git probe errors propagate.
 pub async fn resolve_fleet_dir_with_env(
     cwd: Option<&Path>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<ResolvedFleet> {
     let requested = match cwd {
         Some(dir) => dir.to_path_buf(),
@@ -120,15 +120,15 @@ pub async fn resolve_fleet_dir_with_env(
     Ok(ResolvedFleet {
         repo_root: is_git.then_some(resolved_root.to_path_buf()),
         is_git,
-        paths: FleetPaths::discover_with_env(resolved_root, parl_dir),
+        paths: FleetPaths::discover_with_env(resolved_root, pilotfish_dir),
         target_dir,
     })
 }
 
-/// The ambient `$PARL_DIR` value, passed into the injectable variants by the
+/// The ambient `$PILOTFISH_DIR` value, passed into the injectable variants by the
 /// production wrappers. Tests pass `None` instead, so nothing in a test run
 /// resolves the environment and lands in an unrelated fleet.
-pub(crate) fn ambient_parl_dir() -> Option<String> {
+pub(crate) fn ambient_pilotfish_dir() -> Option<String> {
     std::env::var(env_var("DIR")).ok()
 }
 
@@ -218,7 +218,7 @@ mod tests {
                 Instant::now() < deadline,
                 "resolve_fleet_dir never anchored at the repo root: {last_seen}"
             );
-            let root = tmp_dir("parl-ops-resolve-");
+            let root = tmp_dir("pilotfish-ops-resolve-");
             git_sync(&root, &["init", "-q", "-b", "main"]);
             let sub = root.join("sub");
             std::fs::create_dir_all(&sub).unwrap();
@@ -238,7 +238,7 @@ mod tests {
                             .as_ref()
                             .and_then(|repo| repo.canonicalize().ok())
                             .is_some_and(|real| *real == root_real)
-                        && resolved.paths.root() == root_real.join(".parl")
+                        && resolved.paths.root() == root_real.join(".pilotfish")
                         && resolved.target_dir == sub_real =>
                 {
                     break (sub_real, resolved);
@@ -265,7 +265,7 @@ mod tests {
             "the target stays where the caller pointed"
         );
 
-        let plain = tmp_dir("parl-ops-plain-");
+        let plain = tmp_dir("pilotfish-ops-plain-");
         let standalone = resolve_fleet_dir_with_env(Some(&plain), None)
             .await
             .unwrap();
@@ -273,7 +273,7 @@ mod tests {
         assert_eq!(standalone.repo_root, None);
         assert_eq!(
             standalone.paths.root(),
-            plain.canonicalize().unwrap().join(".parl")
+            plain.canonicalize().unwrap().join(".pilotfish")
         );
 
         let missing = resolve_fleet_dir_with_env(Some(&plain.join("nope")), None).await;
@@ -283,8 +283,8 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_fleet_dir_with_env_pins_or_falls_back() {
-        let plain = tmp_dir("parl-ops-override-");
-        // An injected value wins over the cwd fallback, like `$PARL_DIR` does.
+        let plain = tmp_dir("pilotfish-ops-override-");
+        // An injected value wins over the cwd fallback, like `$PILOTFISH_DIR` does.
         let pinned = resolve_fleet_dir_with_env(Some(&plain), Some("/elsewhere/fleet"))
             .await
             .unwrap();
@@ -293,7 +293,7 @@ mod tests {
         let blank = resolve_fleet_dir_with_env(Some(&plain), Some("  "))
             .await
             .unwrap();
-        assert_eq!(blank.paths.root(), blank.target_dir.join(".parl"));
+        assert_eq!(blank.paths.root(), blank.target_dir.join(".pilotfish"));
     }
 
     /// A fleet dir with one run on disk, owned by `owner` (`None` = the
@@ -334,7 +334,7 @@ mod tests {
 
     #[test]
     fn runs_for_acting_session_folds_unowned_legacy_runs_into_the_default() {
-        let fleet = tmp_dir("parl-ops-owner-");
+        let fleet = tmp_dir("pilotfish-ops-owner-");
         std::fs::create_dir_all(fleet.join("runs")).unwrap();
         let default = DEFAULT_ORCHESTRATOR_SESSION;
         let other = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn acting_session_is_the_last_used_row_or_the_default() {
-        let fleet = tmp_dir("parl-ops-session-");
+        let fleet = tmp_dir("pilotfish-ops-session-");
         // No fleet.json: the pre-session identity.
         assert_eq!(acting_session(&fleet), DEFAULT_ORCHESTRATOR_SESSION);
         let mut store = crate::orch::session::FleetSessions::new();
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn live_runs_for_session_counts_only_the_derived_non_terminal() {
-        let fleet = tmp_dir("parl-ops-live-");
+        let fleet = tmp_dir("pilotfish-ops-live-");
         std::fs::create_dir_all(fleet.join("runs")).unwrap();
         let default = DEFAULT_ORCHESTRATOR_SESSION;
         // Running with a live pid, settled, archived, and a stale Starting

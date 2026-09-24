@@ -4,7 +4,7 @@
 //! survives its neighbour's removal. The core guarantee of the
 //! multi-session feature — a worker settling in session A never produces a
 //! fleet event in session B's transcript — is proven here with two real
-//! monitors and two real watchers, against the built `parl`
+//! monitors and two real watchers, against the built `pilotfish`
 //! `orchestrator-monitor` binary and the scripted claude stand-in.
 //!
 //! Also the per-session shutdown primitive (Fix B): removing one session's
@@ -19,13 +19,13 @@ use std::time::{Duration, Instant};
 
 use tokio::process::Child;
 
-use parl::fleet::event::FleetEventKind;
-use parl::fleet::run::{self, RunState, is_alive};
-use parl::orch::monitor::{append_command, load_orchestrator_state};
-use parl::orch::records::{EventRecord, OrchestratorCommand, OrchestratorState};
-use parl::orch::session::{self, OrchestratorSession};
-use parl::orch::watcher::{FleetWatcher, FleetWatcherOptions};
-use parl::paths::{FleetPaths, SessionKey};
+use pilotfish::fleet::event::FleetEventKind;
+use pilotfish::fleet::run::{self, RunState, is_alive};
+use pilotfish::orch::monitor::{append_command, load_orchestrator_state};
+use pilotfish::orch::records::{EventRecord, OrchestratorCommand, OrchestratorState};
+use pilotfish::orch::session::{self, OrchestratorSession};
+use pilotfish::orch::watcher::{FleetWatcher, FleetWatcherOptions};
+use pilotfish::paths::{FleetPaths, SessionKey};
 
 const WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(50);
@@ -64,7 +64,7 @@ struct TwoSessions {
 
 fn build() -> TwoSessions {
     let tmp = tempfile::tempdir().unwrap();
-    let fleet_dir = tmp.path().join(".parl");
+    let fleet_dir = tmp.path().join(".pilotfish");
     std::fs::create_dir_all(&fleet_dir).unwrap();
     let a = session::create_session(&fleet_dir, Some("ms-a")).unwrap();
     let b = session::create_session(&fleet_dir, Some("ms-b")).unwrap();
@@ -77,7 +77,7 @@ fn build() -> TwoSessions {
 }
 
 /// Environment for one monitor's spawn: the scripted claude, a pinned
-/// `PARL_DIR` (test isolation: nothing ambient may leak in), and the fake
+/// `PILOTFISH_DIR` (test isolation: nothing ambient may leak in), and the fake
 /// claude's session identity, distinct per session.
 fn monitor_env(
     fleet_dir: &Path,
@@ -86,11 +86,11 @@ fn monitor_env(
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
     env.insert(
-        "PARL_CLAUDE_BIN".to_string(),
+        "PILOTFISH_CLAUDE_BIN".to_string(),
         format!("node {}", fake_claude().display()),
     );
     env.insert(
-        "PARL_DIR".to_string(),
+        "PILOTFISH_DIR".to_string(),
         fleet_dir.to_string_lossy().into_owned(),
     );
     env.insert(
@@ -104,7 +104,7 @@ fn monitor_env(
     env
 }
 
-/// Spawn `parl orchestrator-monitor --fleet-dir <fleet> --session <uuid>`
+/// Spawn `pilotfish orchestrator-monitor --fleet-dir <fleet> --session <uuid>`
 /// detached, exactly the shape the console uses. stderr goes to a file so
 /// a failing run leaves its reason behind.
 fn spawn_monitor(
@@ -118,7 +118,7 @@ fn spawn_monitor(
         .append(true)
         .open(log_file)
         .unwrap();
-    let mut command = tokio::process::Command::new(assert_cmd::cargo_bin!("parl"));
+    let mut command = tokio::process::Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
         .args(["orchestrator-monitor", "--fleet-dir"])
         .arg(fleet_dir)
@@ -223,7 +223,7 @@ fn add_owned_run(fleet_dir: &Path, name: &str, owner: uuid::Uuid) -> (String, Pa
         "/repo",
         "brief",
         None,
-        Some(format!("parl/{name}-1234567")),
+        Some(format!("pilotfish/{name}-1234567")),
         None,
         None,
         None,

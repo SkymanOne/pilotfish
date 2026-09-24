@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use parl::orch::process::{ControlOutcome, OrchestratorOptions, OrchestratorProcess, ProcEvent};
-use parl::orch::protocol::{is_replayed_user_message, text_of_assistant, user_text};
+use pilotfish::orch::process::{
+    ControlOutcome, OrchestratorOptions, OrchestratorProcess, ProcEvent,
+};
+use pilotfish::orch::protocol::{is_replayed_user_message, text_of_assistant, user_text};
 use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
@@ -26,7 +28,7 @@ fn tmp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "{name}-{}-{}",
         std::process::id(),
-        parl::util::new_id("t").replace('_', "")
+        pilotfish::util::new_id("t").replace('_', "")
     ));
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -40,7 +42,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn node_bin() -> Option<String> {
-    if let Ok(path) = std::env::var("PARL_TEST_NODE") {
+    if let Ok(path) = std::env::var("PILOTFISH_TEST_NODE") {
         return Some(path);
     }
     let ok = std::process::Command::new("node")
@@ -55,7 +57,7 @@ fn fake_claude_env(over: &[(&str, &str)]) -> HashMap<String, String> {
     let node = node_bin().expect("node is available");
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert(
-        parl::paths::env_var("CLAUDE_BIN"),
+        pilotfish::paths::env_var("CLAUDE_BIN"),
         format!("{} {}", node, fixture("fake-claude.mjs").display()),
     );
     for (key, value) in over {
@@ -149,7 +151,7 @@ async fn a_turn_over_fake_claude_emits_init_replay_deltas_assistant_and_result()
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-1-");
+    let root = tmp_dir("pilotfish-proc-1-");
     let argv_file = root.join("argv.json");
     let (process, mut rx) = start_proc(
         &root,
@@ -289,7 +291,7 @@ async fn the_initialize_handshake_reports_the_commands_and_skills_claude_offers(
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-cmds-");
+    let root = tmp_dir("pilotfish-proc-cmds-");
     let (process, mut rx) = start_proc(&root, &[]);
     let ProcEvent::Commands(commands) = wait_for(&mut rx, Duration::from_secs(10), |event| {
         matches!(event, ProcEvent::Commands(_))
@@ -322,7 +324,7 @@ async fn permission_requests_allow_deny_and_ask_user_question() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-2-");
+    let root = tmp_dir("pilotfish-proc-2-");
     let (process, mut rx) = start_proc(&root, &[]);
     assert!(
         process.send("perm:touch a.txt"),
@@ -418,7 +420,7 @@ async fn interrupt_stops_a_streaming_turn_errors_surface_and_set_model_answers()
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-3-");
+    let root = tmp_dir("pilotfish-proc-3-");
     let (process, mut rx) = start_proc(&root, &[("FAKE_CLAUDE_NO_FLAG_SETTINGS", "1")]);
     assert!(process.send("slow:"), "the slow turn was accepted");
     wait_for(&mut rx, Duration::from_secs(10), |event| {
@@ -477,7 +479,7 @@ async fn the_handshake_goes_out_before_the_first_turn_so_prompts_arrive() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-init-");
+    let root = tmp_dir("pilotfish-proc-init-");
     let (process, mut rx) = start_proc(&root, &[("FAKE_CLAUDE_REQUIRE_INIT", "1")]);
     // this fake refuses to prompt until it has seen an initialize control request
     wait_for(&mut rx, Duration::from_secs(10), |event| {
@@ -522,7 +524,7 @@ async fn stop_ends_a_running_turn_before_closing_the_child() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-stopturn-");
+    let root = tmp_dir("pilotfish-proc-stopturn-");
     let (process, mut rx) = start_proc(&root, &[]);
     assert!(process.send("slow:"), "the slow turn was accepted");
     wait_for(&mut rx, Duration::from_secs(10), |event| {
@@ -554,7 +556,7 @@ async fn stop_escalates_to_sigterm_for_a_child_that_ignores_stdin_closing() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-6-");
+    let root = tmp_dir("pilotfish-proc-6-");
     let prompt_file = root.join("p.md");
     std::fs::write(&prompt_file, "x").unwrap();
     let mut options = OrchestratorOptions::new(
@@ -565,7 +567,7 @@ async fn stop_escalates_to_sigterm_for_a_child_that_ignores_stdin_closing() {
     // hang.mjs ignores stdin closing, so only the signals end it
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert(
-        parl::paths::env_var("CLAUDE_BIN"),
+        pilotfish::paths::env_var("CLAUDE_BIN"),
         format!("{} {}", node_bin().unwrap(), fixture("hang.mjs").display()),
     );
     options.env = Some(env);
@@ -592,7 +594,7 @@ async fn a_control_request_times_out_after_five_seconds() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-timeout-");
+    let root = tmp_dir("pilotfish-proc-timeout-");
     let prompt_file = root.join("p.md");
     std::fs::write(&prompt_file, "x").unwrap();
     let mut options = OrchestratorOptions::new(
@@ -602,7 +604,7 @@ async fn a_control_request_times_out_after_five_seconds() {
     );
     let mut env: HashMap<String, String> = std::env::vars().collect();
     env.insert(
-        parl::paths::env_var("CLAUDE_BIN"),
+        pilotfish::paths::env_var("CLAUDE_BIN"),
         format!("{} {}", node_bin().unwrap(), fixture("hang.mjs").display()),
     );
     options.env = Some(env);
@@ -626,7 +628,7 @@ async fn writing_after_death_fails_cleanly() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let root = tmp_dir("parl-proc-dead-");
+    let root = tmp_dir("pilotfish-proc-dead-");
     let (process, mut rx) = start_proc(&root, &[]);
     process.stop().await;
     assert!(process.exited().is_some(), "the exit is recorded");

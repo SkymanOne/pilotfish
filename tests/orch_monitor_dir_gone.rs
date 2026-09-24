@@ -1,8 +1,8 @@
 //! The orchestrator monitor must not outlive its fleet directory: deleting
-//! `.parl` under a running monitor ends the monitor *and* its claude child,
+//! `.pilotfish` under a running monitor ends the monitor *and* its claude child,
 //! instead of leaving another orphaned process polling against a directory
 //! that no longer exists (sixteen of those were once reaped by hand after a
-//! deleted worktree). Driven against the real `parl orchestrator-monitor`
+//! deleted worktree). Driven against the real `pilotfish orchestrator-monitor`
 //! binary and the scripted claude stand-in, like `tests/orch_monitor.rs`.
 
 #![allow(clippy::unwrap_used)]
@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parl::fleet::run::is_alive;
-use parl::orch::client::{OrchestratorClient, OrchestratorClientOptions};
-use parl::orch::monitor::load_orchestrator_state;
-use parl::orch::records::EventRecord;
-use parl::paths::FleetPaths;
+use pilotfish::fleet::run::is_alive;
+use pilotfish::orch::client::{OrchestratorClient, OrchestratorClientOptions};
+use pilotfish::orch::monitor::load_orchestrator_state;
+use pilotfish::orch::records::EventRecord;
+use pilotfish::paths::FleetPaths;
 
 const WAIT: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(50);
@@ -45,7 +45,7 @@ impl Fixture {
     fn new(session_id: &'static str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().to_path_buf();
-        let fleet_dir = tmp.path().join(".parl");
+        let fleet_dir = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet_dir).unwrap();
         Self {
             _tmp: tmp,
@@ -58,13 +58,13 @@ impl Fixture {
     fn client(&self, fresh: bool) -> Arc<OrchestratorClient> {
         let mut env: HashMap<String, String> = HashMap::new();
         env.insert(
-            "PARL_CLAUDE_BIN".to_string(),
+            "PILOTFISH_CLAUDE_BIN".to_string(),
             format!("node {}", fake_claude().display()),
         );
-        // The monitor must never inherit an ambient PARL_DIR: its fleet is
+        // The monitor must never inherit an ambient PILOTFISH_DIR: its fleet is
         // the one this fixture created (also passed as --fleet-dir).
         env.insert(
-            "PARL_DIR".to_string(),
+            "PILOTFISH_DIR".to_string(),
             self.fleet_dir.to_string_lossy().into_owned(),
         );
         env.insert(
@@ -77,7 +77,7 @@ impl Fixture {
         );
         OrchestratorClient::new(OrchestratorClientOptions {
             fresh,
-            monitor_bin: Some(assert_cmd::cargo_bin!("parl").to_path_buf()),
+            monitor_bin: Some(assert_cmd::cargo_bin!("pilotfish").to_path_buf()),
             monitor_env: Some(env),
             poll_ms: 30,
             ..OrchestratorClientOptions::new(self.fleet_dir.clone(), self.cwd.clone())
@@ -100,8 +100,8 @@ async fn wait(timeout: Duration, mut check: impl FnMut() -> bool) {
 /// The session row, or `None` before the monitor has written one — the
 /// polling helpers below run from the moment the monitor starts, so a
 /// missing row is "not yet", not a failure.
-fn session_key(fleet_dir: &Path) -> Option<parl::paths::SessionKey> {
-    Some(parl::orch::session::resolve_session(fleet_dir)?.key())
+fn session_key(fleet_dir: &Path) -> Option<pilotfish::paths::SessionKey> {
+    Some(pilotfish::orch::session::resolve_session(fleet_dir)?.key())
 }
 
 fn monitor_pid(fleet_dir: &Path) -> Option<i32> {

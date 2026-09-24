@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn new_state_has_neutral_defaults() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let s = base_state(&fleet, "auth-20260828141530");
         assert_eq!(s.status, RunStatus::Starting);
         assert_eq!(s.pid, None);
@@ -871,7 +871,7 @@ mod tests {
 
     #[test]
     fn derive_view_blocks_on_pending_dialogs_too() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let mut s = base_state(&fleet, "auth-20260828141530");
         s.status = RunStatus::Running;
         s.pid = Some(1);
@@ -901,7 +901,7 @@ mod tests {
 
     #[test]
     fn save_state_is_atomic_and_load_round_trips() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
@@ -919,7 +919,7 @@ mod tests {
 
     #[test]
     fn serde_tolerates_unknown_and_missing_fields() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         let path = run_json_path(&run_dir);
@@ -931,7 +931,7 @@ mod tests {
                 "name": "auth",
                 "status": "running",
                 "cwd": "/tmp/x",
-                "fleetDir": "/tmp/x/.parl",
+                "fleetDir": "/tmp/x/.pilotfish",
                 "createdAt": "2026-08-28T14:15:30.000Z",
                 "taskBrief": "b",
                 "someFutureField": {"deep": [1, 2, 3]}
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn a_legacy_run_json_still_carrying_the_pi_catalogue_loads_and_is_stripped_on_save() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         // A state file written before the cache existed: both catalogue
@@ -960,7 +960,7 @@ mod tests {
                 "name": "auth",
                 "status": "running",
                 "cwd": "/tmp/x",
-                "fleetDir": "/tmp/x/.parl",
+                "fleetDir": "/tmp/x/.pilotfish",
                 "createdAt": "2026-08-28T14:15:30.000Z",
                 "taskBrief": "b",
                 "availableModels": [{"provider": "anthropic", "id": "claude-opus-5", "name": "Opus"}],
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn load_state_sources_the_pi_catalogue_from_the_fleet_cache() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn a_missing_or_corrupt_pi_cache_degrades_to_empty() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
@@ -1041,7 +1041,7 @@ mod tests {
 
     #[test]
     fn corrupted_run_json_is_an_error_naming_the_dir() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(run_json_path(&run_dir), "{oops").unwrap();
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn derive_status_flags_dead_when_pid_is_gone_mid_run() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let mut s = base_state(&fleet, "auth-20260828141530");
         s.status = RunStatus::Running;
         s.pid = Some(1);
@@ -1078,7 +1078,7 @@ mod tests {
 
     #[test]
     fn derive_status_respects_the_starting_grace_period() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let s = base_state(&fleet, "auth-20260828141530");
         let created = parse_ts_ms(&s.created_at).unwrap();
         assert_eq!(
@@ -1098,7 +1098,7 @@ mod tests {
 
     #[test]
     fn derive_view_adds_blocked_for_pending_questions() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let mut s = base_state(&fleet, "auth-20260828141530");
         s.status = RunStatus::Running;
         s.pid = Some(1);
@@ -1116,7 +1116,7 @@ mod tests {
 
     #[test]
     fn record_steering_caps_the_log_at_twenty() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let mut s = base_state(&fleet, "auth-20260828141530");
         for i in 0..25 {
             record_steering(&mut s, "console", &format!("t{i}"), &format!("m{i}"));
@@ -1129,7 +1129,7 @@ mod tests {
 
     #[test]
     fn record_tool_activity_updates_last_tool_and_activity() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let mut s = base_state(&fleet, "auth-20260828141530");
         record_tool_activity(&mut s, Some("bash"));
         assert_eq!(s.last_tool.as_deref(), Some("bash"));
@@ -1166,19 +1166,19 @@ mod tests {
 
     #[test]
     fn list_runs_is_newest_first_and_skips_empty_dirs() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
         write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
         std::fs::create_dir_all(fleet.join("runs/auth-20260828171530")).unwrap();
         let ids: Vec<String> = list_runs(&fleet).into_iter().map(|r| r.run_id).collect();
         assert_eq!(ids, vec!["auth-20260828161530", "auth-20260828141530"]);
         // No runs directory at all reads as empty.
-        assert!(list_runs(&fleet_dir("parl-run-empty-")).is_empty());
+        assert!(list_runs(&fleet_dir("pilotfish-run-empty-")).is_empty());
     }
 
     #[test]
     fn find_run_prefers_non_archived_and_never_prefix_matches() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
         write_run(
             &fleet,
@@ -1213,7 +1213,7 @@ mod tests {
 
     #[test]
     fn find_run_errors_on_ambiguous_aliases_and_resolves_specific_ids() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
         write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
         // Two live runs share the alias: an error naming both candidates,
@@ -1250,7 +1250,7 @@ mod tests {
 
     #[test]
     fn find_run_resolves_uuids_self_named_dirs_and_ownerless_legacy_runs() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         // A run under the new scheme: `<alias>-<short-uuid>`, a recorded
         // uuid, an owner, and state.name as the alias.
         let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
@@ -1262,7 +1262,7 @@ mod tests {
         assert_eq!(crate::util::short7(&run_id), "f7a8b9c");
         assert_eq!(
             crate::util::branch_for("auth", &run_id),
-            "parl/auth-f7a8b9c"
+            "pilotfish/auth-f7a8b9c"
         );
         let mut state = write_run(&fleet, &run_id, "auth", RunStatus::Running);
         state.uuid = uuid;
@@ -1321,7 +1321,7 @@ mod tests {
 
     #[test]
     fn worker_party_is_the_run_uuid_or_the_stable_legacy_encoding() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
         let run_id = run_id_for("auth", &uuid);
         let mut state = write_run(&fleet, &run_id, "auth", RunStatus::Running);
@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn list_runs_for_owner_sees_only_owned_runs() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let owner = Uuid::parse_str("6e1c9a86-3b7d-4f5a-9e2c-1b8d4a7f0c3e").unwrap();
         let other = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
         let mut mine = write_run(&fleet, "mine-60828141530", "mine", RunStatus::Running);
@@ -1376,7 +1376,7 @@ mod tests {
 
     #[test]
     fn resume_hint_names_the_binary_and_session() {
-        let fleet = fleet_dir("parl-run-");
+        let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(run_dir.join("session")).unwrap();
         std::fs::write(run_dir.join("session").join("s1.jsonl"), "{}\n").unwrap();
@@ -1384,7 +1384,10 @@ mod tests {
         std::fs::write(run_dir.join("session").join("s2.jsonl"), "{}\n").unwrap();
         let s = base_state(&fleet, "auth-20260828141530");
         let hint = resume_hint(&s, &run_dir);
-        assert!(hint.starts_with("parl spawn auth-2 --session "), "{hint}");
+        assert!(
+            hint.starts_with("pilotfish spawn auth-2 --session "),
+            "{hint}"
+        );
         assert!(hint.contains("s2.jsonl"), "{hint}");
         // Without session files, a placeholder stands in.
         let hint2 = resume_hint(&s, &fleet.join("runs/none-20260828141530"));

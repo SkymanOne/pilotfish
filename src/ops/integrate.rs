@@ -120,18 +120,24 @@ pub async fn diff_core(
     cwd: Option<&Path>,
     name_only: bool,
 ) -> anyhow::Result<CommandResult<DiffData>> {
-    diff_core_with_env(name, cwd, name_only, super::ambient_parl_dir().as_deref()).await
+    diff_core_with_env(
+        name,
+        cwd,
+        name_only,
+        super::ambient_pilotfish_dir().as_deref(),
+    )
+    .await
 }
 
-/// [`diff_core`] with the `$PARL_DIR` value injected (tests pass `None`);
+/// [`diff_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`);
 /// the dashboard's poller pins its own anchored fleet dir instead.
 pub(crate) async fn diff_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     name_only: bool,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<DiffData>> {
-    let (_paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (_paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let state = &target.state;
     let worktree = state
         .worktree
@@ -205,17 +211,23 @@ pub async fn merge_core(
     cwd: Option<&Path>,
     no_commit: bool,
 ) -> anyhow::Result<CommandResult<MergeData>> {
-    merge_core_with_env(name, cwd, no_commit, super::ambient_parl_dir().as_deref()).await
+    merge_core_with_env(
+        name,
+        cwd,
+        no_commit,
+        super::ambient_pilotfish_dir().as_deref(),
+    )
+    .await
 }
 
-/// [`merge_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`merge_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn merge_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     no_commit: bool,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<MergeData>> {
-    let (_paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (_paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let state = &target.state;
     let derived = run::derive_status(state, run::is_alive, now_ms());
     if derived != RunStatus::Settled {
@@ -628,7 +640,7 @@ mod tests {
     fn init_repo(name: &str) -> PathBuf {
         let root = tmp_dir(name);
         git_sync(&root, &["init", "-q", "-b", "main"]);
-        std::fs::write(root.join(".gitignore"), ".parl/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".pilotfish/\n").unwrap();
         std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
         git_sync(&root, &["add", "."]);
         git_sync(&root, &["commit", "-qm", "seed"]);
@@ -703,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_on_a_run_without_a_worktree_is_not_applicable() {
-        let dir = tmp_dir("parl-int-flat-");
+        let dir = tmp_dir("pilotfish-int-flat-");
         make_run(&dir, "flat", false).await;
         let result = diff_core_with_env("flat", Some(&dir), false, None)
             .await
@@ -719,7 +731,7 @@ mod tests {
 
     #[tokio::test]
     async fn diff_shows_committed_work_and_warns_about_dirty_files() {
-        let dir = init_repo("parl-int-diff-");
+        let dir = init_repo("pilotfish-int-diff-");
         let (_fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
         commit_worktree_file(&worktree, "hello.txt", "hi\n");
@@ -747,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_lands_in_the_recorded_repo_root_wherever_invoked_from() {
-        let dir = init_repo("parl-int-merge-");
+        let dir = init_repo("pilotfish-int-merge-");
         let (_fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
         commit_worktree_file(&worktree, "hello.txt", "hi\n");
@@ -757,10 +769,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
-        assert_eq!(result.data.branch, "parl/worker-8141530");
+        assert_eq!(result.data.branch, "pilotfish/worker-8141530");
         assert!(result.data.committed);
         assert!(
-            result.out[0].starts_with("merged parl/worker-8141530 into "),
+            result.out[0].starts_with("merged pilotfish/worker-8141530 into "),
             "{:?}",
             result.out
         );
@@ -772,7 +784,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_refuses_unsettled_runs_and_missing_branches() {
-        let dir = init_repo("parl-int-mergegates-");
+        let dir = init_repo("pilotfish-int-mergegates-");
         let (_fleet, target) = make_run(&dir, "flat", false).await;
         let result = merge_core_with_env("flat", Some(&dir), false, None)
             .await
@@ -797,7 +809,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_conflicts_exit_5_with_the_rebase_hint() {
-        let dir = init_repo("parl-int-conflict-");
+        let dir = init_repo("pilotfish-int-conflict-");
         let (_fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
         // Worker edits seed.txt on its branch; the parent moves on too.
@@ -816,7 +828,7 @@ mod tests {
         let err = result.err.join("\n");
         assert!(err.contains("conflicts in:\nseed.txt"), "{err}");
         assert!(err.contains("The merge was aborted; the checkout is clean"));
-        assert!(err.contains("rebase its branch parl/worker-8141530"));
+        assert!(err.contains("rebase its branch pilotfish/worker-8141530"));
         assert!(
             err.contains(
                 target
@@ -834,7 +846,7 @@ mod tests {
 
     #[tokio::test]
     async fn merge_stages_with_no_commit() {
-        let dir = init_repo("parl-int-nocommit-");
+        let dir = init_repo("pilotfish-int-nocommit-");
         let (_fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
         commit_worktree_file(&worktree, "feat.txt", "f\n");
@@ -857,7 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_archives_removes_worktree_and_keeps_the_report() {
-        let dir = init_repo("parl-int-cleanup-");
+        let dir = init_repo("pilotfish-int-cleanup-");
         let (fleet, target) = make_run(&dir, "worker", true).await;
         let report = crate::fleet::report::report_path(&fleet, &target.run_id);
         std::fs::write(&report, "# Fleet Report\n").unwrap();
@@ -905,7 +917,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_refuses_a_dirty_worktree_without_force_and_forces_with_it() {
-        let dir = init_repo("parl-int-dirty-");
+        let dir = init_repo("pilotfish-int-dirty-");
         let (fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
         commit_worktree_file(&worktree, "hello.txt", "hi\n");
@@ -933,7 +945,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_force_aborts_a_running_run_then_archives() {
-        let dir = init_repo("parl-int-forceabort-");
+        let dir = init_repo("pilotfish-int-forceabort-");
         let (fleet, target) = make_run(&dir, "slow", false).await;
         // A "monitor" that processes the abort 500 ms in: status goes
         // stopped and the pid (our own test process) goes away. While it is
@@ -967,7 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_all_archives_finished_runs_and_skips_running_ones() {
-        let dir = init_repo("parl-int-all-");
+        let dir = init_repo("pilotfish-int-all-");
         let (fleet, _settled) = make_run(&dir, "done", false).await;
         settle(&fleet.join("runs").join("done-20260828141530"));
         // A second run that looks alive.
@@ -1030,7 +1042,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_all_survives_one_runs_failure_and_archives_the_rest() {
-        let dir = init_repo("parl-int-batchfail-");
+        let dir = init_repo("pilotfish-int-batchfail-");
         let (fleet, broken) = make_run(&dir, "broken", true).await;
         settle(&broken.run_dir);
         let (_fleet2, healthy) = make_run(&dir, "healthy", false).await;
@@ -1080,7 +1092,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_target_rules() {
-        let dir = init_repo("parl-int-targets-");
+        let dir = init_repo("pilotfish-int-targets-");
         let (fleet, _target) = make_run(&dir, "flat", false).await;
         // An unknown target is a hard error.
         let err = cleanup_runs(&fleet, "ghost", false).await.unwrap_err();
@@ -1091,7 +1103,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_all_says_when_it_crosses_sessions() {
-        let dir = init_repo("parl-int-xsession-");
+        let dir = init_repo("pilotfish-int-xsession-");
         let (fleet, mine) = make_run(&dir, "mine", false).await;
         settle(&mine.run_dir);
         let (_, theirs) = make_run(&dir, "theirs", false).await;
@@ -1128,7 +1140,7 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_force_abort_carries_the_acting_session_provenance() {
-        let dir = init_repo("parl-int-abortparty-");
+        let dir = init_repo("pilotfish-int-abortparty-");
         let (fleet, target) = make_run(&dir, "slowp", false).await;
         let mut state = run::load_state(&target.run_dir).unwrap();
         state.status = RunStatus::Running;

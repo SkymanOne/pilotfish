@@ -1,11 +1,11 @@
-//! The TypeSafe API key, kept out of every file `parl` writes.
+//! The TypeSafe API key, kept out of every file `pilotfish` writes.
 //!
-//! Resolution is the environment first — `$PARL_TYPESAFE_API_KEY`, then
+//! Resolution is the environment first — `$PILOTFISH_TYPESAFE_API_KEY`, then
 //! `$TYPESAFE_API_KEY`, which is what CI and headless boxes use — and then
 //! the operating system's credential store: the macOS Keychain, the Windows
 //! Credential Manager, or the Secret Service on Linux. There is deliberately
 //! no file fallback. A machine without a credential store gets the
-//! environment variable or nothing, because a plaintext key in `~/.parl` is
+//! environment variable or nothing, because a plaintext key in `~/.pilotfish` is
 //! the one thing this module exists to avoid.
 //!
 //! Every call into the store blocks, and on macOS the first read by a newly
@@ -15,7 +15,7 @@
 use crate::paths::env_var;
 
 /// The credential store entry: service and account.
-const SERVICE: &str = "parl";
+const SERVICE: &str = "pilotfish";
 const ACCOUNT: &str = "typesafe-api-key";
 
 /// A secret that never prints. `Debug` masks it, so an effect or a state
@@ -326,7 +326,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(key.expose(), KEY);
-        assert_eq!(source, KeySource::Env("PARL_TYPESAFE_API_KEY".into()));
+        assert_eq!(source, KeySource::Env("PILOTFISH_TYPESAFE_API_KEY".into()));
 
         let (_, source) = typesafe_key_with(&store, [None, Some(KEY)])
             .unwrap()
@@ -354,7 +354,7 @@ mod tests {
         let err = typesafe_key_with(&absent, [None, None]).unwrap_err();
         assert!(matches!(err, SecretError::Unavailable(_)));
         assert!(
-            err.to_string().contains("PARL_TYPESAFE_API_KEY"),
+            err.to_string().contains("PILOTFISH_TYPESAFE_API_KEY"),
             "the error says what to do instead: {err}"
         );
         // …unless the environment already answered

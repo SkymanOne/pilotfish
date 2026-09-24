@@ -7,7 +7,7 @@
 use crate::orch::mcp_config::FLEET_TOOLS_ALLOW_PATTERN;
 use crate::paths::env_var;
 
-/// `PARL_CLAUDE_BIN` is an executable spec split on spaces
+/// `PILOTFISH_CLAUDE_BIN` is an executable spec split on spaces
 /// ("node /path/fake-claude.mjs"), so tests can point the orchestrator at a
 /// scripted stand-in. Defaults to `claude` on PATH.
 #[must_use]

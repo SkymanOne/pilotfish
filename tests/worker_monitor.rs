@@ -2,18 +2,18 @@
 
 //! Port of the TypeScript monitor suites (`tests/monitor.test.ts`,
 //! `monitor-control.test.ts`, `monitor-outbox.test.ts` and the monitor-facing
-//! parts of `fleet-extension.test.ts`) to Rust, driving the real `parl
+//! parts of `fleet-extension.test.ts`) to Rust, driving the real `pilotfish
 //! monitor` binary against a scripted fake `pi --mode rpc`
-//! (`tests/fixtures/fake-pi-parl.mjs`). Hermetic: no network, no tokens.
+//! (`tests/fixtures/fake-pi-pilotfish.mjs`). Hermetic: no network, no tokens.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use parl::fleet::envelope::{Envelope, Party};
-use parl::fleet::run::{self, DerivedView, RunState, RunStatus, derive_view};
-use parl::paths::FleetPaths;
-use parl::util::now_ms;
+use pilotfish::fleet::envelope::{Envelope, Party};
+use pilotfish::fleet::run::{self, DerivedView, RunState, RunStatus, derive_view};
+use pilotfish::paths::FleetPaths;
+use pilotfish::util::now_ms;
 use serde_json::Value;
 
 /// Settle/terminal statuses, as in the TypeScript helpers.
@@ -28,14 +28,14 @@ const TERMINAL: [RunStatus; 5] = [
 const POLL_MS: u64 = 100;
 
 fn fake_pi() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-parl.mjs")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-pi-pilotfish.mjs")
 }
 
 /// One fleet with one prepared run; the monitor is started against it and
 /// killed when the harness drops.
 struct Fleet {
     tmp: tempfile::TempDir,
-    parl_dir: PathBuf,
+    pilotfish_dir: PathBuf,
     run_id: String,
     run_dir: PathBuf,
     monitor: Option<Child>,
@@ -44,13 +44,13 @@ struct Fleet {
 impl Fleet {
     fn new(prefix: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
-        let parl_dir = tmp.path().join(".parl");
+        let pilotfish_dir = tmp.path().join(".pilotfish");
         let run_id = format!("{prefix}20260828141530");
-        let run_dir = parl_dir.join("runs").join(&run_id);
+        let run_dir = pilotfish_dir.join("runs").join(&run_id);
         std::fs::create_dir_all(&run_dir).unwrap();
         Self {
             tmp,
-            parl_dir,
+            pilotfish_dir,
             run_id,
             run_dir,
             monitor: None,
@@ -65,7 +65,7 @@ impl Fleet {
     /// `spawn_monitor`, which reads it at boot).
     fn write_state_with(&self, tweak: impl FnOnce(&mut RunState)) {
         let mut state = RunState::new(
-            self.parl_dir.to_str().unwrap(),
+            self.pilotfish_dir.to_str().unwrap(),
             &self.run_id,
             "w",
             self.root().to_str().unwrap(),
@@ -101,7 +101,7 @@ impl Fleet {
 
     /// The default orchestrator party, as CLI/MCP steering writes it.
     fn orch_party(&self) -> Party {
-        Party::Orchestrator(parl::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
+        Party::Orchestrator(pilotfish::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
     }
 
     /// Poll `run.json` until `check` holds or the timeout lapses.
@@ -157,22 +157,22 @@ impl Fleet {
     }
 
     fn append_inbox(&self, envelope: &Envelope) {
-        parl::fleet::envelope::append_envelope(&self.run_dir.join("inbox.jsonl"), envelope)
+        pilotfish::fleet::envelope::append_envelope(&self.run_dir.join("inbox.jsonl"), envelope)
             .unwrap();
     }
 
-    /// Start `parl monitor` against this fleet with the fake pi binary.
+    /// Start `pilotfish monitor` against this fleet with the fake pi binary.
     fn spawn_monitor(&mut self, extra_env: &[(&str, &str)]) {
         assert!(self.monitor.is_none(), "monitor already running");
-        let mut command = Command::new(assert_cmd::cargo_bin!("parl"));
+        let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
         command
             .args(["monitor", "--fleet-dir"])
-            .arg(&self.parl_dir)
+            .arg(&self.pilotfish_dir)
             .args(["--run", &self.run_id])
-            .env("PARL_PI_BIN", format!("node {}", fake_pi().display()))
-            // The child must never inherit an ambient PARL_DIR: this
+            .env("PILOTFISH_PI_BIN", format!("node {}", fake_pi().display()))
+            // The child must never inherit an ambient PILOTFISH_DIR: this
             // monitor's fleet is the one this test created.
-            .env("PARL_DIR", &self.parl_dir)
+            .env("PILOTFISH_DIR", &self.pilotfish_dir)
             .stdin(Stdio::null());
         for (key, value) in extra_env {
             command.env(key, value);
@@ -211,8 +211,8 @@ impl Drop for Fleet {
 }
 
 /// The fleet-level pi catalogue, as the monitor wrote it.
-fn read_cache(parl_dir: &Path) -> parl::fleet::run::PiCache {
-    let raw = std::fs::read_to_string(parl_dir.join("pi-cache.json")).unwrap();
+fn read_cache(pilotfish_dir: &Path) -> pilotfish::fleet::run::PiCache {
+    let raw = std::fs::read_to_string(pilotfish_dir.join("pi-cache.json")).unwrap();
     serde_json::from_str(&raw).unwrap()
 }
 
@@ -309,7 +309,7 @@ fn records_commands_and_forwards_a_command_as_a_prompt() {
     );
     assert_eq!(state.commands[0].source, "skill");
     // The fleet cache carries them, and the per-run file does not.
-    let cache = read_cache(&fleet.parl_dir);
+    let cache = read_cache(&fleet.pilotfish_dir);
     let names: Vec<&str> = cache.commands.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
         names,
@@ -327,7 +327,7 @@ fn records_commands_and_forwards_a_command_as_a_prompt() {
     ));
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let refreshed = read_cache(&fleet.parl_dir);
+        let refreshed = read_cache(&fleet.pilotfish_dir);
         if refreshed.commands.iter().any(|c| c.name == "late-skill") {
             break;
         }
@@ -523,7 +523,7 @@ fn records_the_model_pi_resolved_and_the_available_models() {
             .iter()
             .any(|m| m.id == "glm-5.3-flash" && m.provider == "vendorco")
     );
-    let cache = read_cache(&fleet.parl_dir);
+    let cache = read_cache(&fleet.pilotfish_dir);
     assert!(
         cache
             .available_models
@@ -539,13 +539,13 @@ fn child_exit_without_settling_is_an_error_with_the_stderr_tail() {
     let mut fleet = Fleet::new("pf-err-");
     fleet.write_state();
     let fail_pi = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fail-pi.mjs");
-    let mut command = Command::new(assert_cmd::cargo_bin!("parl"));
+    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
         .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.parl_dir)
+        .arg(&fleet.pilotfish_dir)
         .args(["--run", &fleet.run_id])
-        .env("PARL_PI_BIN", format!("node {}", fail_pi.display()))
-        .env("PARL_DIR", &fleet.parl_dir)
+        .env("PILOTFISH_PI_BIN", format!("node {}", fail_pi.display()))
+        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
         .stdin(Stdio::null());
     fleet.monitor = Some(command.spawn().unwrap());
     let state = settled_or(&fleet, Duration::from_secs(30));
@@ -573,13 +573,13 @@ fn child_exit_without_settling_is_an_error_with_the_stderr_tail() {
 fn missing_pi_binary_is_a_spawn_error() {
     let mut fleet = Fleet::new("pf-nopi-");
     fleet.write_state();
-    let mut command = Command::new(assert_cmd::cargo_bin!("parl"));
+    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
         .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.parl_dir)
+        .arg(&fleet.pilotfish_dir)
         .args(["--run", &fleet.run_id])
-        .env("PARL_PI_BIN", "/nonexistent/pi-binary")
-        .env("PARL_DIR", &fleet.parl_dir)
+        .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
+        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
         .stdin(Stdio::null());
     fleet.monitor = Some(command.spawn().unwrap());
     let state = settled_or(&fleet, Duration::from_secs(30));
@@ -833,7 +833,7 @@ fn the_monitor_passes_the_materialized_extension_and_skill_to_pi() {
     let argv: Vec<String> =
         serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
     assert_eq!(&argv[..2], &["--mode".to_string(), "rpc".to_string()]);
-    let paths = FleetPaths::new(&fleet.parl_dir);
+    let paths = FleetPaths::new(&fleet.pilotfish_dir);
     // The extension and skill were materialized into the fleet dir.
     let extension = paths.pi_extension();
     let skill = paths.pi_skill();
@@ -872,12 +872,12 @@ fn the_monitor_passes_the_materialized_extension_and_skill_to_pi() {
         "the skill keeps the report template"
     );
     assert!(
-        skill_md.contains("$PARL_DIR/runs/$PARL_RUN/report.md"),
-        "the skill targets the PARL layout"
+        skill_md.contains("$PILOTFISH_DIR/runs/$PILOTFISH_RUN/report.md"),
+        "the skill targets the PILOTFISH layout"
     );
-    // The extension speaks the PARL layout.
+    // The extension speaks the PILOTFISH layout.
     let extension_ts = std::fs::read_to_string(&extension).unwrap();
-    assert!(extension_ts.contains("PARL_RUN"), "env names");
+    assert!(extension_ts.contains("PILOTFISH_RUN"), "env names");
     assert!(!extension_ts.contains("PI_FLEET"), "old env names are gone");
     assert!(
         extension_ts.contains("runs/${runId}/report.md"),
@@ -1111,13 +1111,13 @@ fn a_confirm_dialog_answer_maps_to_confirmed() {
 fn spawn_failures_are_diagnosed_in_pi_log() {
     let mut fleet = Fleet::new("pf-pilog-");
     fleet.write_state();
-    let mut command = Command::new(assert_cmd::cargo_bin!("parl"));
+    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
     command
         .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.parl_dir)
+        .arg(&fleet.pilotfish_dir)
         .args(["--run", &fleet.run_id])
-        .env("PARL_PI_BIN", "/nonexistent/pi-binary")
-        .env("PARL_DIR", &fleet.parl_dir)
+        .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
+        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
         .stdin(Stdio::null());
     fleet.monitor = Some(command.spawn().unwrap());
     settled_or(&fleet, Duration::from_secs(30));
@@ -1133,7 +1133,7 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
     let fleet = Fleet::new("pf-json-");
     fleet.write_state();
     let mut state = fleet.state();
-    state.available_models = vec![parl::fleet::run::WorkerModel {
+    state.available_models = vec![pilotfish::fleet::run::WorkerModel {
         provider: "fakeprovider".into(),
         id: "glm-5.3".into(),
         name: Some("GLM 5.3".into()),
@@ -1141,13 +1141,13 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
         context_window: None,
         cost: None,
     }];
-    state.pending_dialog = Some(parl::fleet::run::PendingDialog {
+    state.pending_dialog = Some(pilotfish::fleet::run::PendingDialog {
         id: "u1".into(),
         method: "select".into(),
         question: "Pick one".into(),
         options: Some(vec!["a".into()]),
         context: None,
-        asked_at: parl::util::now_iso(),
+        asked_at: pilotfish::util::now_iso(),
     });
     run::save_state(&fleet.run_dir, &state).unwrap();
     let raw: Value =
@@ -1162,8 +1162,8 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
     assert!(loaded.available_models.is_empty());
     assert_eq!(loaded.pending_dialog.unwrap().method, "select");
     // With the fleet cache present, loading sources the catalogue from it.
-    let cache = parl::fleet::run::PiCache {
-        available_models: vec![parl::fleet::run::WorkerModel {
+    let cache = pilotfish::fleet::run::PiCache {
+        available_models: vec![pilotfish::fleet::run::WorkerModel {
             provider: "fakeprovider".into(),
             id: "glm-5.3".into(),
             name: Some("GLM 5.3".into()),
@@ -1172,9 +1172,9 @@ fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
             cost: None,
         }],
         commands: Vec::new(),
-        ..parl::fleet::run::PiCache::default()
+        ..pilotfish::fleet::run::PiCache::default()
     };
-    run::write_pi_cache(&fleet.parl_dir, &cache).unwrap();
+    run::write_pi_cache(&fleet.pilotfish_dir, &cache).unwrap();
     let loaded = run::load_state(&fleet.run_dir).unwrap();
     assert_eq!(loaded.available_models.len(), 1);
     assert_eq!(loaded.available_models[0].id, "glm-5.3");

@@ -64,9 +64,9 @@ pub struct OrchestratorClientOptions {
     /// The binary the monitor is spawned from; defaults to this executable.
     pub monitor_bin: Option<PathBuf>,
     /// Extra environment for the spawned monitor, on top of ours (tests point
-    /// `PARL_CLAUDE_BIN` at a scripted stand-in).
+    /// `PILOTFISH_CLAUDE_BIN` at a scripted stand-in).
     pub monitor_env: Option<HashMap<String, String>>,
-    /// The user config dir (`~/.parl`) whose `[orchestrator] model` is the
+    /// The user config dir (`~/.pilotfish`) whose `[orchestrator] model` is the
     /// fallback for a monitor this client has to start, under the explicit
     /// option and any persisted launch record. `None` reads the ambient user
     /// dir; tests set it so nothing resolves a real home.
@@ -514,7 +514,7 @@ impl OrchestratorClient {
         }
         // The model, most specific wins: the explicit option, then the
         // session's persisted launch record (the project layer), then
-        // `~/.parl/config.toml`, then claude's own default. The resolved
+        // `~/.pilotfish/config.toml`, then claude's own default. The resolved
         // value is what the monitor's boot reads back from the launch record.
         let ambient_user_dir = crate::paths::user_dir();
         let user_config_dir = self
@@ -555,7 +555,9 @@ impl OrchestratorClient {
         // looking alive.
         let binary = match &self.options.monitor_bin {
             Some(binary) => binary.clone(),
-            None => std::env::current_exe().context("locate the parl binary for the monitor")?,
+            None => {
+                std::env::current_exe().context("locate the pilotfish binary for the monitor")?
+            }
         };
         let log = std::fs::OpenOptions::new()
             .create(true)
@@ -625,7 +627,7 @@ mod tests {
     fn records_read_before_anything_subscribes_are_held_then_flushed() {
         let tmp = tempfile::tempdir().unwrap();
         let client = OrchestratorClient::new(OrchestratorClientOptions::new(
-            tmp.path().join(".parl"),
+            tmp.path().join(".pilotfish"),
             tmp.path().to_path_buf(),
         ));
         let events = client.paths().orchestrator_events(&client.key);
@@ -654,7 +656,7 @@ mod tests {
     #[test]
     fn an_exit_in_a_restored_transcript_is_not_announced() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         let client = OrchestratorClient::new(OrchestratorClientOptions::new(
             fleet,
             tmp.path().to_path_buf(),
@@ -708,7 +710,7 @@ mod tests {
     #[test]
     fn pending_requests_are_reannounced_to_a_console_that_attaches_later() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         let client = OrchestratorClient::new(OrchestratorClientOptions::new(
             fleet.clone(),
             tmp.path().to_path_buf(),
@@ -790,9 +792,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_monitor_records_the_most_specific_orchestrator_model() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         let user_root = tmp.path().join("user");
-        let user_dir = user_root.join(".parl");
+        let user_dir = user_root.join(".pilotfish");
         std::fs::create_dir_all(&user_dir).unwrap();
         std::fs::write(
             user_dir.join("config.toml"),
@@ -826,7 +828,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Nothing persisted anywhere else: the config supplies the default.
-        let fresh = tmp.path().join(".parl-2");
+        let fresh = tmp.path().join(".pilotfish-2");
         let client = monitor_client(&fresh, user, None);
         client.spawn_monitor().unwrap();
         let store = crate::orch::session::load(&fresh).unwrap();

@@ -19,7 +19,7 @@ use crate::util::now_ms;
 use super::{CommandResult, fail, ok, print_result, resolve_fleet_dir_with_env};
 
 /// Locate the fleet dir for `cwd` and the newest non-archived run matching
-/// `name` (a name or a full run id), with the `$PARL_DIR` value injected
+/// `name` (a name or a full run id), with the `$PILOTFISH_DIR` value injected
 /// (production passes the real environment; tests pass `None`). Shared by
 /// the whole ops layer.
 ///
@@ -30,12 +30,12 @@ use super::{CommandResult, fail, ok, print_result, resolve_fleet_dir_with_env};
 pub(crate) async fn resolve_run_with_env(
     name: &str,
     cwd: Option<&Path>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<(FleetPaths, RunRef)> {
     if name.trim().is_empty() {
         anyhow::bail!("<name> required");
     }
-    let fleet = resolve_fleet_dir_with_env(cwd, parl_dir).await?;
+    let fleet = resolve_fleet_dir_with_env(cwd, pilotfish_dir).await?;
     let target = run::find_run(fleet.paths.root(), name)?;
     Ok((fleet.paths, target))
 }
@@ -96,17 +96,17 @@ pub(crate) fn session_orchestrator_party(fleet_dir: &Path) -> Party {
 }
 
 /// The orchestrator party the CLI attributes steering to, resolved from the
-/// same `cwd`/`$PARL_DIR` the cores use — so provenance can never split
+/// same `cwd`/`$PILOTFISH_DIR` the cores use — so provenance can never split
 /// from where the envelope lands — falling back to the default session when
 /// the fleet cannot be resolved.
 async fn cli_orchestrator_party(cwd: Option<&Path>) -> Party {
-    cli_orchestrator_party_with_env(cwd, super::ambient_parl_dir().as_deref()).await
+    cli_orchestrator_party_with_env(cwd, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`cli_orchestrator_party`] with the `$PARL_DIR` value injected, so tests
+/// [`cli_orchestrator_party`] with the `$PILOTFISH_DIR` value injected, so tests
 /// never resolve an ambient variable into an unrelated fleet.
-async fn cli_orchestrator_party_with_env(cwd: Option<&Path>, parl_dir: Option<&str>) -> Party {
-    let fleet = resolve_fleet_dir_with_env(cwd, parl_dir).await;
+async fn cli_orchestrator_party_with_env(cwd: Option<&Path>, pilotfish_dir: Option<&str>) -> Party {
+    let fleet = resolve_fleet_dir_with_env(cwd, pilotfish_dir).await;
     fleet
         .map(|f| session_orchestrator_party(f.paths.root()))
         .unwrap_or(Party::Orchestrator(
@@ -197,18 +197,18 @@ pub async fn send_core(
         cwd,
         message,
         source,
-        super::ambient_parl_dir().as_deref(),
+        super::ambient_pilotfish_dir().as_deref(),
     )
     .await
 }
 
-/// [`send_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`send_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn send_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     message: &str,
     source: Party,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ControlData>> {
     if message.trim().is_empty() {
         anyhow::bail!("send: message required after \"--\"");
@@ -220,7 +220,7 @@ pub(crate) async fn send_core_with_env(
         Some(message),
         None,
         source,
-        parl_dir,
+        pilotfish_dir,
     )
     .await
 }
@@ -241,18 +241,18 @@ pub async fn followup_core(
         cwd,
         message,
         source,
-        super::ambient_parl_dir().as_deref(),
+        super::ambient_pilotfish_dir().as_deref(),
     )
     .await
 }
 
-/// [`followup_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`followup_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn followup_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     message: &str,
     source: Party,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ControlData>> {
     if message.trim().is_empty() {
         anyhow::bail!("followup: message required after \"--\"");
@@ -264,7 +264,7 @@ pub(crate) async fn followup_core_with_env(
         Some(message),
         None,
         source,
-        parl_dir,
+        pilotfish_dir,
     )
     .await
 }
@@ -288,19 +288,19 @@ pub async fn answer_core(
         question_id,
         message,
         source,
-        super::ambient_parl_dir().as_deref(),
+        super::ambient_pilotfish_dir().as_deref(),
     )
     .await
 }
 
-/// [`answer_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`answer_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn answer_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     question_id: Option<&str>,
     message: &str,
     source: Party,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ControlData>> {
     if message.trim().is_empty() {
         anyhow::bail!("answer: message required after \"--\"");
@@ -312,7 +312,7 @@ pub(crate) async fn answer_core_with_env(
         Some(message),
         question_id,
         source,
-        parl_dir,
+        pilotfish_dir,
     )
     .await
 }
@@ -327,17 +327,26 @@ pub async fn stop_core(
     cwd: Option<&Path>,
     source: Party,
 ) -> anyhow::Result<CommandResult<ControlData>> {
-    stop_core_with_env(name, cwd, source, super::ambient_parl_dir().as_deref()).await
+    stop_core_with_env(name, cwd, source, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`stop_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`stop_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn stop_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     source: Party,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ControlData>> {
-    control_core_with_env(SteerKind::Stop, name, cwd, None, None, source, parl_dir).await
+    control_core_with_env(
+        SteerKind::Stop,
+        name,
+        cwd,
+        None,
+        None,
+        source,
+        pilotfish_dir,
+    )
+    .await
 }
 
 /// The question id an `answer` targets: the explicit id, else the pending
@@ -351,7 +360,7 @@ fn answer_target_id(state: &run::RunState, question_id: Option<&str>) -> Option<
 
 /// The shared steering path: refuse terminal runs with the resume hint,
 /// target `answer` at the explicit or pending question/dialog id, append the
-/// envelope, and report the queueing. The `$PARL_DIR` value is injected by
+/// envelope, and report the queueing. The `$PILOTFISH_DIR` value is injected by
 /// the per-kind wrappers; `None` means the variable is unset.
 async fn control_core_with_env(
     kind: SteerKind,
@@ -360,9 +369,9 @@ async fn control_core_with_env(
     message: Option<&str>,
     question_id: Option<&str>,
     source: Party,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ControlData>> {
-    let (paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let state = &target.state;
     let derived = run::derive_status(state, run::is_alive, now_ms());
     if derived.is_terminal() {
@@ -468,7 +477,7 @@ mod tests {
     }
 
     /// A fleet dir with one run whose state is already on disk. The fleet
-    /// dir anchors at `<dir>/.parl`, exactly like a non-git target.
+    /// dir anchors at `<dir>/.pilotfish`, exactly like a non-git target.
     fn fleet_with_run(
         name: &str,
         status: RunStatus,
@@ -514,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_appends_a_steer_envelope_and_queues() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         let result = send_core_with_env("auth", Some(&dir), "use tabs", orch(), None)
             .await
             .unwrap();
@@ -537,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn followup_and_stop_append_their_envelope_types() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         followup_core_with_env("auth", Some(&dir), "then fmt", orch(), None)
             .await
             .unwrap();
@@ -560,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_messages_are_refused_before_touching_the_run() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         for (core, expect) in [
             (
                 send_core_with_env("auth", Some(&dir), "  ", orch(), None).await,
@@ -584,7 +593,7 @@ mod tests {
 
     #[tokio::test]
     async fn steering_a_terminal_run_refuses_with_the_resume_hint() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Settled, None);
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Settled, None);
         for core in [
             send_core_with_env("auth", Some(&dir), "m", orch(), None).await,
             followup_core_with_env("auth", Some(&dir), "m", orch(), None).await,
@@ -594,7 +603,7 @@ mod tests {
             let err = result.err.join("\n");
             assert!(err.contains("is settled — steering refused"), "{err}");
             assert!(
-                err.contains("parl spawn auth-2 --session"),
+                err.contains("pilotfish spawn auth-2 --session"),
                 "carries the copy-pasteable resume command: {err}"
             );
         }
@@ -613,7 +622,7 @@ mod tests {
 
     #[tokio::test]
     async fn answer_needs_a_question_dialog_or_explicit_id() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         let refused = answer_core_with_env("auth", Some(&dir), None, "argon2", orch(), None)
             .await
             .unwrap();
@@ -628,7 +637,7 @@ mod tests {
 
     #[tokio::test]
     async fn answer_targets_the_pending_question_by_default() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         let run_dir = paths.run_dir(&run_id);
         let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
         state.pending_question = Some(PendingQuestion {
@@ -660,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn answer_falls_back_to_the_pending_dialog_and_explicit_ids_win() {
-        let (dir, paths, run_id) = fleet_with_run("parl-steer-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
         let run_dir = paths.run_dir(&run_id);
         let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
         state.pending_dialog = Some(PendingDialog {
@@ -704,7 +713,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_runs_and_empty_names_are_errors() {
-        let dir = tmp_dir("parl-steer-none-");
+        let dir = tmp_dir("pilotfish-steer-none-");
         let err = send_core_with_env("ghost", Some(&dir), "m", orch(), None)
             .await
             .unwrap_err()
@@ -719,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_cli_attributes_steering_to_the_fleets_acting_session() {
-        let dir = tmp_dir("parl-steer-session-");
+        let dir = tmp_dir("pilotfish-steer-session-");
         let paths = FleetPaths::new(dir.join(crate::paths::STATE_DIR_NAME));
         let run_id = "auth-20260828141530";
         let run_dir = paths.run_dir(run_id);
@@ -746,7 +755,7 @@ mod tests {
         state.pid = Some(std::process::id().cast_signed());
         crate::fleet::run::save_state(&run_dir, &state).unwrap();
         // fleet.json names the fleet's session; the wrapper attributes
-        // the envelope to *it*, not the default. The `$PARL_DIR` value is
+        // the envelope to *it*, not the default. The `$PILOTFISH_DIR` value is
         // injected as `None`, so the ambient environment can never redirect
         // this test's resolution.
         let mut store = crate::orch::session::FleetSessions::new();
@@ -764,7 +773,7 @@ mod tests {
         assert_eq!(envelopes[0].from, Party::Orchestrator(session));
         // Without a fleet.json the wrapper falls back to the default
         // session's canonical on-wire spelling.
-        let dir2 = tmp_dir("parl-steer-nosession-");
+        let dir2 = tmp_dir("pilotfish-steer-nosession-");
         let paths2 = FleetPaths::new(dir2.join(crate::paths::STATE_DIR_NAME));
         let run_dir2 = paths2.run_dir(run_id);
         std::fs::create_dir_all(&run_dir2).unwrap();

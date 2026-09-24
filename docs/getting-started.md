@@ -9,20 +9,20 @@
 ## Installation
 
 ```bash
-cargo install --locked --git https://github.com/SkymanOne/parl   # or, from a clone:
-cargo install --locked --path .                                  # or: cargo build --release  →  target/release/parl
-parl --help                                                      # verify the installation
+cargo install --locked --git https://github.com/SkymanOne/pilotfish   # or, from a clone:
+cargo install --locked --path .                                  # or: cargo build --release  →  target/release/pilotfish
+pilotfish --help                                                      # verify the installation
 ```
 
-`--locked` builds against the versions in `Cargo.lock`. Without it, Cargo resolves the newest compatible versions of every dependency, which have not necessarily been tested with `parl`.
+`--locked` builds against the versions in `Cargo.lock`. Without it, Cargo resolves the newest compatible versions of every dependency, which have not necessarily been tested with `pilotfish`.
 
-No installation is needed on the pi side. The worker extension and the report skill are embedded in the binary and written to `<repo>/.parl/pi/` whenever a worker starts, so each worker always runs the current version, regardless of whether the checkout `parl` was built from still exists.
+No installation is needed on the pi side. The worker extension and the report skill are embedded in the binary and written to `<repo>/.pilotfish/pi/` whenever a worker starts, so each worker always runs the current version, regardless of whether the checkout `pilotfish` was built from still exists.
 
 ## First run
 
 ```bash
 cd your-repo
-parl
+pilotfish
 ```
 
 Describe the task to the orchestrator, for example: *"Add token refresh to the auth module and update the tests."* It writes the briefs, spawns the workers, and reports as each one finishes.
@@ -43,7 +43,7 @@ These choices are recorded, so a restarted orchestrator resumes with the same mo
 
 ## Closing and reopening
 
-Quitting closes only the console. Orchestrators and workers are detached processes that keep their state on disk, so `parl` reopens the most recently used orchestrator session, with its transcript replayed and any turn in progress still running. A permission prompt raised while no console was open is still waiting when the console returns.
+Quitting closes only the console. Orchestrators and workers are detached processes that keep their state on disk, so `pilotfish` reopens the most recently used orchestrator session, with its transcript replayed and any turn in progress still running. A permission prompt raised while no console was open is still waiting when the console returns.
 
 If the orchestrator is no longer running — after a reboot or a `/shutdown` — a new one resumes the same claude session beneath the existing transcript, and a line marks the point of resumption. `--fresh` starts over.
 
@@ -51,11 +51,11 @@ If the orchestrator is no longer running — after a reboot or a `/shutdown` —
 
 The orchestrator coordinates work and does not write code: `Edit`, `Write` and `NotebookEdit` are disabled for it. It may read the repository and run read-only git commands without approval; anything else raises a prompt. Merge conflicts are returned to the worker as a rebase brief rather than resolved in place.
 
-Its brief is embedded in the binary, and no file is copied into your project. To use a different brief, set `$PARL_PROMPT` to a file path, or place one at `<repo>/.parl/orchestrator.md` or `~/.parl/orchestrator.md`. The brief the orchestrator actually received, with placeholders filled in, is written to `.parl/orchestrators/<session>/prompt.md` (one directory per orchestrator session).
+Its brief is embedded in the binary, and no file is copied into your project. To use a different brief, set `$PILOTFISH_PROMPT` to a file path, or place one at `<repo>/.pilotfish/orchestrator.md` or `~/.pilotfish/orchestrator.md`. The brief the orchestrator actually received, with placeholders filled in, is written to `.pilotfish/orchestrators/<session>/prompt.md` (one directory per orchestrator session).
 
 ## User configuration
 
-User-level defaults live in `~/.parl/config.toml` (`$PARL_HOME` overrides the directory). A missing or empty file means defaults; a malformed one is reported as an error naming the file.
+User-level defaults live in `~/.pilotfish/config.toml` (`$PILOTFISH_HOME` overrides the directory). A missing or empty file means defaults; a malformed one is reported as an error naming the file.
 
 | Setting | Meaning |
 | --- | --- |
@@ -71,4 +71,4 @@ Routing is off unless enabled. `/routing` in the console enables it, edits the s
 
 ## State
 
-State is kept in `<repo>/.parl/`, which `parl` creates and adds to `.gitignore`. It serves as an audit trail — reports, transcripts, mailboxes and raw logs, one directory per run — and nothing other than `parl` needs to read it. The layout is documented in [AGENTS.md](../AGENTS.md).
+State is kept in `<repo>/.pilotfish/`, which `pilotfish` creates and adds to `.gitignore`. It serves as an audit trail — reports, transcripts, mailboxes and raw logs, one directory per run — and nothing other than `pilotfish` needs to read it. The layout is documented in [AGENTS.md](../AGENTS.md).

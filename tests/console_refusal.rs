@@ -1,5 +1,5 @@
 //! The console's non-interactive refusal. A worker session has no TTY, and
-//! `parl` must meet that with the friendly guidance (exit 1, nothing left
+//! `pilotfish` must meet that with the friendly guidance (exit 1, nothing left
 //! behind) instead of failing raw mode later with a bare io error.
 
 #![allow(clippy::unwrap_used)]
@@ -7,13 +7,13 @@
 #[test]
 fn the_console_refuses_a_non_interactive_terminal_with_guidance() {
     let tmp = tempfile::tempdir().unwrap();
-    // CARGO_BIN_EXE_parl is the built binary; neither stdio end is a
+    // CARGO_BIN_EXE_pilotfish is the built binary; neither stdio end is a
     // terminal by construction, whatever the test harness itself has
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_parl"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_pilotfish"))
         .arg("tui")
-        // Deliberately exercises the `<cwd>/.parl` fallback below, so the
+        // Deliberately exercises the `<cwd>/.pilotfish` fallback below, so the
         // ambient variable is removed rather than pinned.
-        .env_remove("PARL_DIR")
+        .env_remove("PILOTFISH_DIR")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -23,11 +23,11 @@ fn the_console_refuses_a_non_interactive_terminal_with_guidance() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "stdout: {stderr}");
     assert!(stderr.contains("interactive terminal"), "{stderr}");
-    assert!(stderr.contains("parl spawn"), "{stderr}");
-    assert!(stderr.contains("parl status"), "{stderr}");
+    assert!(stderr.contains("pilotfish spawn"), "{stderr}");
+    assert!(stderr.contains("pilotfish status"), "{stderr}");
     // the refusal comes before any fleet state is created
     assert!(
-        !tmp.path().join(".parl").exists(),
-        "the refusal must not leave a .parl behind"
+        !tmp.path().join(".pilotfish").exists(),
+        "the refusal must not leave a .pilotfish behind"
     );
 }

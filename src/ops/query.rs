@@ -120,7 +120,7 @@ pub async fn wait(
     Ok(print_result(wait_core(name, cwd, timeout_secs).await?))
 }
 
-/// Print the tail of one worker's transcript (the live console is `parl`).
+/// Print the tail of one worker's transcript (the live console is `pilotfish`).
 ///
 /// # Errors
 ///
@@ -177,18 +177,25 @@ pub async fn status_core(
     json: bool,
     all: bool,
 ) -> anyhow::Result<CommandResult<StatusData>> {
-    status_core_with_env(name, cwd, json, all, super::ambient_parl_dir().as_deref()).await
+    status_core_with_env(
+        name,
+        cwd,
+        json,
+        all,
+        super::ambient_pilotfish_dir().as_deref(),
+    )
+    .await
 }
 
-/// [`status_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`status_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn status_core_with_env(
     name: Option<&str>,
     cwd: Option<&Path>,
     json: bool,
     all: bool,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<StatusData>> {
-    let fleet = super::resolve_fleet_dir_with_env(cwd, parl_dir).await?;
+    let fleet = super::resolve_fleet_dir_with_env(cwd, pilotfish_dir).await?;
     let fleet_dir = fleet.paths.root().to_path_buf();
     if let Some(name) = name.filter(|n| !n.trim().is_empty()) {
         let target = run::find_run(&fleet_dir, name)?;
@@ -346,19 +353,19 @@ pub async fn wait_core(
         name,
         cwd,
         timeout_secs,
-        super::ambient_parl_dir().as_deref(),
+        super::ambient_pilotfish_dir().as_deref(),
     )
     .await
 }
 
-/// [`wait_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`wait_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn wait_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     timeout_secs: u64,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<WaitData>> {
-    let (_paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (_paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let timeout = if timeout_secs > 0 { timeout_secs } else { 600 };
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout);
     loop {
@@ -405,17 +412,17 @@ pub async fn output_core(
     cwd: Option<&Path>,
     tail: Option<usize>,
 ) -> anyhow::Result<CommandResult<TextData>> {
-    output_core_with_env(name, cwd, tail, super::ambient_parl_dir().as_deref()).await
+    output_core_with_env(name, cwd, tail, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`output_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`output_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn output_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     tail: Option<usize>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<TextData>> {
-    let (paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let Some(n) = tail.filter(|&n| n > 0) else {
         let text = target
             .state
@@ -463,17 +470,17 @@ pub async fn logs_core(
     cwd: Option<&Path>,
     tail: Option<usize>,
 ) -> anyhow::Result<CommandResult<TextData>> {
-    logs_core_with_env(name, cwd, tail, super::ambient_parl_dir().as_deref()).await
+    logs_core_with_env(name, cwd, tail, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`logs_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`logs_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn logs_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     tail: Option<usize>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<TextData>> {
-    let (paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let n = tail.filter(|&n| n > 0).unwrap_or(50);
     let text = tail_text(&paths.pi_log(&target.run_id), n);
     if text.trim().is_empty() {
@@ -493,16 +500,16 @@ pub async fn report_core(
     name: &str,
     cwd: Option<&Path>,
 ) -> anyhow::Result<CommandResult<ReportData>> {
-    report_core_with_env(name, cwd, super::ambient_parl_dir().as_deref()).await
+    report_core_with_env(name, cwd, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`report_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`report_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 pub(crate) async fn report_core_with_env(
     name: &str,
     cwd: Option<&Path>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<ReportData>> {
-    let (paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let result = crate::fleet::report::read_report(paths.root(), &target.state);
     let Some(text) = result.text().map(str::to_string) else {
         return Ok(fail(
@@ -533,7 +540,7 @@ pub(crate) async fn report_core_with_env(
 }
 
 /// A static tail of one worker's transcript, rebuilt from `events.jsonl`.
-/// Live viewing and steering live in the `parl` console.
+/// Live viewing and steering live in the `pilotfish` console.
 ///
 /// # Errors
 ///
@@ -543,17 +550,17 @@ pub async fn attach_core(
     cwd: Option<&Path>,
     tail: Option<usize>,
 ) -> anyhow::Result<CommandResult<Vec<String>>> {
-    attach_core_with_env(name, cwd, tail, super::ambient_parl_dir().as_deref()).await
+    attach_core_with_env(name, cwd, tail, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`attach_core`] with the `$PARL_DIR` value injected (tests pass `None`).
+/// [`attach_core`] with the `$PILOTFISH_DIR` value injected (tests pass `None`).
 async fn attach_core_with_env(
     name: &str,
     cwd: Option<&Path>,
     tail: Option<usize>,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<Vec<String>>> {
-    let (paths, target) = resolve_run_with_env(name, cwd, parl_dir).await?;
+    let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let n = tail.filter(|&n| n > 0).unwrap_or(40);
     let lines = transcript_tail(&paths.run_events(&target.run_id), n);
     if lines.is_empty() {
@@ -562,7 +569,7 @@ async fn attach_core_with_env(
     Ok(CommandResult {
         code: ExitCode::Ok,
         out: lines.clone(),
-        err: vec!["(static tail — run `parl` for the live console)".to_string()],
+        err: vec!["(static tail — run `pilotfish` for the live console)".to_string()],
         data: lines,
     })
 }
@@ -751,7 +758,7 @@ mod tests {
         dir
     }
 
-    /// A fleet dir anchored at `<dir>/.parl` with one run on disk.
+    /// A fleet dir anchored at `<dir>/.pilotfish` with one run on disk.
     fn fleet_with_run(
         name: &str,
         status: RunStatus,
@@ -788,7 +795,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_fleet_view_shows_the_acting_sessions_runs_and_all_shows_everything() {
-        let dir = tmp_dir("parl-query-scope-");
+        let dir = tmp_dir("pilotfish-query-scope-");
         let paths = crate::paths::FleetPaths::new(dir.join(crate::paths::STATE_DIR_NAME));
         let other = uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
         let write = |run_id: &str, name: &str, status: RunStatus, owner: Option<uuid::Uuid>| {
@@ -857,7 +864,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_on_an_empty_fleet_says_so_without_printing() {
-        let dir = tmp_dir("parl-query-");
+        let dir = tmp_dir("pilotfish-query-");
         let result = status_core_with_env(None, Some(&dir), false, false, None)
             .await
             .unwrap();
@@ -869,7 +876,8 @@ mod tests {
 
     #[tokio::test]
     async fn single_run_status_is_json_with_the_derived_status_and_session_file() {
-        let (dir, paths, run_id) = fleet_with_run("parl-query-solo-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) =
+            fleet_with_run("pilotfish-query-solo-", RunStatus::Running, Some(1));
         std::fs::create_dir_all(paths.run_session_dir(&run_id)).unwrap();
         std::fs::write(paths.run_session_dir(&run_id).join("s1.jsonl"), "{}\n").unwrap();
         // A pending question makes the derived view `blocked`.
@@ -902,7 +910,8 @@ mod tests {
 
     #[tokio::test]
     async fn fleet_table_and_json_hide_archived_unless_asked() {
-        let (dir, paths, _run_id) = fleet_with_run("parl-query-fleet-", RunStatus::Settled, None);
+        let (dir, paths, _run_id) =
+            fleet_with_run("pilotfish-query-fleet-", RunStatus::Settled, None);
         // A second, archived run.
         let archived_id = "old-20260828141531";
         let old_dir = paths.run_dir(archived_id);
@@ -970,7 +979,7 @@ mod tests {
         assert_eq!(parsed[0]["status"], "settled");
 
         // An empty fleet in json mode is an empty array.
-        let empty_dir = tmp_dir("parl-query-empty-");
+        let empty_dir = tmp_dir("pilotfish-query-empty-");
         let empty = status_core_with_env(None, Some(&empty_dir), true, false, None)
             .await
             .unwrap();
@@ -979,7 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn output_prints_text_then_tool_trail() {
-        let (dir, paths, run_id) = fleet_with_run("parl-query-out-", RunStatus::Settled, None);
+        let (dir, paths, run_id) = fleet_with_run("pilotfish-query-out-", RunStatus::Settled, None);
         let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
         state.last_assistant_text = Some("Working: wrote hello.txt".into());
         run::save_state(&paths.run_dir(&run_id), &state).unwrap();
@@ -999,7 +1008,7 @@ mod tests {
         assert_eq!(trail.out, vec!["bash: hi"]);
 
         // No events at all: the placeholder, not an error.
-        let (dir2, _p2, _r2) = fleet_with_run("parl-query-out2-", RunStatus::Running, Some(1));
+        let (dir2, _p2, _r2) = fleet_with_run("pilotfish-query-out2-", RunStatus::Running, Some(1));
         let trail2 = output_core_with_env("auth", Some(&dir2), Some(5), None)
             .await
             .unwrap();
@@ -1008,7 +1017,8 @@ mod tests {
 
     #[tokio::test]
     async fn logs_tails_pi_log_and_says_when_there_is_none() {
-        let (dir, paths, run_id) = fleet_with_run("parl-query-logs-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) =
+            fleet_with_run("pilotfish-query-logs-", RunStatus::Running, Some(1));
         let log = paths.pi_log(&run_id);
         for i in 0..10 {
             crate::util::append_text(&log, &format!("line {i}\n")).unwrap();
@@ -1019,7 +1029,8 @@ mod tests {
         assert_eq!(result.code, ExitCode::Ok);
         assert_eq!(result.out, vec!["line 7\nline 8\nline 9"]);
 
-        let (dir2, _p2, _r2) = fleet_with_run("parl-query-logs2-", RunStatus::Running, Some(1));
+        let (dir2, _p2, _r2) =
+            fleet_with_run("pilotfish-query-logs2-", RunStatus::Running, Some(1));
         let none = logs_core_with_env("auth", Some(&dir2), None, None)
             .await
             .unwrap();
@@ -1028,7 +1039,8 @@ mod tests {
 
     #[tokio::test]
     async fn report_exit_2_without_anything_and_appendix_when_steered() {
-        let (dir, _paths, _run_id) = fleet_with_run("parl-query-rep1-", RunStatus::Settled, None);
+        let (dir, _paths, _run_id) =
+            fleet_with_run("pilotfish-query-rep1-", RunStatus::Settled, None);
         let missing = report_core_with_env("auth", Some(&dir), None)
             .await
             .unwrap();
@@ -1036,7 +1048,8 @@ mod tests {
         assert!(missing.err[0].contains("no report file and no captured output for auth"));
 
         // With a report file the appendix is appended after it.
-        let (dir, paths, run_id) = fleet_with_run("parl-query-rep2-", RunStatus::Settled, None);
+        let (dir, paths, run_id) =
+            fleet_with_run("pilotfish-query-rep2-", RunStatus::Settled, None);
         std::fs::write(
             crate::fleet::report::report_path(paths.root(), &run_id),
             "# Fleet Report\n\nDone.\n",
@@ -1069,7 +1082,8 @@ mod tests {
     async fn wait_settles_times_out_and_reports_bad_ends() {
         // Settle after 300 ms; the pid (our own process) stays alive, so the
         // run stays Running until then.
-        let (dir, paths, run_id) = fleet_with_run("parl-query-wait-", RunStatus::Running, Some(1));
+        let (dir, paths, run_id) =
+            fleet_with_run("pilotfish-query-wait-", RunStatus::Running, Some(1));
         let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
         state.pid = Some(std::process::id().cast_signed());
         run::save_state(&paths.run_dir(&run_id), &state).unwrap();
@@ -1090,7 +1104,8 @@ mod tests {
         assert_eq!(settled.data.status.as_deref(), Some("settled"));
 
         // Timeout: run stays running with a live pid.
-        let (dir2, paths2, run2) = fleet_with_run("parl-query-wait2-", RunStatus::Running, Some(1));
+        let (dir2, paths2, run2) =
+            fleet_with_run("pilotfish-query-wait2-", RunStatus::Running, Some(1));
         let mut state = run::load_state(&paths2.run_dir(&run2)).unwrap();
         state.pid = Some(std::process::id().cast_signed());
         run::save_state(&paths2.run_dir(&run2), &state).unwrap();
@@ -1106,7 +1121,7 @@ mod tests {
         assert_eq!(timed_out.data.status, None);
 
         // Stopped run: exit 4.
-        let (dir3, _p3, _r3) = fleet_with_run("parl-query-wait3-", RunStatus::Stopped, None);
+        let (dir3, _p3, _r3) = fleet_with_run("pilotfish-query-wait3-", RunStatus::Stopped, None);
         let stopped = wait_core_with_env("auth", Some(&dir3), 5, None)
             .await
             .unwrap();
@@ -1114,7 +1129,8 @@ mod tests {
         assert_eq!(stopped.out, vec!["auth stopped"]);
 
         // A dead run (pid gone mid-run) also reads terminal and bad.
-        let (dir4, paths4, run4) = fleet_with_run("parl-query-wait4-", RunStatus::Running, Some(1));
+        let (dir4, paths4, run4) =
+            fleet_with_run("pilotfish-query-wait4-", RunStatus::Running, Some(1));
         let mut state = run::load_state(&paths4.run_dir(&run4)).unwrap();
         state.pid = Some(i32::MAX - 1); // not our pid, not alive
         run::save_state(&paths4.run_dir(&run4), &state).unwrap();
@@ -1127,7 +1143,8 @@ mod tests {
 
     #[tokio::test]
     async fn attach_renders_the_transcript_tail() {
-        let (dir, paths, run_id) = fleet_with_run("parl-query-attach-", RunStatus::Settled, None);
+        let (dir, paths, run_id) =
+            fleet_with_run("pilotfish-query-attach-", RunStatus::Settled, None);
         let lines = [
             r#"{"type":"task_prompt","brief":"make the thing"}"#,
             r#"{"type":"tool_execution_start","toolName":"bash","args":{"command":"echo hi"}}"#,
@@ -1149,7 +1166,7 @@ mod tests {
         assert!(text.contains("line one"), "{text}");
         assert!(text.contains("● settled"), "{text}");
         assert!(
-            result.err[0].contains("static tail — run `parl` for the live console"),
+            result.err[0].contains("static tail — run `pilotfish` for the live console"),
             "{}",
             result.err[0]
         );
@@ -1160,7 +1177,8 @@ mod tests {
         assert_eq!(short.out.len(), 1);
 
         // No events at all: the placeholder note.
-        let (dir2, _p2, _r2) = fleet_with_run("parl-query-attach2-", RunStatus::Starting, None);
+        let (dir2, _p2, _r2) =
+            fleet_with_run("pilotfish-query-attach2-", RunStatus::Starting, None);
         let none = attach_core_with_env("auth", Some(&dir2), None, None)
             .await
             .unwrap();
@@ -1170,7 +1188,7 @@ mod tests {
     #[test]
     fn derived_view_is_taken_not_reimplemented() {
         let (_dir, paths, run_id) =
-            fleet_with_run("parl-query-derive-", RunStatus::Running, Some(1));
+            fleet_with_run("pilotfish-query-derive-", RunStatus::Running, Some(1));
         let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
         state.pid = Some(1);
         assert_eq!(derived_json(&state)["status"], "running");

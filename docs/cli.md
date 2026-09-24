@@ -23,11 +23,11 @@ Exit codes: 0 success, 1 refusal or error, 2 no report, 3 wait timed out, 4 the 
 
 ## Routing a brief
 
-With routing enabled — through `/routing` in the console, `[routing] enabled = true` in `~/.parl/config.toml`, or `--route` on a single spawn — a `spawn` without `--model` has its model and reasoning level chosen from its brief. The decisions come from TypeSafe's System One (Jev) and are made in two requests. The spawn prints what was decided and why, and records it on the run as `routing`.
+With routing enabled — through `/routing` in the console, `[routing] enabled = true` in `~/.pilotfish/config.toml`, or `--route` on a single spawn — a `spawn` without `--model` has its model and reasoning level chosen from its brief. The decisions come from TypeSafe's System One (Jev) and are made in two requests. The spawn prints what was decided and why, and records it on the run as `routing`.
 
 **1. The model.** Jev is asked which candidate gives the best result for its cost on the brief. Each candidate is described with its context window, its price per million tokens, how many times the cheapest candidate it costs (input and output blended 3:1), and its reasoning levels. When a cheaper candidate is within 0.05 of Jev's pick in probability, the cheaper one is taken. The same request asks whether the brief will modify files and whether it can run alongside the workers already in flight.
 
-If Jev's confidence is below `confidence_threshold`, the choice is referred to you. The console raises a prompt listing every candidate, Jev's preference first, with its probability and price; `enter` or `1`–`9` selects one and `d` keeps the configured model. The spawn — and therefore the orchestrator's `fleet_spawn` call — waits for the answer. Without an answer within ten minutes (`$PARL_ASK_TIMEOUT_MS`), or when no console is open, the configured model is used.
+If Jev's confidence is below `confidence_threshold`, the choice is referred to you. The console raises a prompt listing every candidate, Jev's preference first, with its probability and price; `enter` or `1`–`9` selects one and `d` keeps the configured model. The spawn — and therefore the orchestrator's `fleet_spawn` call — waits for the answer. Without an answer within ten minutes (`$PILOTFISH_ASK_TIMEOUT_MS`), or when no console is open, the configured model is used.
 
 **2. The thinking level.** Once the model is known, whether chosen by Jev, by you, or by configuration, Jev chooses a reasoning level from the levels that model supports. A level the model lacks is never requested, because pi accepts such a level and then ignores it.
 
@@ -42,4 +42,4 @@ pi can offer hundreds of models, most of them from several providers, so routing
 
 Routing stays within the limits you set. An explicit `--model` is never overridden, although a reasoning level is still chosen for it unless `--thinking` is also given. A worktree is only omitted when the brief is clearly read-only. When routing is enabled but cannot decide — no key, no network, too many candidates — the spawn proceeds on the configured defaults and prints the reason.
 
-The API key is set with `/routing` in the console, which stores it in the operating system's credential store, or supplied through `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`, which take precedence when set.
+The API key is set with `/routing` in the console, which stores it in the operating system's credential store, or supplied through `$PILOTFISH_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY`, which take precedence when set.

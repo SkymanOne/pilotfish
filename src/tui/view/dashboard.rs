@@ -37,7 +37,7 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
 fn draw_header(frame: &mut Frame, area: Rect, rows: &[DashboardRow], pal: &Palette) {
     let workers = rows.len().saturating_sub(1);
     let mut spans = vec![
-        Span::styled("parl".to_string(), pal.heading()),
+        Span::styled("pilotfish".to_string(), pal.heading()),
         Span::raw(" · ".to_string()),
     ];
     if workers == 0 {
@@ -100,7 +100,7 @@ fn draw_rows(frame: &mut Frame, area: Rect, console: &Console, pal: &Palette) {
     }
 }
 
-/// The primary row: `▸ ● db    parl/db-… +12 −3   2m` — glyph, name, right
+/// The primary row: `▸ ● db    pilotfish/db-… +12 −3   2m` — glyph, name, right
 /// side. The age is always visible; the name yields for it.
 fn primary_line(row: &DashboardRow, selected: bool, width: u16, pal: &Palette) -> Line<'static> {
     let width = width as usize;

@@ -1,7 +1,7 @@
 //! The orchestrator monitor and console client driven end to end against the
 //! scripted claude stand-in (`tests/fixtures/fake-claude.mjs`), like the
 //! TypeScript `tests/orchestrator-monitor.test.ts`. The monitor runs as the
-//! real `parl orchestrator-monitor` binary, detached, exactly as the console
+//! real `pilotfish orchestrator-monitor` binary, detached, exactly as the console
 //! spawns it. Hermetic: no network, no tokens.
 
 #![allow(clippy::unwrap_used)]
@@ -13,11 +13,11 @@ use std::time::{Duration, Instant};
 
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
-use parl::fleet::run::is_alive;
-use parl::orch::client::{ClientEvent, OrchestratorClient, OrchestratorClientOptions};
-use parl::orch::monitor::load_orchestrator_state;
-use parl::orch::records::EventRecord;
-use parl::paths::FleetPaths;
+use pilotfish::fleet::run::is_alive;
+use pilotfish::orch::client::{ClientEvent, OrchestratorClient, OrchestratorClientOptions};
+use pilotfish::orch::monitor::load_orchestrator_state;
+use pilotfish::orch::records::EventRecord;
+use pilotfish::paths::FleetPaths;
 use tokio::sync::mpsc;
 
 const WAIT: Duration = Duration::from_secs(30);
@@ -46,7 +46,7 @@ impl Fixture {
     fn new(session_id: &'static str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path().to_path_buf();
-        let fleet_dir = tmp.path().join(".parl");
+        let fleet_dir = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet_dir).unwrap();
         Self {
             _tmp: tmp,
@@ -63,7 +63,7 @@ impl Fixture {
         self.client_with(fresh, HashMap::new(), None)
     }
 
-    /// A client with extra fake-claude env, and optionally a `~/.parl` of its
+    /// A client with extra fake-claude env, and optionally a `~/.pilotfish` of its
     /// own so a test can set user config without touching the real home.
     fn client_with(
         &self,
@@ -73,13 +73,13 @@ impl Fixture {
     ) -> Arc<OrchestratorClient> {
         let mut env: HashMap<String, String> = extra;
         env.insert(
-            "PARL_CLAUDE_BIN".to_string(),
+            "PILOTFISH_CLAUDE_BIN".to_string(),
             format!("node {}", fake_claude().display()),
         );
-        // The monitor must never inherit an ambient PARL_DIR: its fleet is
+        // The monitor must never inherit an ambient PILOTFISH_DIR: its fleet is
         // the one this fixture created (also passed as --fleet-dir).
         env.insert(
-            "PARL_DIR".to_string(),
+            "PILOTFISH_DIR".to_string(),
             self.fleet_dir.to_string_lossy().into_owned(),
         );
         env.insert(
@@ -91,11 +91,14 @@ impl Fixture {
             self.session_id.to_string(),
         );
         if let Some(dir) = user_dir {
-            env.insert("PARL_HOME".to_string(), dir.to_string_lossy().into_owned());
+            env.insert(
+                "PILOTFISH_HOME".to_string(),
+                dir.to_string_lossy().into_owned(),
+            );
         }
         OrchestratorClient::new(OrchestratorClientOptions {
             fresh,
-            monitor_bin: Some(assert_cmd::cargo_bin!("parl").to_path_buf()),
+            monitor_bin: Some(assert_cmd::cargo_bin!("pilotfish").to_path_buf()),
             monitor_env: Some(env),
             poll_ms: 30,
             user_config_dir: user_dir.map(Path::to_path_buf),
@@ -133,18 +136,18 @@ async fn wait_event(
     }
 }
 
-fn session_key(fleet_dir: &Path) -> parl::paths::SessionKey {
-    parl::orch::session::resolve_session(fleet_dir)
+fn session_key(fleet_dir: &Path) -> pilotfish::paths::SessionKey {
+    pilotfish::orch::session::resolve_session(fleet_dir)
         .expect("the monitor writes a session row")
         .key()
 }
 
-fn state_of(fleet_dir: &Path) -> Option<parl::orch::records::OrchestratorState> {
+fn state_of(fleet_dir: &Path) -> Option<pilotfish::orch::records::OrchestratorState> {
     load_orchestrator_state(fleet_dir, &session_key(fleet_dir))
 }
 
-fn caps_of(fleet_dir: &Path) -> parl::orch::records::Capabilities {
-    parl::orch::records::read_capabilities(
+fn caps_of(fleet_dir: &Path) -> pilotfish::orch::records::Capabilities {
+    pilotfish::orch::records::read_capabilities(
         &FleetPaths::new(fleet_dir).orchestrator_capabilities(&session_key(fleet_dir)),
     )
 }

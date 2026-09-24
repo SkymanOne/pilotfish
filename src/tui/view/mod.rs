@@ -1,7 +1,7 @@
 //! The draw functions: one module per region of the screen, one
 //! orchestration point here. Every draw call is pure over the view model:
 //! the `Console` state machine, plus the [`Feeds`] the runtime polled from
-//! `.parl` this frame. Nothing here mutates state except
+//! `.pilotfish` this frame. Nothing here mutates state except
 //! `console.viewport_rows`, which the state machine's scrolling keys read.
 
 pub mod composer;
@@ -19,7 +19,7 @@ use crate::orch::records::OrchestratorState;
 use crate::tui::app::{Console, RunEntry};
 use crate::tui::theme::Palette;
 
-/// The facts the runtime polled from `.parl` and hands the renderer beside
+/// The facts the runtime polled from `.pilotfish` and hands the renderer beside
 /// the `Console`: the orchestrator's durable state (permission mode, pending
 /// approvals) and every run's, so the status line and the permission overlay
 /// can read what the state machine deliberately keeps private.
@@ -130,7 +130,7 @@ mod tests {
         let mut state = run_state(name, run_id);
         state.status = RunStatus::Running;
         state.pid = Some(alive_pid());
-        state.branch = Some(format!("parl/{name}-7"));
+        state.branch = Some(format!("pilotfish/{name}-7"));
         RunEntry {
             run_id: run_id.to_string(),
             state,
@@ -161,7 +161,7 @@ mod tests {
     /// A fleet: the orchestrator, a running worker, a blocked one, a done one.
     fn fleet() -> (Console, Vec<RunEntry>, OrchestratorState) {
         let dir = std::env::temp_dir().join(format!(
-            "parl-tui-view-{}-{}",
+            "pilotfish-tui-view-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -246,7 +246,7 @@ mod tests {
         let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
         // header: the fleet summary — db running, api asking, tests done
-        assert_visible(&buf, "parl");
+        assert_visible(&buf, "pilotfish");
         assert_visible(&buf, "orchestrator + 3 workers");
         assert_visible(&buf, "running 1");
         assert_visible(&buf, "needs an answer 1");
@@ -260,7 +260,7 @@ mod tests {
         );
         assert!(row_text(&buf, orch_row).contains("○"), "idle glyph");
         assert_visible(&buf, "● db");
-        assert!(row_text(&buf, find_row(&buf, "● db").unwrap()).contains("parl/db-7"));
+        assert!(row_text(&buf, find_row(&buf, "● db").unwrap()).contains("pilotfish/db-7"));
         assert_visible(&buf, "? api");
         assert_visible(&buf, "✓ tests");
 
@@ -348,7 +348,7 @@ mod tests {
         assert!(status.contains("db"), "{status}");
         assert!(status.contains("running"), "{status}");
         assert!(status.contains("default model"), "{status}");
-        assert!(status.contains("parl/db-7"), "{status}");
+        assert!(status.contains("pilotfish/db-7"), "{status}");
     }
 
     #[test]

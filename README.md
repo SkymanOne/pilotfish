@@ -1,27 +1,27 @@
-# parl
+# pilotfish
 
-`parl` runs a fleet of [pi](https://github.com/earendil-works/pi-mono) coding agents from the terminal, coordinated by Claude Code.
+`pilotfish` runs a fleet of [pi](https://github.com/earendil-works/pi-mono) coding agents from the terminal, coordinated by Claude Code.
 
 You describe the work to an orchestrator. It plans the change, writes a brief for each step, and runs one pi worker per step, each in its own git worktree. It then reviews and merges what the workers produce. The whole exchange happens in a single conversation, and the fleet view can be opened at any time to inspect or direct an individual worker.
 
-![The parl console: a conversation with the orchestrator, which has spawned two workers and answered one of their questions](imgs/main.png)
+![The pilotfish console: a conversation with the orchestrator, which has spawned two workers and answered one of their questions](imgs/main.png)
 
 ## Features
 
 * **Full oversight.** Any worker can be opened, steered, stopped, or answered directly. The orchestrator is informed of each intervention and incorporates it rather than reversing it.
 * **Durable sessions.** Every agent runs under a detached monitor that records its state on disk. The console can be closed mid-run and reopened later without interrupting any work.
 * **Separation of duties.** The orchestrator reads, plans, merges and verifies; `Edit` and `Write` are disabled for it. Only workers modify code, each on a dedicated branch.
-* **No agent-side setup.** The orchestrator is a `claude -p` process managed by `parl`, and the pi worker extension is embedded in the binary.
+* **No agent-side setup.** The orchestrator is a `claude -p` process managed by `pilotfish`, and the pi worker extension is embedded in the binary.
 * **Model routing.** Optionally, each worker's model and reasoning level are chosen from its brief, weighing capability against cost. Uncertain choices are referred to you.
-* **Scriptable.** The console is one client among several. `parl spawn`, `status`, `merge` and related commands operate on the same fleet from a shell.
+* **Scriptable.** The console is one client among several. `pilotfish spawn`, `status`, `merge` and related commands operate on the same fleet from a shell.
 
 ## Installation
 
 Requirements: a current stable Rust toolchain, `pi` on your `PATH`, and `claude` (Claude Code 2.1.x) signed in. The orchestrator uses your Claude Code login — your subscription, unless `ANTHROPIC_API_KEY` is set, in which case claude uses the key. Workers use whichever providers pi is configured with.
 
 ```bash
-cargo install --locked --git https://github.com/SkymanOne/parl
-parl --help
+cargo install --locked --git https://github.com/SkymanOne/pilotfish
+pilotfish --help
 ```
 
 `--locked` builds against the dependency versions recorded in `Cargo.lock`, which are the versions the test suite runs against.
@@ -32,7 +32,7 @@ parl --help
 
 ```bash
 cd your-repo
-parl
+pilotfish
 ```
 
 Describe the task and press `enter`, for example: *"Add token refresh to the auth module and update the tests."* The orchestrator states its plan, spawns the workers it needs, and reports on each as it finishes: its status, what changed, and how the change was verified. Once a worker's branch has been merged and checked, the orchestrator removes it.
@@ -72,22 +72,22 @@ While a worker is open, anything you type is delivered to it as steering after i
 The orchestrator may read files and run read-only git commands without approval. Any other action raises a prompt in the console: `y` allows it once, `a` allows it for the rest of the session, and `n` denies it with a reason. The frequency of these prompts is set with `--permission-mode`:
 
 ```bash
-parl --permission-mode auto      # a classifier approves routine actions
+pilotfish --permission-mode auto      # a classifier approves routine actions
 ```
 
 `p` in the fleet cycles the mode during a session. The available modes are `default`, `auto`, `acceptEdits`, `dontAsk` and `plan`.
 
 ### Resuming a session
 
-`/quit` (or `ctrl-c`) closes the console only; the orchestrator and its workers continue to run. Running `parl` again in the same repository restores the session, including any turn in progress and any permission prompt raised while the console was closed. `parl --fresh` starts a new orchestrator session, and `/shutdown` stops all agents.
+`/quit` (or `ctrl-c`) closes the console only; the orchestrator and its workers continue to run. Running `pilotfish` again in the same repository restores the session, including any turn in progress and any permission prompt raised while the console was closed. `pilotfish --fresh` starts a new orchestrator session, and `/shutdown` stops all agents.
 
 ### Model selection
 
 ```bash
-parl --model opus                # the orchestrator's model; /model changes it during a session
+pilotfish --model opus                # the orchestrator's model; /model changes it during a session
 ```
 
-By default a worker runs on `[worker] model` from `~/.parl/config.toml`, unless the orchestrator specifies another. Routing can choose instead: `/routing` enables it and stores a [TypeSafe](https://docs.typesafe.ai) API key in the operating system's credential store, and nowhere else. With routing enabled, a worker spawned without a model is routed in two steps:
+By default a worker runs on `[worker] model` from `~/.pilotfish/config.toml`, unless the orchestrator specifies another. Routing can choose instead: `/routing` enables it and stores a [TypeSafe](https://docs.typesafe.ai) API key in the operating system's credential store, and nowhere else. With routing enabled, a worker spawned without a model is routed in two steps:
 
 1. **Model.** TypeSafe's System One (Jev) selects the model that gives the best result for its cost from your shortlist. Each candidate is presented with its price relative to the cheapest option, and where two candidates are nearly tied, the cheaper one is chosen. If Jev's confidence is below your limit, the console asks you to choose, and the spawn waits for your answer for up to ten minutes before falling back to the configured model.
 2. **Thinking level.** Jev then selects a reasoning level from those the chosen model supports.
@@ -95,7 +95,7 @@ By default a worker runs on `[worker] model` from `~/.parl/config.toml`, unless 
 The shortlist (`m` in the `/routing` panel) and the confidence limit (`-` / `+` in the same panel) are saved to the user configuration:
 
 ```toml
-# ~/.parl/config.toml
+# ~/.pilotfish/config.toml
 [worker]
 model = "claude-sonnet-5"
 
@@ -116,13 +116,13 @@ Sessions manage their own size. After `[session] auto_compact_turns` turns (60 b
 The same fleet can be driven without the console:
 
 ```bash
-parl spawn add-auth -- "Add token refresh to src/auth. Run cargo test. Commit your work."
-parl status                      # the fleet table
-parl wait add-auth               # exit 0 settled, 3 timed out, 4 stopped/error/dead
-parl report add-auth             # the worker's report; exit 2 if there is none
-parl diff add-auth
-parl merge add-auth              # exit 5 on conflicts, leaving the checkout clean
-parl cleanup add-auth
+pilotfish spawn add-auth -- "Add token refresh to src/auth. Run cargo test. Commit your work."
+pilotfish status                      # the fleet table
+pilotfish wait add-auth               # exit 0 settled, 3 timed out, 4 stopped/error/dead
+pilotfish report add-auth             # the worker's report; exit 2 if there is none
+pilotfish diff add-auth
+pilotfish merge add-auth              # exit 5 on conflicts, leaving the checkout clean
+pilotfish cleanup add-auth
 ```
 
 Every command accepts `--help`. The exit codes are the same values the orchestrator acts on.

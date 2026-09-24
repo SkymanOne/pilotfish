@@ -75,7 +75,7 @@ mod tests {
 
     fn state_with_steering(entries: Vec<SteeringEntry>) -> RunState {
         let mut state = RunState::new(
-            "/tmp/x/.parl",
+            "/tmp/x/.pilotfish",
             "auth-20260828141530",
             "auth",
             "/tmp/x",
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn report_file_wins_then_fallback_then_missing() {
         let fleet = std::env::temp_dir().join(format!(
-            "parl-report-{}-{}",
+            "pilotfish-report-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));

@@ -104,7 +104,7 @@ pub struct WorktreeInfo {
 }
 
 /// Create a worktree at `<worktrees_dir>/<run_id>` on a fresh branch
-/// `parl/<name>-<short7>`, cut from `base` (or `HEAD`).
+/// `pilotfish/<name>-<short7>`, cut from `base` (or `HEAD`).
 ///
 /// # Errors
 ///
@@ -396,7 +396,7 @@ mod tests {
         git_sync(&root, &["init", "-q", "-b", "main"]);
         // Production spawns gitignore the fleet dir (ensure()); mirror that,
         // so `git status --porcelain` reads clean with a worktree inside.
-        std::fs::write(root.join(".gitignore"), ".parl/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".pilotfish/\n").unwrap();
         std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
         git_sync(&root, &["add", "."]);
         git_sync(&root, &["commit", "-qm", "seed"]);
@@ -405,7 +405,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_raw_reports_real_exit_codes() {
-        let root = init_repo("parl-git-");
+        let root = init_repo("pilotfish-git-");
         let r = git_raw(&["rev-parse", "--is-inside-work-tree"], &root).await;
         assert!(r.ok());
         assert_eq!(r.stdout.trim(), "true");
@@ -423,7 +423,7 @@ mod tests {
         // test.
         let deadline = Instant::now() + RETRY_BOUND;
         loop {
-            let root = init_repo("parl-git-");
+            let root = init_repo("pilotfish-git-");
             // Under heavy load `git rev-parse --show-toplevel` has been
             // observed to hand back a root that fails `canonicalize` with
             // NotFound a moment later (forensics: git itself never reports a
@@ -445,19 +445,19 @@ mod tests {
             );
             tokio::time::sleep(RETRY_INTERVAL).await;
         }
-        let plain = tmp_dir("parl-plain-");
+        let plain = tmp_dir("pilotfish-plain-");
         assert!(!is_git_repo(&plain).await);
         assert_eq!(repo_root(&plain).await, None);
     }
 
     #[tokio::test]
     async fn worktree_lifecycle_merged_and_unmerged() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         let info = ensure_worktree(&root, &worktrees, "auth-20260828141530", "auth", None)
             .await
             .unwrap();
-        assert_eq!(info.branch, "parl/auth-8141530");
+        assert_eq!(info.branch, "pilotfish/auth-8141530");
         assert_eq!(info.base_ref, "HEAD");
         assert!(info.worktree_path.join("seed.txt").exists());
         assert_eq!(
@@ -490,8 +490,8 @@ mod tests {
 
     #[tokio::test]
     async fn unmerged_branch_is_kept_unless_forced() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         let info = ensure_worktree(&root, &worktrees, "x-20260828141530", "x", None)
             .await
             .unwrap();
@@ -515,8 +515,8 @@ mod tests {
 
     #[tokio::test]
     async fn diff_and_dirty_checks() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         let info = ensure_worktree(&root, &worktrees, "d-20260828141530", "d", None)
             .await
             .unwrap();
@@ -547,8 +547,8 @@ mod tests {
 
     #[tokio::test]
     async fn merge_detects_conflicts_and_aborts_clean() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         // The branch is cut from the current HEAD (spawn time)…
         let info = ensure_worktree(&root, &worktrees, "c-20260828141530", "c", None)
             .await
@@ -579,8 +579,8 @@ mod tests {
 
     #[tokio::test]
     async fn merge_staged_with_no_commit_and_fails_on_bad_ref() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         let info = ensure_worktree(&root, &worktrees, "s-20260828141530", "s", None)
             .await
             .unwrap();
@@ -598,14 +598,14 @@ mod tests {
         let merged = merge_branch(&root, &info.branch, false, false).await;
         assert_eq!(merged, MergeOutcome::Merged);
 
-        let failed = merge_branch(&root, "parl/never-existed", false, false).await;
+        let failed = merge_branch(&root, "pilotfish/never-existed", false, false).await;
         assert!(matches!(failed, MergeOutcome::Failed(_)));
     }
 
     #[tokio::test]
     async fn missing_worktree_prunes_and_falls_through_to_branch_delete() {
-        let root = init_repo("parl-git-");
-        let worktrees = root.join(".parl").join("worktrees");
+        let root = init_repo("pilotfish-git-");
+        let worktrees = root.join(".pilotfish").join("worktrees");
         let info = ensure_worktree(&root, &worktrees, "m-20260828141530", "m", None)
             .await
             .unwrap();

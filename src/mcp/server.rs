@@ -9,7 +9,7 @@
 //! them as tool output; `print_result` is never called here and diagnostics
 //! belong on stderr (rmcp logs through `tracing`, which stays silent without
 //! a subscriber). A tool call never depends on the parent's environment: the
-//! cores resolve the fleet dir from `PARL_DIR` when set, else from the
+//! cores resolve the fleet dir from `PILOTFISH_DIR` when set, else from the
 //! `--cwd` target, else the process directory.
 
 use std::borrow::Cow;
@@ -81,7 +81,7 @@ pub async fn serve_stdio(cwd: Option<&Path>) -> anyhow::Result<ExitCode> {
 }
 
 /// The fleet as an MCP server. Holds only the caller's target directory;
-/// every tool re-resolves the fleet dir per call so a changed `PARL_DIR` or
+/// every tool re-resolves the fleet dir per call so a changed `PILOTFISH_DIR` or
 /// a moved repo is picked up instead of cached.
 #[derive(Debug, Clone, Default)]
 pub struct FleetServer {
@@ -89,10 +89,10 @@ pub struct FleetServer {
     /// process's working directory. Provenance for steering is always
     /// [`Party::Orchestrator`]: the agent driving these tools.
     cwd: Option<PathBuf>,
-    /// A pinned `$PARL_DIR` value for the per-call resolution. Production
+    /// A pinned `$PILOTFISH_DIR` value for the per-call resolution. Production
     /// leaves this unset so every call re-reads the environment; the
     /// in-process tests pin their own fleet dir instead.
-    pinned_parl_dir: Option<String>,
+    pinned_pilotfish_dir: Option<String>,
 }
 
 impl FleetServer {
@@ -100,19 +100,19 @@ impl FleetServer {
     pub const fn new(cwd: Option<PathBuf>) -> Self {
         Self {
             cwd,
-            pinned_parl_dir: None,
+            pinned_pilotfish_dir: None,
         }
     }
 
-    /// [`FleetServer::new`] with the `$PARL_DIR` value pinned for every
+    /// [`FleetServer::new`] with the `$PILOTFISH_DIR` value pinned for every
     /// per-call resolution instead of re-read from the environment. Tests
     /// pin their own fleet dir so an ambient variable cannot redirect the
     /// tools to an unrelated fleet.
     #[doc(hidden)]
-    pub const fn with_parl_dir(cwd: Option<PathBuf>, parl_dir: Option<String>) -> Self {
+    pub const fn with_pilotfish_dir(cwd: Option<PathBuf>, pilotfish_dir: Option<String>) -> Self {
         Self {
             cwd,
-            pinned_parl_dir: parl_dir,
+            pinned_pilotfish_dir: pilotfish_dir,
         }
     }
 
@@ -120,24 +120,25 @@ impl FleetServer {
         self.cwd.as_deref()
     }
 
-    /// The `$PARL_DIR` value for one tool call: the pinned value when the
+    /// The `$PILOTFISH_DIR` value for one tool call: the pinned value when the
     /// server was built with one (tests), else the ambient environment,
-    /// re-read per call so a changed `PARL_DIR` is picked up.
-    fn parl_dir(&self) -> Option<String> {
-        self.pinned_parl_dir
+    /// re-read per call so a changed `PILOTFISH_DIR` is picked up.
+    fn pilotfish_dir(&self) -> Option<String> {
+        self.pinned_pilotfish_dir
             .clone()
-            .or_else(crate::ops::ambient_parl_dir)
+            .or_else(crate::ops::ambient_pilotfish_dir)
     }
 
     /// The party steering runs under: the fleet's acting session — resolved
-    /// from the same `cwd`/`$PARL_DIR` every tool call uses, so the
+    /// from the same `cwd`/`$PILOTFISH_DIR` every tool call uses, so the
     /// envelope never parts company with the ownership bookkeeping — or the
     /// default orchestrator session when the fleet has no session rows yet.
     /// The default's on-wire spelling is the bare `"orchestrator"` the
     /// tools have always written.
     async fn tool_party(&self) -> Party {
         let fleet =
-            crate::ops::resolve_fleet_dir_with_env(self.cwd(), self.parl_dir().as_deref()).await;
+            crate::ops::resolve_fleet_dir_with_env(self.cwd(), self.pilotfish_dir().as_deref())
+                .await;
         let session = fleet
             .ok()
             .map(|f| crate::ops::acting_session(f.paths.root()));
@@ -186,7 +187,7 @@ impl FleetServer {
             exclude_tools: opt_str(args, "excludeTools")?,
             route: opt_bool(args, "route")?,
         };
-        match spawn_core_with_env(request, self.parl_dir().as_deref()).await {
+        match spawn_core_with_env(request, self.pilotfish_dir().as_deref()).await {
             Ok(r) => {
                 let structured = structured_data(&r);
                 Ok(render_result(&r, structured))
@@ -203,7 +204,7 @@ impl FleetServer {
             self.cwd(),
             false,
             all,
-            self.parl_dir().as_deref(),
+            self.pilotfish_dir().as_deref(),
         )
         .await
         {
@@ -218,7 +219,8 @@ impl FleetServer {
     async fn fleet_wait(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
         let timeout = opt_u64(args, "timeoutSec", 1, Some(600))?.unwrap_or(120);
-        match wait_core_with_env(&name, self.cwd(), timeout, self.parl_dir().as_deref()).await {
+        match wait_core_with_env(&name, self.cwd(), timeout, self.pilotfish_dir().as_deref()).await
+        {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -227,7 +229,7 @@ impl FleetServer {
     async fn fleet_output(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
         let tail = tail_arg(args, "tail")?;
-        match output_core_with_env(&name, self.cwd(), tail, self.parl_dir().as_deref()).await {
+        match output_core_with_env(&name, self.cwd(), tail, self.pilotfish_dir().as_deref()).await {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -236,7 +238,7 @@ impl FleetServer {
     async fn fleet_logs(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
         let tail = tail_arg(args, "tail")?;
-        match logs_core_with_env(&name, self.cwd(), tail, self.parl_dir().as_deref()).await {
+        match logs_core_with_env(&name, self.cwd(), tail, self.pilotfish_dir().as_deref()).await {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -250,7 +252,7 @@ impl FleetServer {
             self.cwd(),
             &message,
             self.tool_party().await,
-            self.parl_dir().as_deref(),
+            self.pilotfish_dir().as_deref(),
         )
         .await
         {
@@ -267,7 +269,7 @@ impl FleetServer {
             self.cwd(),
             &message,
             self.tool_party().await,
-            self.parl_dir().as_deref(),
+            self.pilotfish_dir().as_deref(),
         )
         .await
         {
@@ -286,7 +288,7 @@ impl FleetServer {
             question_id.as_deref(),
             &answer,
             self.tool_party().await,
-            self.parl_dir().as_deref(),
+            self.pilotfish_dir().as_deref(),
         )
         .await
         {
@@ -301,7 +303,7 @@ impl FleetServer {
             &name,
             self.cwd(),
             self.tool_party().await,
-            self.parl_dir().as_deref(),
+            self.pilotfish_dir().as_deref(),
         )
         .await
         {
@@ -312,7 +314,7 @@ impl FleetServer {
 
     async fn fleet_report(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
-        match report_core_with_env(&name, self.cwd(), self.parl_dir().as_deref()).await {
+        match report_core_with_env(&name, self.cwd(), self.pilotfish_dir().as_deref()).await {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -321,7 +323,14 @@ impl FleetServer {
     async fn fleet_diff(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
         let name_only = opt_bool(args, "nameOnly")?.unwrap_or(false);
-        match diff_core_with_env(&name, self.cwd(), name_only, self.parl_dir().as_deref()).await {
+        match diff_core_with_env(
+            &name,
+            self.cwd(),
+            name_only,
+            self.pilotfish_dir().as_deref(),
+        )
+        .await
+        {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -330,7 +339,14 @@ impl FleetServer {
     async fn fleet_merge(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let name = req_str(args, "name")?;
         let no_commit = opt_bool(args, "noCommit")?.unwrap_or(false);
-        match merge_core_with_env(&name, self.cwd(), no_commit, self.parl_dir().as_deref()).await {
+        match merge_core_with_env(
+            &name,
+            self.cwd(),
+            no_commit,
+            self.pilotfish_dir().as_deref(),
+        )
+        .await
+        {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
         }
@@ -339,10 +355,11 @@ impl FleetServer {
     async fn fleet_cleanup(&self, args: &JsonObject) -> Result<CallToolResult, McpError> {
         let target = req_str(args, "target")?;
         let force = opt_bool(args, "force")?.unwrap_or(false);
-        let fleet = match resolve_fleet_dir_with_env(self.cwd(), self.parl_dir().as_deref()).await {
-            Ok(fleet) => fleet,
-            Err(err) => return Ok(render_error(&err)),
-        };
+        let fleet =
+            match resolve_fleet_dir_with_env(self.cwd(), self.pilotfish_dir().as_deref()).await {
+                Ok(fleet) => fleet,
+                Err(err) => return Ok(render_error(&err)),
+            };
         match cleanup_runs(fleet.paths.root(), &target, force).await {
             Ok(r) => Ok(render_result(&r, None)),
             Err(err) => Ok(render_error(&err)),
@@ -921,12 +938,12 @@ mod tests {
     #[tokio::test]
     async fn tool_party_is_the_fleets_acting_session_or_the_default() {
         let cwd = std::env::temp_dir().join(format!(
-            "parl-mcp-party-cwd-{}-{}",
+            "pilotfish-mcp-party-cwd-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
         let fleet = std::env::temp_dir().join(format!(
-            "parl-mcp-party-{}-{}",
+            "pilotfish-mcp-party-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -934,7 +951,7 @@ mod tests {
             std::fs::create_dir_all(dir).unwrap();
         }
         // No fleet.json: the default session, spelled "orchestrator".
-        let server = FleetServer::with_parl_dir(
+        let server = FleetServer::with_pilotfish_dir(
             Some(cwd.clone()),
             Some(fleet.to_string_lossy().into_owned()),
         );
@@ -948,7 +965,7 @@ mod tests {
         let session = store.last_used().unwrap().uuid;
         crate::orch::session::save(&fleet, &mut store).unwrap();
         let server =
-            FleetServer::with_parl_dir(Some(cwd), Some(fleet.to_string_lossy().into_owned()));
+            FleetServer::with_pilotfish_dir(Some(cwd), Some(fleet.to_string_lossy().into_owned()));
         assert_eq!(server.tool_party().await, Party::Orchestrator(session));
     }
 

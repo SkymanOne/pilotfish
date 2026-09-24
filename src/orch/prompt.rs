@@ -4,9 +4,9 @@
 //! The shipped template ([`ORCHESTRATOR_PROMPT_TEMPLATE`], embedded with
 //! `include_str!`) is rendered with the fleet's placeholders and written under
 //! the orchestrator directory for `--append-system-prompt-file`. Overrides,
-//! in order: `$PARL_PROMPT` (a path; a dangling one is an error, it is
-//! explicit user intent), then `<repo>/.parl/orchestrator.md`, then
-//! `~/.parl/orchestrator.md`, then the embedded copy. The legacy
+//! in order: `$PILOTFISH_PROMPT` (a path; a dangling one is an error, it is
+//! explicit user intent), then `<repo>/.pilotfish/orchestrator.md`, then
+//! `~/.pilotfish/orchestrator.md`, then the embedded copy. The legacy
 //! `~/.config/parl/orchestrator.md` is no longer read; when only that file
 //! exists, resolution warns on stderr and names both paths, so a user with an
 //! existing file is told to move it rather than silently ignored. Unknown
@@ -22,7 +22,7 @@ pub const ORCHESTRATOR_PROMPT_TEMPLATE: &str = include_str!("../../prompts/orche
 
 /// Workers that may run at once when nothing more specific is configured.
 /// An alias of the enforcement side's constant (`[limits]
-/// max_workers_per_session` in `~/.parl/config.toml` backstops `spawn`'s
+/// max_workers_per_session` in `~/.pilotfish/config.toml` backstops `spawn`'s
 /// refusal): the prompt's advice and the enforced cap share one source of
 /// truth, so they cannot drift apart.
 pub const DEFAULT_MAX_WORKERS: usize = crate::paths::DEFAULT_MAX_WORKERS_PER_SESSION;
@@ -87,26 +87,26 @@ fn placeholder_regex() -> Option<&'static regex::Regex> {
 }
 
 /// Where the prompt comes from, in override order; `None` means the embedded
-/// copy. An explicit `$PARL_PROMPT` that does not exist is an error — it is
+/// copy. An explicit `$PILOTFISH_PROMPT` that does not exist is an error — it is
 /// user intent, and silently falling back would hide the mistake.
 ///
 /// The env value and user config dir are injectable (tests).
 ///
 /// # Errors
 ///
-/// Returns an error when `$PARL_PROMPT` points at something that is not a file.
+/// Returns an error when `$PILOTFISH_PROMPT` points at something that is not a file.
 pub fn resolve_prompt_source(
-    parl_prompt: Option<&str>,
+    pilotfish_prompt: Option<&str>,
     repo_root: &Path,
     user_dir: Option<&Path>,
 ) -> anyhow::Result<Option<PathBuf>> {
-    if let Some(path) = parl_prompt.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(path) = pilotfish_prompt.map(str::trim).filter(|s| !s.is_empty()) {
         let path = PathBuf::from(path);
         if path.is_file() {
             return Ok(Some(path));
         }
         anyhow::bail!(
-            "$PARL_PROMPT is set to {}, which is not a file",
+            "$PILOTFISH_PROMPT is set to {}, which is not a file",
             path.display()
         );
     }
@@ -124,7 +124,7 @@ pub fn resolve_prompt_source(
 }
 
 /// The legacy `~/.config/parl/orchestrator.md`, when it exists and the new
-/// `~/.parl/orchestrator.md` does not — the prompt moved, and a user who
+/// `~/.pilotfish/orchestrator.md` does not — the prompt moved, and a user who
 /// only has the old file should be told, not silently ignored.
 #[must_use]
 pub fn legacy_config_prompt(home: Option<&Path>, user_dir: Option<&Path>) -> Option<PathBuf> {
@@ -143,7 +143,7 @@ pub fn legacy_config_prompt(home: Option<&Path>, user_dir: Option<&Path>) -> Opt
 ///
 /// # Errors
 ///
-/// Returns an error when `$PARL_PROMPT` points at something that is not a file.
+/// Returns an error when `$PILOTFISH_PROMPT` points at something that is not a file.
 pub fn prompt_source(repo_root: &Path) -> anyhow::Result<Option<PathBuf>> {
     let home = dirs::home_dir();
     let user_config_dir = crate::paths::user_dir();
@@ -154,7 +154,7 @@ pub fn prompt_source(repo_root: &Path) -> anyhow::Result<Option<PathBuf>> {
     )?;
     if let Some(legacy) = legacy_config_prompt(home.as_deref(), user_config_dir.as_deref()) {
         let target = user_config_dir.as_ref().map_or_else(
-            || "~/.parl/orchestrator.md".to_string(),
+            || "~/.pilotfish/orchestrator.md".to_string(),
             |dir| dir.join("orchestrator.md").display().to_string(),
         );
         eprintln!(
@@ -167,7 +167,7 @@ pub fn prompt_source(repo_root: &Path) -> anyhow::Result<Option<PathBuf>> {
 
 /// Render the prompt for the fleet rooted at `fleet_dir` working in
 /// `repo_root`, substituting the same per-session worker cap `spawn`
-/// enforces: `~/.parl/config.toml`'s `[limits] max_workers_per_session`,
+/// enforces: `~/.pilotfish/config.toml`'s `[limits] max_workers_per_session`,
 /// or the shared default when unset.
 ///
 /// # Errors
@@ -179,7 +179,7 @@ pub fn render_prompt(fleet_dir: &Path, repo_root: &Path) -> anyhow::Result<Strin
 }
 
 /// [`render_prompt`] with the user config dir injected (tests), so a test
-/// never resolves the ambient `~/.parl`.
+/// never resolves the ambient `~/.pilotfish`.
 ///
 /// # Errors
 ///
@@ -232,13 +232,13 @@ mod tests {
     #[test]
     fn the_shipped_template_renders_every_placeholder_and_names_every_tool_and_event() {
         let text = render_orchestrator_prompt(&PromptVars {
-            fleet_dir: "/repo/.parl".into(),
+            fleet_dir: "/repo/.pilotfish".into(),
             repo_root: "/repo".into(),
             max_workers: None,
             bin_name: None,
         });
         assert!(!text.contains("{{"), "no unrendered placeholders: {text}");
-        assert!(text.contains("`/repo/.parl`"), "{text}");
+        assert!(text.contains("`/repo/.pilotfish`"), "{text}");
         assert!(text.contains("`/repo`"), "{text}");
         assert!(
             text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
@@ -287,8 +287,8 @@ mod tests {
         assert!(text.contains("Never edit files yourself"), "{text}");
         assert!(text.contains("AskUserQuestion"), "{text}");
         assert!(text.contains("exit 5"), "{text}");
-        // the rewritten facts: parl branch prefix and the new report layout
-        assert!(text.contains("`parl/<name>-<7 chars>`"), "{text}");
+        // the rewritten facts: pilotfish branch prefix and the new report layout
+        assert!(text.contains("`pilotfish/<name>-<7 chars>`"), "{text}");
         assert!(text.contains("runs/<runId>/report.md"), "{text}");
         assert!(!text.contains("pi-fleet"), "{text}");
         assert!(!text.contains(".pi-fleet"), "{text}");
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn the_substituted_cap_tracks_the_enforced_limits_config() {
         let root = std::env::temp_dir().join(format!(
-            "parl-prompt-cap-{}-{}",
+            "pilotfish-prompt-cap-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn write_prompt_lands_under_the_session_dir() {
         let root = std::env::temp_dir().join(format!(
-            "parl-prompt-{}-{}",
+            "pilotfish-prompt-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -389,23 +389,23 @@ mod tests {
     }
 
     #[test]
-    fn overrides_resolve_in_order_and_a_dangling_parl_prompt_is_an_error() {
+    fn overrides_resolve_in_order_and_a_dangling_pilotfish_prompt_is_an_error() {
         let repo = std::env::temp_dir().join(format!(
-            "parl-prompt-res-{}-{}",
+            "pilotfish-prompt-res-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
-        let parl = repo.join(STATE_DIR_NAME);
-        std::fs::create_dir_all(&parl).unwrap();
-        // The legacy config home, and the new user-level `~/.parl`.
+        let pilotfish = repo.join(STATE_DIR_NAME);
+        std::fs::create_dir_all(&pilotfish).unwrap();
+        // The legacy config home, and the new user-level `~/.pilotfish`.
         let home = std::env::temp_dir().join(format!(
-            "parl-prompt-legacy-{}-{}",
+            "pilotfish-prompt-legacy-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
         std::fs::create_dir_all(home.join(".config/parl")).unwrap();
         let user_root = std::env::temp_dir().join(format!(
-            "parl-prompt-user-{}-{}",
+            "pilotfish-prompt-user-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -417,7 +417,7 @@ mod tests {
             resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
             None
         );
-        // ~/.parl next, the new user location
+        // ~/.pilotfish next, the new user location
         let user_override = user_dir.join("orchestrator.md");
         std::fs::write(&user_override, "user").unwrap();
         assert_eq!(
@@ -432,21 +432,21 @@ mod tests {
             resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
             Some(user_override)
         );
-        // <repo>/.parl beats the user config
-        let repo_override = parl.join("orchestrator.md");
+        // <repo>/.pilotfish beats the user config
+        let repo_override = pilotfish.join("orchestrator.md");
         std::fs::write(&repo_override, "repo").unwrap();
         assert_eq!(
             resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
             Some(repo_override)
         );
-        // $PARL_PROMPT beats everything
+        // $PILOTFISH_PROMPT beats everything
         let env_file = repo.join("custom-prompt.md");
         std::fs::write(&env_file, "env").unwrap();
         assert_eq!(
             resolve_prompt_source(env_file.to_str(), &repo, Some(&user_dir)).unwrap(),
             Some(env_file)
         );
-        // a dangling $PARL_PROMPT is an error, not a silent fallback
+        // a dangling $PILOTFISH_PROMPT is an error, not a silent fallback
         let err = resolve_prompt_source(repo.join("missing.md").to_str(), &repo, Some(&user_dir))
             .expect_err("dangling override errors");
         assert!(err.to_string().contains("not a file"), "{err}");
@@ -455,12 +455,12 @@ mod tests {
     #[test]
     fn the_legacy_config_prompt_warns_only_when_it_is_the_only_prompt() {
         let home = std::env::temp_dir().join(format!(
-            "parl-prompt-warn-home-{}-{}",
+            "pilotfish-prompt-warn-home-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
         let user_root = std::env::temp_dir().join(format!(
-            "parl-prompt-warn-user-{}-{}",
+            "pilotfish-prompt-warn-user-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));

@@ -11,16 +11,16 @@ use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use parl::cli::ExitCode;
-use parl::fleet::envelope::{DEFAULT_ORCHESTRATOR_SESSION, Decoded, Envelope, Party};
-use parl::fleet::run::{self, PendingDialog, PendingQuestion, RunState, RunStatus};
-use parl::mcp::server::{FLEET_TOOL_NAMES, FleetServer};
-use parl::paths::FleetPaths;
+use pilotfish::cli::ExitCode;
+use pilotfish::fleet::envelope::{DEFAULT_ORCHESTRATOR_SESSION, Decoded, Envelope, Party};
+use pilotfish::fleet::run::{self, PendingDialog, PendingQuestion, RunState, RunStatus};
+use pilotfish::mcp::server::{FLEET_TOOL_NAMES, FleetServer};
+use pilotfish::paths::FleetPaths;
 use rmcp::service::ServiceExt as _;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadHalf, WriteHalf};
 
-/// One fleet dir anchored at `<dir>/.parl` with a run whose state is already
+/// One fleet dir anchored at `<dir>/.pilotfish` with a run whose state is already
 /// on disk — the same shape the ops tests prepare.
 struct Fleet {
     dir: tempfile::TempDir,
@@ -31,7 +31,7 @@ struct Fleet {
 impl Fleet {
     fn new(_prefix: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let paths = FleetPaths::new(dir.path().join(parl::paths::STATE_DIR_NAME));
+        let paths = FleetPaths::new(dir.path().join(pilotfish::paths::STATE_DIR_NAME));
         // The run id derives from the name the way spawn stamps it, so
         // `find_run("w")` matches it.
         let run_id = "w-20260828141530".to_owned();
@@ -127,9 +127,9 @@ struct Client {
 
 impl Client {
     async fn connect(fleet: &Fleet) -> (Self, tokio::task::JoinHandle<()>) {
-        // The fleet dir is pinned: the ambient `PARL_DIR` must never
+        // The fleet dir is pinned: the ambient `PILOTFISH_DIR` must never
         // redirect the server's per-call resolution to another fleet.
-        let server = FleetServer::with_parl_dir(
+        let server = FleetServer::with_pilotfish_dir(
             Some(fleet.root().to_path_buf()),
             Some(fleet.paths.root().to_string_lossy().into_owned()),
         );
@@ -225,7 +225,7 @@ impl Client {
                 json!({
                     "protocolVersion": "2025-06-18",
                     "capabilities": {},
-                    "clientInfo": {"name": "parl-test", "version": "0"},
+                    "clientInfo": {"name": "pilotfish-test", "version": "0"},
                 }),
             )
             .await;
@@ -472,7 +472,7 @@ async fn answer_resolves_the_pending_question_with_orchestrator_provenance() {
             question: "which fixture?".into(),
             options: None,
             context: None,
-            asked_at: parl::util::now_iso(),
+            asked_at: pilotfish::util::now_iso(),
         });
     });
     let (mut client, server) = Client::connect(&fleet).await;
@@ -534,7 +534,7 @@ async fn answer_also_resolves_a_pending_pi_dialog() {
             question: "overwrite?".into(),
             options: None,
             context: None,
-            asked_at: parl::util::now_iso(),
+            asked_at: pilotfish::util::now_iso(),
         });
     });
     let (mut client, server) = Client::connect(&fleet).await;
@@ -565,7 +565,7 @@ async fn steering_a_terminal_run_refuses_with_the_resume_hint() {
     assert_eq!(send["isError"], json!(true), "{send}");
     let text = text_of(&send);
     assert!(text.contains("is settled — steering refused"), "{text}");
-    assert!(text.contains("parl spawn w-2 --session"), "{text}");
+    assert!(text.contains("pilotfish spawn w-2 --session"), "{text}");
     assert!(text.ends_with("exit: 1"), "{text}");
     // A refused stop reads "nothing to stop" with the same exit code.
     let stop = client.call_tool("fleet_stop", json!({"name": "w"})).await;

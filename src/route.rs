@@ -34,7 +34,7 @@ use serde_json::{Value, json};
 use crate::fleet::run::{RunState, WorkerModel};
 use crate::paths::{FleetPaths, RoutingConfig, env_var};
 
-/// Where the API lives, unless `$PARL_TYPESAFE_URL` says otherwise.
+/// Where the API lives, unless `$PILOTFISH_TYPESAFE_URL` says otherwise.
 const DEFAULT_ENDPOINT: &str = "https://api.typesafe.ai/v1/systemone";
 
 /// A judgment is on the spawn path, so it cannot hang it. The documented
@@ -197,7 +197,7 @@ shortlist the ones routing may choose with /routing in the console, or pin a [wo
     Ok(list)
 }
 
-/// The endpoint to call: `$PARL_TYPESAFE_URL`, else the config's, else the
+/// The endpoint to call: `$PILOTFISH_TYPESAFE_URL`, else the config's, else the
 /// documented one. The override is what the tests point at a local stub.
 #[must_use]
 fn endpoint(config: &RoutingConfig) -> String {
@@ -848,7 +848,7 @@ mod tests {
             task_brief: "rewrite the readme\nsecond line".into(),
             ..RunState::default()
         };
-        running.branch = Some("parl/docs-1234567".into());
+        running.branch = Some("pilotfish/docs-1234567".into());
         let in_flight = vec![running];
         let b = brief(&models, &in_flight);
         let list = candidates(&b, &RoutingConfig::default()).unwrap();

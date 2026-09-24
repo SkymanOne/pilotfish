@@ -1,5 +1,5 @@
-//! The `.parl` state layout: one directory under the repo root holding every
-//! durable fact the fleet produces, plus the user-level `~/.parl` directory
+//! The `.pilotfish` state layout: one directory under the repo root holding every
+//! durable fact the fleet produces, plus the user-level `~/.pilotfish` directory
 //! holding the user's config. Nothing outside this module should spell the
 //! directory name or the env-var prefix, so a future rename touches only the
 //! constants below.
@@ -11,18 +11,18 @@ use uuid::Uuid;
 use crate::util::short_uuid;
 
 /// The fleet's state directory, created under the repository root.
-pub const STATE_DIR_NAME: &str = ".parl";
-/// Prefix for every environment variable this tool reads (`PARL_DIR`, …).
-pub const ENV_PREFIX: &str = "PARL";
+pub const STATE_DIR_NAME: &str = ".pilotfish";
+/// Prefix for every environment variable this tool reads (`PILOTFISH_DIR`, …).
+pub const ENV_PREFIX: &str = "PILOTFISH";
 /// The command name users type; used in help text, hints, and the prompt.
-pub const BIN_NAME: &str = "parl";
+pub const BIN_NAME: &str = "pilotfish";
 /// The fleet-level pi catalogue (`availableModels` + `commands`): a property
 /// of the pi installation, byte-identical across runs, so it lives once
 /// here instead of being copied into every `run.json`. Refreshed on demand
 /// by any live worker monitor, and stamped with when pi last answered.
 pub const PI_CACHE_FILE: &str = "pi-cache.json";
 
-/// Env-var name from its suffix: `_DIR` -> `PARL_DIR`.
+/// Env-var name from its suffix: `_DIR` -> `PILOTFISH_DIR`.
 #[must_use]
 pub fn env_var(suffix: &str) -> String {
     format!("{ENV_PREFIX}_{suffix}")
@@ -69,7 +69,7 @@ impl Default for SessionKey {
     }
 }
 
-/// Resolved `.parl` layout for one fleet.
+/// Resolved `.pilotfish` layout for one fleet.
 ///
 /// Every path the console, monitors, or tools touch is derived here; see the
 /// tree in AGENTS.md. An old `.pi-fleet` directory is ignored entirely — there
@@ -80,12 +80,12 @@ pub struct FleetPaths {
 }
 
 impl FleetPaths {
-    /// The layout rooted at an explicit directory (the `.parl` dir itself).
+    /// The layout rooted at an explicit directory (the `.pilotfish` dir itself).
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
-    /// Resolve the fleet dir for `cwd`: `$PARL_DIR` when set, else `<cwd>/.parl`.
+    /// Resolve the fleet dir for `cwd`: `$PILOTFISH_DIR` when set, else `<cwd>/.pilotfish`.
     #[must_use]
     pub fn discover(cwd: &Path) -> Self {
         Self::discover_with_env(cwd, std::env::var(env_var("DIR")).ok().as_deref())
@@ -93,14 +93,14 @@ impl FleetPaths {
 
     /// [`FleetPaths::discover`] with the env value injected (tests).
     #[must_use]
-    pub fn discover_with_env(cwd: &Path, parl_dir: Option<&str>) -> Self {
-        match parl_dir {
+    pub fn discover_with_env(cwd: &Path, pilotfish_dir: Option<&str>) -> Self {
+        match pilotfish_dir {
             Some(dir) if !dir.trim().is_empty() => Self::new(dir.trim()),
             _ => Self::new(cwd.join(STATE_DIR_NAME)),
         }
     }
 
-    /// `.parl/` itself.
+    /// `.pilotfish/` itself.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -276,10 +276,10 @@ fn git_root_of(dir: &Path) -> PathBuf {
         )
 }
 
-/// The user-level config directory: `~/.parl`, or the `$PARL_HOME` override
-/// wholesale (mirroring how `$PARL_DIR` overrides a fleet's location). Same
+/// The user-level config directory: `~/.pilotfish`, or the `$PILOTFISH_HOME` override
+/// wholesale (mirroring how `$PILOTFISH_DIR` overrides a fleet's location). Same
 /// name as [`STATE_DIR_NAME`], different scope, deliberately — the project's
-/// state lives under `<repo>/.parl`, the user's config under `~/.parl`.
+/// state lives under `<repo>/.pilotfish`, the user's config under `~/.pilotfish`.
 /// `None` when neither the override nor a home is known, which callers read
 /// as "no user config".
 #[must_use]
@@ -290,19 +290,19 @@ pub fn user_dir() -> Option<PathBuf> {
     )
 }
 
-/// [`user_dir`] with the `$PARL_HOME` value and the home directory injected,
+/// [`user_dir`] with the `$PILOTFISH_HOME` value and the home directory injected,
 /// mirroring [`FleetPaths::discover_with_env`]: tests pass synthetic values
 /// so resolution never touches the ambient environment, and the fallback
 /// branch needs no ambient read either.
 #[must_use]
-pub fn user_dir_with_env(parl_home: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
-    match parl_home {
+pub fn user_dir_with_env(pilotfish_home: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+    match pilotfish_home {
         Some(dir) if !dir.trim().is_empty() => Some(PathBuf::from(dir.trim())),
         _ => home.map(|home| home.join(STATE_DIR_NAME)),
     }
 }
 
-/// User-level config: `~/.parl/config.toml`. Every field is optional — a
+/// User-level config: `~/.pilotfish/config.toml`. Every field is optional — a
 /// missing file, an empty file, or a file with only some keys all read as
 /// defaults — but a malformed file is an error, because silently ignoring a
 /// config the user wrote is worse than failing.
@@ -484,7 +484,7 @@ impl UserConfig {
     }
 }
 
-/// Load `~/.parl/config.toml` under `user_dir`. A missing or empty file
+/// Load `~/.pilotfish/config.toml` under `user_dir`. A missing or empty file
 /// reads as defaults; a malformed one is an error naming the path and the
 /// parse problem.
 ///
@@ -584,7 +584,7 @@ pub fn set_routing(user_dir: &Path, key: &str, value: toml_edit::Item) -> anyhow
 
 /// Append `entry` to `<root>/.gitignore` unless a line already covers it.
 ///
-/// Introduces the `# parl` marker on first touch. Returns whether the file
+/// Introduces the `# pilotfish` marker on first touch. Returns whether the file
 /// changed. Ported from the TypeScript `ensureGitignoreEntry`.
 ///
 /// # Errors
@@ -599,8 +599,11 @@ pub fn ensure_gitignore_entry(root: &Path, entry: &str) -> std::io::Result<bool>
     if lines.iter().any(|l| l == entry) {
         return Ok(false);
     }
-    let needs_marker = !lines.iter().any(|l| l == "# parl");
-    let addition = format!("{}{entry}\n", if needs_marker { "# parl\n" } else { "" });
+    let needs_marker = !lines.iter().any(|l| l == "# pilotfish");
+    let addition = format!(
+        "{}{entry}\n",
+        if needs_marker { "# pilotfish\n" } else { "" }
+    );
     let prefix = if !content.is_empty() && !content.ends_with('\n') {
         "\n"
     } else {
@@ -644,48 +647,48 @@ mod tests {
 
     #[test]
     fn layout_paths_are_derived_from_the_root() {
-        let paths = FleetPaths::new("/repo/x/.parl");
+        let paths = FleetPaths::new("/repo/x/.pilotfish");
         let uuid = uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
         let key = SessionKey::new(Some("s0".into()), uuid);
         let default_key = SessionKey::default();
-        assert_eq!(paths.root(), Path::new("/repo/x/.parl"));
+        assert_eq!(paths.root(), Path::new("/repo/x/.pilotfish"));
         assert_eq!(
             paths.fleet_json(),
-            PathBuf::from("/repo/x/.parl/fleet.json")
+            PathBuf::from("/repo/x/.pilotfish/fleet.json")
         );
         assert_eq!(
             paths.console_lock(),
-            PathBuf::from("/repo/x/.parl/console.lock")
+            PathBuf::from("/repo/x/.pilotfish/console.lock")
         );
         assert_eq!(
             paths.orchestrators_dir(),
-            PathBuf::from("/repo/x/.parl/orchestrators")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators")
         );
         // A session's whole state sits in its own alias-prefixed directory.
         assert_eq!(key.dir_name(), "s0-f7a8b9c");
         assert_eq!(
             paths.orchestrator_dir(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c")
         );
         assert_eq!(
             paths.orchestrator_state(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c/state.json")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/state.json")
         );
         assert_eq!(
             paths.orchestrator_events(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c/events.jsonl")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/events.jsonl")
         );
         assert_eq!(
             paths.orchestrator_inbox(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c/inbox.jsonl")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/inbox.jsonl")
         );
         assert_eq!(
             paths.claude_log(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c/claude.log")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/claude.log")
         );
         assert_eq!(
             paths.orchestrator_prompt(&key),
-            PathBuf::from("/repo/x/.parl/orchestrators/s0-f7a8b9c/prompt.md")
+            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/prompt.md")
         );
         // An alias-less session dirs as `default-<short-uuid>`; the alias is
         // sanitized before it reaches the filesystem.
@@ -694,36 +697,36 @@ mod tests {
         assert_eq!(noisy.dir_name(), "my-session-f7a8b9c");
         assert_eq!(
             paths.run_json("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.parl/runs/a-1f2e3d4/run.json")
+            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/run.json")
         );
         assert_eq!(
             paths.run_report("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.parl/runs/a-1f2e3d4/report.md")
+            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/report.md")
         );
         assert_eq!(
             paths.pi_log("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.parl/runs/a-1f2e3d4/pi.log")
+            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/pi.log")
         );
         assert_eq!(
             paths.run_session_dir("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.parl/runs/a-1f2e3d4/session")
+            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/session")
         );
         assert_eq!(
             paths.pi_extension(),
-            PathBuf::from("/repo/x/.parl/pi/extensions/fleet-worker.ts")
+            PathBuf::from("/repo/x/.pilotfish/pi/extensions/fleet-worker.ts")
         );
         assert_eq!(
             paths.pi_skill(),
-            PathBuf::from("/repo/x/.parl/pi/skills/fleet-worker-report/SKILL.md")
+            PathBuf::from("/repo/x/.pilotfish/pi/skills/fleet-worker-report/SKILL.md")
         );
     }
 
     #[test]
-    fn discover_prefers_parl_dir_env_over_cwd() {
+    fn discover_prefers_pilotfish_dir_env_over_cwd() {
         let cwd = Path::new("/repo");
         assert_eq!(
             FleetPaths::discover_with_env(cwd, None),
-            FleetPaths::new("/repo/.parl")
+            FleetPaths::new("/repo/.pilotfish")
         );
         assert_eq!(
             FleetPaths::discover_with_env(cwd, Some("/elsewhere/fleet")),
@@ -731,20 +734,20 @@ mod tests {
         );
         assert_eq!(
             FleetPaths::discover_with_env(cwd, Some("  ")),
-            FleetPaths::new("/repo/.parl")
+            FleetPaths::new("/repo/.pilotfish")
         );
         // The env names themselves are derived, never spelled in full.
-        assert_eq!(env_var("DIR"), "PARL_DIR");
-        assert_eq!(env_var("RUN"), "PARL_RUN");
-        assert_eq!(env_var("HOME"), "PARL_HOME");
+        assert_eq!(env_var("DIR"), "PILOTFISH_DIR");
+        assert_eq!(env_var("RUN"), "PILOTFISH_RUN");
+        assert_eq!(env_var("HOME"), "PILOTFISH_HOME");
     }
 
-    /// A temp user dir, the way production resolves `~/.parl`: with the
-    /// injected `$PARL_HOME` the override wins wholesale, else `.parl` under
+    /// A temp user dir, the way production resolves `~/.pilotfish`: with the
+    /// injected `$PILOTFISH_HOME` the override wins wholesale, else `.pilotfish` under
     /// the injected home, else nothing. Every branch is injectable, so a test
     /// can never land in the real home directory.
     #[test]
-    fn user_dir_prefers_parl_home_and_falls_back_under_the_home() {
+    fn user_dir_prefers_pilotfish_home_and_falls_back_under_the_home() {
         let home = Path::new("/home/alice");
         assert_eq!(
             user_dir_with_env(None, Some(home)),
@@ -759,7 +762,7 @@ mod tests {
             user_dir_with_env(Some("  "), Some(home)),
             Some(home.join(STATE_DIR_NAME))
         );
-        // The override stands alone; without any home there is no `.parl`.
+        // The override stands alone; without any home there is no `.pilotfish`.
         assert_eq!(
             user_dir_with_env(Some("/elsewhere/config"), None),
             Some(PathBuf::from("/elsewhere/config"))
@@ -775,7 +778,7 @@ mod tests {
 
     #[test]
     fn user_config_reads_missing_empty_and_partial_files_as_defaults() {
-        let tmp = tmp_dir("parl-cfg-missing-");
+        let tmp = tmp_dir("pilotfish-cfg-missing-");
         assert_eq!(load_user_config(None).unwrap(), UserConfig::default());
         // No file at all.
         assert_eq!(load_user_config(Some(&tmp)).unwrap(), UserConfig::default());
@@ -796,7 +799,7 @@ mod tests {
 
     #[test]
     fn user_config_reads_the_limits_section_and_defaults_the_cap() {
-        let tmp = tmp_dir("parl-cfg-limits-");
+        let tmp = tmp_dir("pilotfish-cfg-limits-");
         // No file, an empty file, and a file with other sections alone all
         // read as the default cap.
         assert_eq!(
@@ -853,7 +856,7 @@ mod tests {
 
     #[test]
     fn user_config_parses_both_sections() {
-        let tmp = tmp_dir("parl-cfg-full-");
+        let tmp = tmp_dir("pilotfish-cfg-full-");
         write_config(
             &tmp,
             "[orchestrator]\nmodel = \"claude-opus-5\"\n\n[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
@@ -866,7 +869,7 @@ mod tests {
 
     #[test]
     fn a_malformed_user_config_names_the_path_and_the_problem() {
-        let tmp = tmp_dir("parl-cfg-bad-");
+        let tmp = tmp_dir("pilotfish-cfg-bad-");
         write_config(&tmp, "[orchestrator\nmodel = \"x\"\n");
         let err = load_user_config(Some(&tmp))
             .expect_err("a malformed config errors, never silently defaults")
@@ -1022,7 +1025,7 @@ mod tests {
 
     #[test]
     fn ensure_creates_layout_and_gitignores_once() {
-        let root = tmp_dir("parl-paths-");
+        let root = tmp_dir("pilotfish-paths-");
         // Both spawns transiently fail under full-suite parallel load; the
         // shared bounded retry covers them, and the rev-parse probe confirms
         // the repo answers before `ensure` consults it.
@@ -1041,14 +1044,17 @@ mod tests {
                 .is_some()
         );
         let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains("# parl\n.parl/"), "{gitignore}");
+        assert!(
+            gitignore.contains("# pilotfish\n.pilotfish/"),
+            "{gitignore}"
+        );
         // Second run: already covered, no change.
         assert!(!ensure_with_retry(&paths).unwrap());
         let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert_eq!(gitignore.matches(".parl/").count(), 1);
+        assert_eq!(gitignore.matches(".pilotfish/").count(), 1);
         // An existing unrelated entry survives and gets the marker once.
-        std::fs::write(root.join(".gitignore"), "node_modules/\n.parl/\ndist/").unwrap();
-        assert!(!ensure_gitignore_entry(&root, ".parl/").unwrap());
-        assert!(!ensure_gitignore_entry(&root, ".parl/").unwrap());
+        std::fs::write(root.join(".gitignore"), "node_modules/\n.pilotfish/\ndist/").unwrap();
+        assert!(!ensure_gitignore_entry(&root, ".pilotfish/").unwrap());
+        assert!(!ensure_gitignore_entry(&root, ".pilotfish/").unwrap());
     }
 }

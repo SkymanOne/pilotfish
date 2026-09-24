@@ -697,7 +697,7 @@ mod tests {
     #[test]
     fn append_envelope_appends_one_line_per_call() {
         let dir = std::env::temp_dir().join(format!(
-            "parl-env-{}-{}",
+            "pilotfish-env-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));

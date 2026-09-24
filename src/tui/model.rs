@@ -412,7 +412,7 @@ mod tests {
         let mut running = state("add-auth", "add-auth-20260829120000");
         running.status = crate::fleet::run::RunStatus::Running;
         running.pid = Some(alive_pid());
-        running.branch = Some("parl/add-auth-9120000".into());
+        running.branch = Some("pilotfish/add-auth-9120000".into());
         let mut settled = state("add-tests", "add-tests-20260829120001");
         settled.status = crate::fleet::run::RunStatus::Settled;
         let mut gone = state("merged", "merged-20260829120002");
@@ -440,7 +440,10 @@ mod tests {
         assert_eq!(rows[1].name, "add-auth");
         assert_eq!(rows[2].name, "add-tests");
         assert_eq!(rows[1].glyph, "●");
-        assert_eq!(rows[1].branch.as_deref(), Some("parl/add-auth-9120000"));
+        assert_eq!(
+            rows[1].branch.as_deref(),
+            Some("pilotfish/add-auth-9120000")
+        );
         assert_eq!(rows[1].diff_stat.as_deref(), Some("+12 −3"));
         assert_eq!(rows[2].glyph, "✓");
         assert_eq!(rows[2].diff_stat, None);

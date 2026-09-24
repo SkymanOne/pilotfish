@@ -3,7 +3,7 @@
 //! dies in raw mode leaves the user's shell unusable, so teardown outranks
 //! every feature here. Also the single-instance console lock (a second
 //! console must not fight the first over the terminal state) and the feed
-//! loop that polls `.parl` into the state machine.
+//! loop that polls `.pilotfish` into the state machine.
 
 use std::collections::HashMap;
 use std::io;
@@ -39,7 +39,7 @@ use crate::tui::theme::Palette;
 use crate::tui::view::{self, Feeds};
 use crate::util::{now_iso, now_ms, read_new_lines};
 
-/// The repo the console is opened on: the fleet dir's parent (`.parl` lives
+/// The repo the console is opened on: the fleet dir's parent (`.pilotfish` lives
 /// at the repo root).
 fn repo_cwd(fleet: &FleetPaths) -> String {
     fleet
@@ -149,7 +149,7 @@ pub fn install_panic_hook() {
 // ---------------------------------------------------------------------------
 // The single-instance lock (`console.lock`, same shape the TypeScript wrote)
 
-/// The console's hold on the fleet: one live console per `.parl`.
+/// The console's hold on the fleet: one live console per `.pilotfish`.
 pub struct ConsoleLock {
     path: PathBuf,
 }
@@ -203,7 +203,7 @@ fn write_lock(path: &Path) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Feeds: what `.parl` says, folded into the state machine
+// Feeds: what `.pilotfish` says, folded into the state machine
 
 /// The session this console serves: the most recently used one, or — on a
 /// fleet without a store yet — a fresh row this console writes under the
@@ -229,7 +229,7 @@ pub(crate) fn resolve_console_key(fleet: &FleetPaths) -> SessionKey {
     }
 }
 
-/// The runtime's polled view of `.parl`, kept beside the `Console`: the
+/// The runtime's polled view of `.pilotfish`, kept beside the `Console`: the
 /// renderer reads the orchestrator state and run entries directly (they carry
 /// the permission mode, pending approvals and worker facts the status line
 /// needs), while the `Console` gets the same facts through its feeds.
@@ -413,7 +413,7 @@ impl Poll {
         self.diff_at = now;
         let repo_root = repo_cwd(&self.fleet);
         // Diff against THIS console's anchored fleet, pinned: a changed
-        // ambient PARL_DIR must not divert the stat to another fleet.
+        // ambient PILOTFISH_DIR must not divert the stat to another fleet.
         let fleet_dir = self.fleet.root().to_string_lossy().into_owned();
         for run in &self.runs {
             if run.state.status == crate::fleet::run::RunStatus::Archived {
@@ -505,7 +505,7 @@ fn ensure_orchestrator(
         return Ok(false);
     }
     record_launch_options(fleet, options, user_config_dir, key)?;
-    let exe = std::env::current_exe().context("finding the parl binary")?;
+    let exe = std::env::current_exe().context("finding the pilotfish binary")?;
     // The session's directory is created lazily by whoever owns the key;
     // the monitor's log must exist before the monitor itself does.
     std::fs::create_dir_all(fleet.orchestrator_dir(key))
@@ -659,7 +659,7 @@ async fn anchor_console(
 // The event loop
 
 /// Run the console until the user quits: one draw per pass, key events
-/// through the state machine and its effects, `.parl` polled into the feeds
+/// through the state machine and its effects, `.pilotfish` polled into the feeds
 /// on a timer, the lock heartbeating. Workers keep running afterwards.
 ///
 /// # Errors
@@ -826,7 +826,7 @@ mod tests {
 
     fn tmp_fleet() -> (std::path::PathBuf, FleetPaths) {
         let dir = std::env::temp_dir().join(format!(
-            "parl-tui-runtime-{}-{}",
+            "pilotfish-tui-runtime-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
@@ -1042,14 +1042,14 @@ mod tests {
     fn the_user_config_supplies_the_orchestrator_model_unless_an_explicit_flag_wins() {
         let (_dir, fleet) = tmp_fleet();
         let key = resolve_console_key(&fleet);
-        // A fabricated `~/.parl` with an `[orchestrator] model`; injected, so
+        // A fabricated `~/.pilotfish` with an `[orchestrator] model`; injected, so
         // nothing resolves the machine's real home.
         let user_root = std::env::temp_dir().join(format!(
-            "parl-tui-user-{}-{}",
+            "pilotfish-tui-user-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));
-        let user_dir = user_root.join(".parl");
+        let user_dir = user_root.join(".pilotfish");
         std::fs::create_dir_all(&user_dir).unwrap();
         std::fs::write(
             user_dir.join("config.toml"),
@@ -1077,7 +1077,7 @@ mod tests {
     /// `events.jsonl`, and the session row the console writes into.
     fn fleet_with_run(name: &str) -> (tempfile::TempDir, FleetPaths, String, SessionKey) {
         let tmp = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
-        let fleet = FleetPaths::new(tmp.path().join(".parl"));
+        let fleet = FleetPaths::new(tmp.path().join(".pilotfish"));
         let key = resolve_console_key(&fleet);
         std::fs::create_dir_all(fleet.orchestrator_dir(&key)).unwrap();
         let run_id = format!("{name}-20260830000000");
@@ -1090,7 +1090,7 @@ mod tests {
             tmp.path().to_string_lossy().as_ref(),
             "brief",
             None,
-            Some(format!("parl/{name}-1234567")),
+            Some(format!("pilotfish/{name}-1234567")),
             None,
             None,
             None,
@@ -1295,7 +1295,7 @@ mod tests {
         (OrchestratorSession, String),
     ) {
         let tmp = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
-        let fleet = FleetPaths::new(tmp.path().join(".parl"));
+        let fleet = FleetPaths::new(tmp.path().join(".pilotfish"));
         let first = crate::orch::session::create_session(fleet.root(), Some("alpha")).unwrap();
         let second = crate::orch::session::create_session(fleet.root(), Some("beta")).unwrap();
         for session in [&first, &second] {
@@ -1465,12 +1465,12 @@ mod tests {
             );
         };
         git(&["init", "-q", "-b", "main"], &root);
-        std::fs::write(root.join(".gitignore"), ".parl/\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".pilotfish/\n").unwrap();
         std::fs::write(root.join("seed.txt"), "seed\n").unwrap();
         git(&["add", "."], &root);
         git(&["commit", "-qm", "seed"], &root);
 
-        let fleet = FleetPaths::new(root.join(".parl"));
+        let fleet = FleetPaths::new(root.join(".pilotfish"));
         let key = resolve_console_key(&fleet);
         std::fs::create_dir_all(fleet.orchestrator_dir(&key)).unwrap();
         let run_id = "auth-20260830000000";

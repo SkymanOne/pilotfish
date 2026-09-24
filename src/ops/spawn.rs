@@ -61,7 +61,7 @@ pub struct CreatedRun {
 
 /// Spawn one worker: the CLI entry point. Prints the core's lines and hands
 /// back its exit code; hard errors (no brief, no name, bad cwd) surface
-/// through `main` as `parl: …` and exit 1.
+/// through `main` as `pilotfish: …` and exit 1.
 ///
 /// # Errors
 ///
@@ -80,23 +80,23 @@ pub async fn spawn_run(request: SpawnRequest) -> anyhow::Result<ExitCode> {
 /// Fails on a missing brief, an unresolvable `cwd`, a same-second name
 /// collision, or a name whose previous run is still live.
 pub async fn spawn_core(request: SpawnRequest) -> anyhow::Result<CommandResult<SpawnData>> {
-    spawn_core_with_env(request, super::ambient_parl_dir().as_deref()).await
+    spawn_core_with_env(request, super::ambient_pilotfish_dir().as_deref()).await
 }
 
-/// [`spawn_core`] with the `$PARL_DIR` value injected (tests and the MCP
+/// [`spawn_core`] with the `$PILOTFISH_DIR` value injected (tests and the MCP
 /// server pass it; MCP passes its own captured value).
 pub(crate) async fn spawn_core_with_env(
     request: SpawnRequest,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
 ) -> anyhow::Result<CommandResult<SpawnData>> {
-    spawn_core_with_dirs(request, parl_dir, crate::paths::user_dir().as_deref()).await
+    spawn_core_with_dirs(request, pilotfish_dir, crate::paths::user_dir().as_deref()).await
 }
 
 /// [`spawn_core_with_env`] with the user config dir injected too, so tests
-/// never resolve an ambient `~/.parl`.
+/// never resolve an ambient `~/.pilotfish`.
 pub(crate) async fn spawn_core_with_dirs(
     request: SpawnRequest,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
     user_config_dir: Option<&Path>,
 ) -> anyhow::Result<CommandResult<SpawnData>> {
     if request.brief.trim().is_empty() {
@@ -107,7 +107,7 @@ pub(crate) async fn spawn_core_with_dirs(
     // monitor exist: `[limits] max_workers_per_session` (default 3) limits
     // how many *live* workers one session may hold — settled, archived and
     // dead runs free their slot. Zero means no spawning at all.
-    let fleet_dir = resolve_fleet_dir_with_env(request.cwd.as_deref(), parl_dir)
+    let fleet_dir = resolve_fleet_dir_with_env(request.cwd.as_deref(), pilotfish_dir)
         .await?
         .paths
         .root()
@@ -144,7 +144,7 @@ pub(crate) async fn spawn_core_with_dirs(
             .join("\n");
         let hint = if live.is_empty() {
             "the cap is set to 0 — raise [limits] max_workers_per_session in the \
-user config (~/.parl/config.toml) to spawn at all."
+user config (~/.pilotfish/config.toml) to spawn at all."
         } else {
             "finish or clean up one of these before spawning another."
         };
@@ -164,7 +164,7 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
     if let Some(bad) = check_model(&pi_bin, model).await? {
         return Ok(fail(ExitCode::NoReport, vec![format!("spawn: {bad}")]));
     }
-    let mut created = create_run_with_env(&request, parl_dir, user_config_dir).await?;
+    let mut created = create_run_with_env(&request, pilotfish_dir, user_config_dir).await?;
     if let Some(routing) = routing.clone() {
         created.state.routing = Some(routing);
         run::save_state(&created.run_dir, &created.state)?;
@@ -215,7 +215,7 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
 }
 
 /// How long a spawn waits for the human to choose a model Jev was unsure
-/// of, unless `$PARL_ASK_TIMEOUT_MS` says otherwise: the same ten minutes a
+/// of, unless `$PILOTFISH_ASK_TIMEOUT_MS` says otherwise: the same ten minutes a
 /// worker's `fleet_ask` waits.
 const MODEL_ASK_TIMEOUT_MS: i64 = 10 * 60_000;
 
@@ -270,7 +270,7 @@ async fn route_request(
         Ok(Ok(None)) => {
             return Some(crate::route::Routing {
                 note: "not routed: no TypeSafe key — set one with /routing in the console, \
-or $PARL_TYPESAFE_API_KEY"
+or $PILOTFISH_TYPESAFE_API_KEY"
                     .to_string(),
                 ..crate::route::Routing::default()
             });
@@ -456,17 +456,17 @@ fn wait_words(ms: i64) -> String {
 pub async fn create_run(request: &SpawnRequest) -> anyhow::Result<CreatedRun> {
     create_run_with_env(
         request,
-        super::ambient_parl_dir().as_deref(),
+        super::ambient_pilotfish_dir().as_deref(),
         crate::paths::user_dir().as_deref(),
     )
     .await
 }
 
-/// [`create_run`] with the `$PARL_DIR` value and the user config dir
+/// [`create_run`] with the `$PILOTFISH_DIR` value and the user config dir
 /// injected (tests pass `None`s).
 async fn create_run_with_env(
     request: &SpawnRequest,
-    parl_dir: Option<&str>,
+    pilotfish_dir: Option<&str>,
     user_config_dir: Option<&Path>,
 ) -> anyhow::Result<CreatedRun> {
     let name = sanitize_name(&request.name);
@@ -482,7 +482,7 @@ async fn create_run_with_env(
     let provider = config
         .worker_provider(request.provider.as_deref())
         .map(str::to_string);
-    let fleet = resolve_fleet_dir_with_env(request.cwd.as_deref(), parl_dir).await?;
+    let fleet = resolve_fleet_dir_with_env(request.cwd.as_deref(), pilotfish_dir).await?;
     // The fixed layout plus the gitignore entry; idempotent.
     fleet.paths.ensure()?;
     // The run's identity is its uuid; the id and directory name derive from
@@ -612,7 +612,7 @@ fn live_namesakes(fleet_dir: &Path, name: &str) -> Vec<RunRef> {
         .collect()
 }
 
-/// Launch `parl monitor` for the run, detached: its own process group
+/// Launch `pilotfish monitor` for the run, detached: its own process group
 /// (`process_group(0)` — the safe equivalent of Node's `detached: true`),
 /// stdio into the run's `pi.log`. The child outlives this process, and it is
 /// reaped by a background task: nobody waits on the handle, and an unreaped
@@ -707,7 +707,7 @@ mod tests {
 
     #[tokio::test]
     async fn routing_off_is_the_spawn_that_was_always_there() {
-        let root = init_repo("parl-route-off-");
+        let root = init_repo("pilotfish-route-off-");
         let created = create_run_with_retry(&request("plain", "do a thing", &root, true), None)
             .await
             .unwrap();
@@ -721,7 +721,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pinned_model_and_thinking_level_are_never_routed() {
-        let root = init_repo("parl-route-pinned-");
+        let root = init_repo("pilotfish-route-pinned-");
         let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
         std::fs::create_dir_all(&fleet_dir).unwrap();
         let mut req = request("pinned", "do a thing", &root, true);
@@ -818,7 +818,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_confident_route_sets_the_model_and_then_its_thinking() {
-        let (root, fleet_dir) = fleet_with_catalogue("parl-route-sure-");
+        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-sure-");
         let (url, _requests) = crate::route::test_support::stub(vec![
             serde_json::json!({"answers": {
                 "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.9},
@@ -847,7 +847,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unsure_model_is_put_to_the_console_and_the_answer_runs() {
-        let (root, fleet_dir) = fleet_with_catalogue("parl-route-ask-");
+        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-ask-");
         open_console(&fleet_dir);
         let (url, _requests) =
             crate::route::test_support::stub(vec![unsure(), thinking("xhigh")]).await;
@@ -915,7 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unanswered_model_question_keeps_the_configured_model() {
-        let (root, fleet_dir) = fleet_with_catalogue("parl-route-wait-");
+        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-wait-");
         open_console(&fleet_dir);
         let (url, _requests) =
             crate::route::test_support::stub(vec![unsure(), thinking("max")]).await;
@@ -951,7 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn with_no_console_open_nobody_is_waited_for() {
-        let (root, fleet_dir) = fleet_with_catalogue("parl-route-alone-");
+        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-alone-");
         let (url, _requests) =
             crate::route::test_support::stub(vec![unsure(), thinking("high")]).await;
         let config = routing_on(url);
@@ -978,7 +978,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_run_builds_layout_worktree_and_initial_state() {
-        let root = init_repo("parl-spawn-");
+        let root = init_repo("pilotfish-spawn-");
         let created =
             create_run_with_retry(&request("auth-worker", "create hello", &root, true), None)
                 .await
@@ -1005,7 +1005,7 @@ mod tests {
         );
         assert!(created.paths.run_json(&created.run_id).is_file());
         let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains(".parl/"), "{gitignore}");
+        assert!(gitignore.contains(".pilotfish/"), "{gitignore}");
 
         let worktree = created.worktree_path.clone().unwrap();
         assert!(worktree.join("seed.txt").exists());
@@ -1016,7 +1016,7 @@ mod tests {
                 .branch
                 .clone()
                 .unwrap()
-                .starts_with("parl/auth-worker-")
+                .starts_with("pilotfish/auth-worker-")
         );
         assert_eq!(
             created.state.repo_root.as_deref(),
@@ -1035,7 +1035,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_run_in_a_plain_directory_runs_in_place() {
-        let dir = tmp_dir("parl-spawn-plain-");
+        let dir = tmp_dir("pilotfish-spawn-plain-");
         let created = create_run_with_retry(&request("flat", "b", &dir, true), None)
             .await
             .unwrap();
@@ -1048,7 +1048,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_run_skips_the_worktree_when_asked() {
-        let root = init_repo("parl-spawn-");
+        let root = init_repo("pilotfish-spawn-");
         let created = create_run_with_retry(&request("nowt", "b", &root, false), None)
             .await
             .unwrap();
@@ -1062,7 +1062,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_exited_monitor_is_reaped_so_a_crash_can_read_dead() {
-        let dir = tmp_dir("parl-spawn-reap-");
+        let dir = tmp_dir("pilotfish-spawn-reap-");
         let paths = FleetPaths::new(dir);
         let run_id = "reap-20260828141530";
         std::fs::create_dir_all(paths.run_dir(run_id)).unwrap();
@@ -1123,7 +1123,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_archives_a_stale_namesake() {
-        let root = init_repo("parl-spawn-dupe-");
+        let root = init_repo("pilotfish-spawn-dupe-");
         let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
         fleet.paths.ensure().unwrap();
         // A settled prior run of the same name: spawning anew archives it as
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_refuses_when_the_name_still_runs() {
-        let root = init_repo("parl-spawn-live-");
+        let root = init_repo("pilotfish-spawn-live-");
         let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
         fleet.paths.ensure().unwrap();
         // A still-running namesake refuses the spawn, naming the live run:
@@ -1184,7 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_names_and_briefs_are_refused() {
-        let dir = tmp_dir("parl-spawn-bad-");
+        let dir = tmp_dir("pilotfish-spawn-bad-");
         let err = create_run_with_env(&request("!!!", "b", &dir, false), None, None)
             .await
             .unwrap_err()
@@ -1199,8 +1199,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_user_config_supplies_worker_model_and_provider_defaults() {
-        let root = init_repo("parl-spawn-cfg-");
-        let user_dir = tmp_dir("parl-user-cfg-");
+        let root = init_repo("pilotfish-spawn-cfg-");
+        let user_dir = tmp_dir("pilotfish-user-cfg-");
         std::fs::write(
             user_dir.join("config.toml"),
             "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
@@ -1219,8 +1219,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_explicit_worker_model_beats_the_user_config() {
-        let root = init_repo("parl-spawn-cfg-explicit-");
-        let user_dir = tmp_dir("parl-user-cfg-explicit-");
+        let root = init_repo("pilotfish-spawn-cfg-explicit-");
+        let user_dir = tmp_dir("pilotfish-user-cfg-explicit-");
         std::fs::write(
             user_dir.join("config.toml"),
             "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_refuses_at_the_per_session_cap_naming_the_slots() {
-        let root = init_repo("parl-spawn-cap-");
+        let root = init_repo("pilotfish-spawn-cap-");
         let fleet = fleet_of(&root);
         let default = Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION);
         // Three live runs of the (default) session fill the default cap of 3.
@@ -1319,7 +1319,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_cap_counts_live_runs_only_and_other_sessions_do_not_hold_slots() {
-        let root = init_repo("parl-spawn-cap2-");
+        let root = init_repo("pilotfish-spawn-cap2-");
         let fleet = fleet_of(&root);
         let paths = FleetPaths::new(&fleet);
         let other = Some(uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap());
@@ -1385,10 +1385,10 @@ mod tests {
 
     #[tokio::test]
     async fn the_user_config_sets_the_cap_and_zero_refuses_everything() {
-        let root = init_repo("parl-spawn-capcfg-");
+        let root = init_repo("pilotfish-spawn-capcfg-");
         let fleet = fleet_of(&root);
         let paths = FleetPaths::new(&fleet);
-        let user_dir = tmp_dir("parl-user-cap-");
+        let user_dir = tmp_dir("pilotfish-user-cap-");
         // A lowered cap: two live runs fill it.
         std::fs::write(
             user_dir.join("config.toml"),
@@ -1409,7 +1409,7 @@ mod tests {
 
         // A cap of zero refuses even with nothing running: no spawning at
         // all, with a hint naming the config key.
-        let empty = init_repo("parl-spawn-capzero-");
+        let empty = init_repo("pilotfish-spawn-capzero-");
         std::fs::write(
             user_dir.join("config.toml"),
             "[limits]\nmax_workers_per_session = 0\n",
@@ -1430,7 +1430,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_spawn_records_the_acting_session_as_owner() {
-        let root = init_repo("parl-spawn-owner-");
+        let root = init_repo("pilotfish-spawn-owner-");
         let fleet = fleet_of(&root);
         // The fleet's last-used session is the acting one; the new run is
         // recorded as *its*, so its cap and views count exactly its runs.

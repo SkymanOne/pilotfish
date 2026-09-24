@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Scripted `pi --mode rpc` replacement for hermetic parl monitor tests —
-// adapted from the TypeScript tree's tests/fixtures/fake-pi.mjs for the PARL
-// layout (.parl, runs/<id>/report.md, inbox.jsonl envelopes).
+// Scripted `pi --mode rpc` replacement for hermetic pilotfish monitor tests —
+// adapted from the TypeScript tree's tests/fixtures/fake-pi.mjs for the PILOTFISH
+// layout (.pilotfish, runs/<id>/report.md, inbox.jsonl envelopes).
 // Env: FAKE_PI_DELAY_MS   settle delay after the work turn (default 300)
 //      FAKE_PI_WRITE_HELLO=1  write hello.txt in cwd
 //      FAKE_PI_ARGV_FILE  if set, dump process.argv.slice(2) there as JSON
@@ -51,8 +51,8 @@ const SUPPORTED = (process.env.FAKE_PI_THINKING_LEVELS || ALL_LEVELS.join(","))
 const thinkingLevelMap = Object.fromEntries(
   ALL_LEVELS.map((l) => [l, SUPPORTED.includes(l) ? l : null]),
 );
-const fleetDir = process.env.PARL_DIR;
-const runId = process.env.PARL_RUN;
+const fleetDir = process.env.PILOTFISH_DIR;
+const runId = process.env.PILOTFISH_RUN;
 const delay = Number(process.env.FAKE_PI_DELAY_MS || 300);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

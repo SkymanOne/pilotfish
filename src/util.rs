@@ -18,7 +18,7 @@ use time::macros::format_description;
 use uuid::Uuid;
 
 /// Worker branches are cut as `<prefix>/<name>-<last 7 of the run id>`.
-pub const BRANCH_PREFIX: &str = "parl";
+pub const BRANCH_PREFIX: &str = "pilotfish";
 
 /// Result of [`split_json_lines`]: complete lines plus the unfinished tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,7 +202,7 @@ pub fn short7(run_id: &str) -> &str {
     &run_id[start..]
 }
 
-/// The worker's branch: `parl/<name>-<short7>`.
+/// The worker's branch: `pilotfish/<name>-<short7>`.
 pub fn branch_for(name: &str, run_id: &str) -> String {
     format!("{BRANCH_PREFIX}/{name}-{}", short7(run_id))
 }
@@ -485,7 +485,7 @@ mod tests {
 
     #[test]
     fn atomic_write_json_round_trips_without_tmp_files() {
-        let dir = tmp_dir("parl-util-");
+        let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("state.json");
         atomic_write_json(&path, &serde_json::json!({ "a": 1 })).unwrap();
         atomic_write_json(&path, &serde_json::json!({ "a": 2 })).unwrap();
@@ -504,7 +504,7 @@ mod tests {
 
     #[test]
     fn append_json_line_then_read_jsonl_tail_returns_newest_last_slice() {
-        let dir = tmp_dir("parl-util-");
+        let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("events.jsonl");
         for i in 0..5 {
             append_json_line(&path, &serde_json::json!({ "i": i })).unwrap();
@@ -521,12 +521,15 @@ mod tests {
         assert_eq!(id, "auth-worker-f7a8b9c");
         assert_eq!(short7(&id), "f7a8b9c");
         assert_eq!(short_uuid(&uuid), "f7a8b9c");
-        assert_eq!(branch_for("auth-worker", &id), "parl/auth-worker-f7a8b9c");
+        assert_eq!(
+            branch_for("auth-worker", &id),
+            "pilotfish/auth-worker-f7a8b9c"
+        );
         // A legacy 14-digit run id still shortens to seven characters, so
         // the branch rule needs no special case for what is on disk.
         let legacy = "auth-20260828141530";
         assert_eq!(short7(legacy), "8141530");
-        assert_eq!(branch_for("auth", legacy), "parl/auth-8141530");
+        assert_eq!(branch_for("auth", legacy), "pilotfish/auth-8141530");
         assert_eq!(first_line("a\nb"), "a");
         assert_eq!(first_line("solo"), "solo");
     }
@@ -615,7 +618,7 @@ mod tests {
 
     #[test]
     fn read_new_lines_advances_only_past_complete_lines() {
-        let dir = tmp_dir("parl-util-");
+        let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("inbox.jsonl");
         std::fs::write(&path, "{\"a\":1}\n{\"b\":").unwrap();
         let (lines, offset) = read_new_lines(&path, 0);
@@ -636,7 +639,7 @@ mod tests {
 
     #[test]
     fn tail_text_ignores_the_trailing_newline() {
-        let dir = tmp_dir("parl-util-");
+        let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("rpc.log");
         std::fs::write(&path, "a\nb\nc\n").unwrap();
         assert_eq!(tail_text(&path, 2), "b\nc");

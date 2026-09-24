@@ -461,7 +461,7 @@ mod tests {
     fn mk_fleet(name: &str) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir_in(std::env::temp_dir())
             .unwrap_or_else(|_| tempfile::tempdir().unwrap());
-        let fleet_dir = tmp.path().join(format!(".parl-{name}"));
+        let fleet_dir = tmp.path().join(format!(".pilotfish-{name}"));
         std::fs::create_dir_all(fleet_dir.join("runs")).unwrap();
         (tmp, fleet_dir)
     }
@@ -477,7 +477,7 @@ mod tests {
             "/repo",
             "brief",
             None,
-            Some(format!("parl/{name}-1234567")),
+            Some(format!("pilotfish/{name}-1234567")),
             None,
             None,
             None,
@@ -551,7 +551,10 @@ mod tests {
             text.contains("report: ") && text.contains("(present)"),
             "{text}"
         );
-        assert!(text.contains("branch: parl/add-auth-1234567"), "{text}");
+        assert!(
+            text.contains("branch: pilotfish/add-auth-1234567"),
+            "{text}"
+        );
         assert!(text.contains("last: Working: wrote hello.txt"), "{text}");
         assert!(
             text.contains("next: fleet_report name=\"add-auth\""),

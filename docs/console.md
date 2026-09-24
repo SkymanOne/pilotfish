@@ -136,9 +136,9 @@ Most terminals also bypass mouse capture while a modifier is held during a drag 
 | `m` | Edit the shortlist |
 | `-` / `+` | Lower or raise the confidence limit in steps of 5% (0% never asks, 100% always asks) |
 
-All settings are written to `~/.parl/config.toml`, and the rest of that file, including comments, is left as it was.
+All settings are written to `~/.pilotfish/config.toml`, and the rest of that file, including comments, is left as it was.
 
-**The API key.** `s` prompts for the key; it can be pasted or typed, and is displayed as dots. `enter` saves it to the operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.parl`, the transcript, or the command history. The panel displays only its last four characters. A key in `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` takes precedence over the stored one, and the panel indicates this. On a machine without a credential store, such as a headless Linux host without a Secret Service, the environment variable is the only option; the key is never written to a file. On macOS, the system may ask for permission the first time a newly built `parl` reads the key.
+**The API key.** `s` prompts for the key; it can be pasted or typed, and is displayed as dots. `enter` saves it to the operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.pilotfish`, the transcript, or the command history. The panel displays only its last four characters. A key in `$PILOTFISH_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` takes precedence over the stored one, and the panel indicates this. On a machine without a credential store, such as a headless Linux host without a Secret Service, the environment variable is the only option; the key is never written to a file. On macOS, the system may ask for permission the first time a newly built `pilotfish` reads the key.
 
 **The shortlist.** `m` lists every model in pi's catalogue as `provider:id`, with its name and price. Typing filters the list, `up` and `down` move, `enter` adds or removes the selected model, and `esc` saves the shortlist and returns to the panel. One routing decision can weigh at most 255 models, so the shortlist cannot exceed 255 entries. Entries in the configuration that no longer match any model in the catalogue are preserved. The catalogue is recorded when a worker starts, so the shortlist can be edited once at least one worker has run.
 
@@ -170,7 +170,7 @@ The frequency of these prompts depends on the permission mode:
 | `dontAsk` | Denies any action not already allowed, instead of asking |
 | `plan` | Makes the orchestrator read-only |
 
-Start in a given mode with `parl --permission-mode auto`. The status line shows the mode whenever it is not the default; the mode persists across console restarts, and `p` in the fleet cycles it during a session. `bypassPermissions` is not offered, because it would bypass the prompt entirely.
+Start in a given mode with `pilotfish --permission-mode auto`. The status line shows the mode whenever it is not the default; the mode persists across console restarts, and `p` in the fleet cycles it during a session. `bypassPermissions` is not offered, because it would bypass the prompt entirely.
 
 ## Worker questions
 
@@ -188,4 +188,4 @@ When a turn is complete, its reasoning and tool output collapse to a single row 
 
 Long sessions manage their own size. The transcript file is capped, and after `[session] auto_compact_turns` turns (60 by default; `0` disables it) the orchestrator's context is compacted with claude's `/compact`, with a line in the transcript marking the point. `/clear` clears a transcript from the console without changing the file; `/trim` shortens the file itself.
 
-Workers are removed from the fleet when they are finished: the orchestrator removes each worker after merging and verifying its work, and the console removes any settled worker whose branch has already been merged. Unmerged, modified or running workers are never removed automatically; that requires `/remove` or `parl cleanup`, both of which report exactly what would be lost before acting.
+Workers are removed from the fleet when they are finished: the orchestrator removes each worker after merging and verifying its work, and the console removes any settled worker whose branch has already been merged. Unmerged, modified or running workers are never removed automatically; that requires `/remove` or `pilotfish cleanup`, both of which report exactly what would be lost before acting.

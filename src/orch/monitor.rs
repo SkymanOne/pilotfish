@@ -239,7 +239,7 @@ impl Monitor {
         let prompt_file = crate::orch::prompt::write_prompt(fleet_dir, &cwd, &key)
             .map_err(|e| anyhow::anyhow!("cannot write the orchestrator prompt: {e:#}"))?;
         let mcp_config_json = crate::orch::mcp_config::fleet_mcp_config(
-            &crate::orch::mcp_config::parl_binary()?,
+            &crate::orch::mcp_config::pilotfish_binary()?,
             fleet_dir,
         )?
         .to_string();
@@ -1134,7 +1134,7 @@ mod tests {
     #[test]
     fn boot_honours_the_saved_session_and_launch_flags() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let mut store = session::FleetSessions::new();
         let mut record = session::OrchestratorSession::new("/repo");
@@ -1174,7 +1174,7 @@ mod tests {
     #[test]
     fn a_missing_fleet_directory_trips_only_after_consecutive_polls() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let monitor = Monitor::boot(&fleet, None).unwrap();
         assert!(!monitor.fleet_dir_gone(), "a present fleet is not gone");
@@ -1193,7 +1193,7 @@ mod tests {
     #[test]
     fn losing_the_orchestrator_directory_alone_trips_the_check() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let monitor = Monitor::boot(&fleet, None).unwrap();
         std::fs::remove_dir_all(monitor.paths.orchestrator_dir(&monitor.key)).unwrap();
@@ -1204,7 +1204,7 @@ mod tests {
     #[test]
     fn boot_without_a_session_record_defaults_the_cwd_to_the_repo() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let monitor = Monitor::boot(&fleet, None).unwrap();
         let sh = monitor.shared();
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn boot_with_an_explicit_session_serves_that_session_alone() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let mut store = session::FleetSessions::new();
         let mut wanted = session::OrchestratorSession::new("/repo-a");
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn boot_with_an_unknown_session_errors_instead_of_falling_back() {
         let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".parl");
+        let fleet = tmp.path().join(".pilotfish");
         std::fs::create_dir_all(&fleet).unwrap();
         let err = match Monitor::boot(&fleet, Some(uuid::Uuid::new_v4())) {
             Ok(_) => panic!("an unknown session must not boot"),

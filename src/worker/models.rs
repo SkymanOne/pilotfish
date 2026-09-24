@@ -21,7 +21,7 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(10);
 static CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// `PARL_PI_BIN` is an executable spec split on spaces
+/// `PILOTFISH_PI_BIN` is an executable spec split on spaces
 /// ("node /path/fake-pi.mjs"); the default is plain `pi`.
 #[must_use]
 pub fn pi_bin_spec() -> String {
@@ -129,7 +129,7 @@ mod tests {
 
     fn write_fake_pi(body: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "parl-models-{}-{}",
+            "pilotfish-models-{}-{}",
             std::process::id(),
             new_id("t").replace('_', "")
         ));

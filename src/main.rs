@@ -1,12 +1,12 @@
-//! parl — binary entry point: clap parsing plus dispatch to the owning
+//! pilotfish — binary entry point: clap parsing plus dispatch to the owning
 //! module of every subcommand. Behaviour lives in `ops`, the TUI, the MCP
 //! server and the two monitor modules; this file stays a dispatcher.
 
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 use clap::Parser as _;
-use parl::cli::{Cli, Command, ExitCode};
-use parl::{mcp, ops, orch, tui, worker};
+use pilotfish::cli::{Cli, Command, ExitCode};
+use pilotfish::{mcp, ops, orch, tui, worker};
 
 /// `--route` / `--no-route` as an override, or `None` for "whatever the
 /// config says". clap's `overrides_with` means at most one is set.
@@ -38,7 +38,7 @@ fn main() -> std::process::ExitCode {
     {
         Ok(runtime) => runtime.block_on(dispatch(cli)),
         Err(err) => {
-            eprintln!("parl: {err:#}");
+            eprintln!("pilotfish: {err:#}");
             ExitCode::Error.into()
         }
     }
@@ -187,7 +187,7 @@ async fn tui_arm(options: tui::app::TuiOptions) -> std::process::ExitCode {
 fn finish(result: anyhow::Result<ExitCode>) -> std::process::ExitCode {
     result
         .unwrap_or_else(|err| {
-            eprintln!("parl: {err:#}");
+            eprintln!("pilotfish: {err:#}");
             ExitCode::Error
         })
         .into()
@@ -211,14 +211,14 @@ mod tests {
     fn cli_parses_every_subcommand_surface() {
         use clap::Parser as _;
         // No subcommand: TUI flags land on the root.
-        let cli = Cli::try_parse_from(["parl", "--fresh", "--budget", "5", "--cwd", "/tmp"])
+        let cli = Cli::try_parse_from(["pilotfish", "--fresh", "--budget", "5", "--cwd", "/tmp"])
             .expect("root flags parse");
         assert!(cli.fresh);
         assert_eq!(cli.budget.as_deref(), Some("5"));
         assert!(cli.command.is_none());
 
-        // `parl tui` explicitly.
-        let cli = Cli::try_parse_from(["parl", "tui", "--fresh"]).expect("tui parses");
+        // `pilotfish tui` explicitly.
+        let cli = Cli::try_parse_from(["pilotfish", "tui", "--fresh"]).expect("tui parses");
         assert!(matches!(
             cli.command,
             Some(Command::Tui { fresh: true, .. })
@@ -226,7 +226,7 @@ mod tests {
 
         // spawn with a `--`-separated brief and its own flags.
         let cli = Cli::try_parse_from([
-            "parl",
+            "pilotfish",
             "spawn",
             "auth",
             "--model",
@@ -254,32 +254,37 @@ mod tests {
         }
 
         // wait --timeout default and explicit.
-        let cli = Cli::try_parse_from(["parl", "wait", "auth"]).expect("wait parses");
+        let cli = Cli::try_parse_from(["pilotfish", "wait", "auth"]).expect("wait parses");
         match cli.command {
             Some(Command::Wait { timeout, .. }) => assert_eq!(timeout, 600),
             other => panic!("{other:?}"),
         }
 
         // --remote-control with and without a value.
-        let cli = Cli::try_parse_from(["parl", "--remote-control"]).expect("bare rc parses");
+        let cli = Cli::try_parse_from(["pilotfish", "--remote-control"]).expect("bare rc parses");
         assert_eq!(cli.remote_control.as_deref(), Some(""));
-        let cli =
-            Cli::try_parse_from(["parl", "--remote-control", "phone"]).expect("named rc parses");
+        let cli = Cli::try_parse_from(["pilotfish", "--remote-control", "phone"])
+            .expect("named rc parses");
         assert_eq!(cli.remote_control.as_deref(), Some("phone"));
 
         // The hidden internal monitors parse.
         let cli = Cli::try_parse_from([
-            "parl",
+            "pilotfish",
             "monitor",
             "--fleet-dir",
-            "/x/.parl",
+            "/x/.pilotfish",
             "--run",
             "auth-20260828141530",
         ])
         .expect("monitor parses");
         assert!(matches!(cli.command, Some(Command::Monitor { .. })));
-        let cli = Cli::try_parse_from(["parl", "orchestrator-monitor", "--fleet-dir", "/x/.parl"])
-            .expect("orchestrator-monitor parses");
+        let cli = Cli::try_parse_from([
+            "pilotfish",
+            "orchestrator-monitor",
+            "--fleet-dir",
+            "/x/.pilotfish",
+        ])
+        .expect("orchestrator-monitor parses");
         assert!(matches!(
             cli.command,
             Some(Command::OrchestratorMonitor { .. })
@@ -290,14 +295,14 @@ mod tests {
     fn cli_rejects_unknown_commands_and_missing_values() {
         use clap::Parser as _;
         // Unknown subcommand: refusal, exit 1 at dispatch.
-        assert!(Cli::try_parse_from(["parl", "install-claude-skill"]).is_err());
+        assert!(Cli::try_parse_from(["pilotfish", "install-claude-skill"]).is_err());
         // spawn without any brief still parses; the refusal is spawn's job.
-        let cli = Cli::try_parse_from(["parl", "spawn", "x"]).expect("empty brief parses");
+        let cli = Cli::try_parse_from(["pilotfish", "spawn", "x"]).expect("empty brief parses");
         match cli.command {
             Some(Command::Spawn { brief, .. }) => assert!(brief.is_empty()),
             other => panic!("{other:?}"),
         }
         // --run is required for the worker monitor.
-        assert!(Cli::try_parse_from(["parl", "monitor", "--fleet-dir", "/x"]).is_err());
+        assert!(Cli::try_parse_from(["pilotfish", "monitor", "--fleet-dir", "/x"]).is_err());
     }
 }

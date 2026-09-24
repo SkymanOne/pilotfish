@@ -63,7 +63,7 @@ pub const FLEET_EXTENSION_TS: &str = include_str!("../../pi/extensions/fleet-wor
 /// The report skill, embedded alongside the extension.
 pub const FLEET_SKILL_MD: &str = include_str!("../../pi/skills/fleet-worker-report/SKILL.md");
 
-/// `PARL_PI_BIN` is an executable spec split on spaces ("node /path/fake-pi.mjs")
+/// `PILOTFISH_PI_BIN` is an executable spec split on spaces ("node /path/fake-pi.mjs")
 /// so tests can point at a script; the default is the real `pi` on `PATH`.
 pub fn pi_command() -> (String, Vec<String>) {
     pi_command_from(&std::env::var(env_var("PI_BIN")).unwrap_or_else(|_| "pi".to_string()))
@@ -1306,7 +1306,7 @@ mod tests {
 
     fn base_state() -> RunState {
         RunState::new(
-            "/f/.parl",
+            "/f/.pilotfish",
             "r-20260828141530",
             "r",
             "/w",
@@ -1338,9 +1338,9 @@ mod tests {
 
     #[test]
     fn build_pi_args_carries_the_worker_protocol_and_user_flags() {
-        let run_dir = Path::new("/f/.parl/runs/r-1");
-        let ext = Path::new("/f/.parl/pi/extensions/fleet-worker.ts");
-        let skill = Path::new("/f/.parl/pi/skills/fleet-worker-report/SKILL.md");
+        let run_dir = Path::new("/f/.pilotfish/runs/r-1");
+        let ext = Path::new("/f/.pilotfish/pi/extensions/fleet-worker.ts");
+        let skill = Path::new("/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md");
         let args = build_pi_args(&base_state(), run_dir, ext, skill);
         assert_eq!(
             args,
@@ -1348,11 +1348,11 @@ mod tests {
                 "--mode",
                 "rpc",
                 "--session-dir",
-                "/f/.parl/runs/r-1/session",
+                "/f/.pilotfish/runs/r-1/session",
                 "--extension",
-                "/f/.parl/pi/extensions/fleet-worker.ts",
+                "/f/.pilotfish/pi/extensions/fleet-worker.ts",
                 "--skill",
-                "/f/.parl/pi/skills/fleet-worker-report/SKILL.md",
+                "/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md",
             ]
         );
         let mut state = base_state();
@@ -1383,9 +1383,9 @@ mod tests {
 
     #[test]
     fn report_reminder_points_at_the_runs_layout() {
-        let reminder = report_reminder(Path::new("/f/.parl"), "auth-1");
+        let reminder = report_reminder(Path::new("/f/.pilotfish"), "auth-1");
         assert!(
-            reminder.contains("/f/.parl/runs/auth-1/report.md"),
+            reminder.contains("/f/.pilotfish/runs/auth-1/report.md"),
             "{reminder}"
         );
         assert!(reminder.contains("Steering received"));

@@ -27,14 +27,14 @@ impl From<ExitCode> for std::process::ExitCode {
     }
 }
 
-/// parl — a fleet of headless pi workers orchestrated by Claude Code.
+/// pilotfish — a fleet of headless pi workers orchestrated by Claude Code.
 ///
 /// With no subcommand this opens the TUI console.
 #[derive(Debug, Parser)]
 #[command(
-    name = "parl",
+    name = "pilotfish",
     version,
-    about = "A fleet of headless pi workers orchestrated by Claude Code: run `parl` for the TUI, or drive workers with the subcommands."
+    about = "A fleet of headless pi workers orchestrated by Claude Code: run `pilotfish` for the TUI, or drive workers with the subcommands."
 )]
 pub struct Cli {
     /// Target directory (default: current).
@@ -281,7 +281,7 @@ pub enum Command {
         cwd: Option<PathBuf>,
     },
 
-    /// print the tail of one worker's transcript (the live console is `parl`)
+    /// print the tail of one worker's transcript (the live console is `pilotfish`)
     Attach {
         name: String,
         /// Lines to print (default 40).

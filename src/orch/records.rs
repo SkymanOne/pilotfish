@@ -662,8 +662,8 @@ mod tests {
             uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap(),
         );
         assert_eq!(
-            prompt_path(Path::new("/repo/.parl"), &key),
-            PathBuf::from("/repo/.parl/orchestrators/s0-f7a8b9c/prompt.md")
+            prompt_path(Path::new("/repo/.pilotfish"), &key),
+            PathBuf::from("/repo/.pilotfish/orchestrators/s0-f7a8b9c/prompt.md")
         );
     }
 
@@ -966,7 +966,7 @@ mod tests {
     #[test]
     fn transcript_coalesces_deltas_into_one_record_per_flush() {
         let dir = std::env::temp_dir().join(format!(
-            "parl-transcript-{}-{}",
+            "pilotfish-transcript-{}-{}",
             std::process::id(),
             crate::util::new_id("t").replace('_', "")
         ));

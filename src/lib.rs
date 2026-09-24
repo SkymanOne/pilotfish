@@ -1,4 +1,4 @@
-//! parl — a fleet of headless `pi` coding agents orchestrated by Claude Code.
+//! pilotfish — a fleet of headless `pi` coding agents orchestrated by Claude Code.
 //!
 //! The binary and the library share this crate: `main.rs` is a thin clap
 //! dispatcher, everything else lives here so integration tests can exercise it.

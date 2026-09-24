@@ -1,4 +1,4 @@
-//! The durable session store: `.parl/fleet.json` holds every orchestrator
+//! The durable session store: `.pilotfish/fleet.json` holds every orchestrator
 //! session, keyed by session uuid. The console and the watcher keep their
 //! cursors here — they are per-conversation, so each session owns its own
 //! [`WatcherState`] — and the orchestrator keeps its claude session id, so
@@ -57,7 +57,7 @@ pub struct WatcherState {
 pub struct LaunchOptions {
     /// The model asked for at launch (claude's default when none). Most
     /// specific wins: the explicit flag, then this persisted record, then
-    /// `~/.parl/config.toml`'s `[orchestrator] model`.
+    /// `~/.pilotfish/config.toml`'s `[orchestrator] model`.
     pub model: Option<String>,
     pub budget_usd: Option<f64>,
     pub permission_mode: Option<String>,
@@ -65,7 +65,7 @@ pub struct LaunchOptions {
     pub remote_control: Option<String>,
     pub fresh: Option<bool>,
     /// Turns before the monitor compacts the session's context. Resolved
-    /// from `~/.parl/config.toml` by whoever launched the monitor, and
+    /// from `~/.pilotfish/config.toml` by whoever launched the monitor, and
     /// recorded here so the monitor needs no user-config read of its own.
     /// `Some(0)` or `None` is off.
     pub auto_compact_turns: Option<u32>,
@@ -453,7 +453,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip_a_map_of_sessions_with_cursors_and_launch() {
-        let fleet = tmp_fleet("parl-session-");
+        let fleet = tmp_fleet("pilotfish-session-");
         let mut store = FleetSessions::new();
         let mut session = OrchestratorSession::new("/repo");
         session.session_id = Some("sess-abc12345".into());
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn last_used_picks_the_newest_session_and_resolution_follows() {
-        let fleet = tmp_fleet("parl-session-used-");
+        let fleet = tmp_fleet("pilotfish-session-used-");
         // A console touches last_used_at when it opens a session.
         let mut store = FleetSessions::new();
         let mut older = OrchestratorSession::new("/repo");
@@ -543,13 +543,13 @@ mod tests {
         let resolved = resolve_session(&fleet).unwrap();
         assert_eq!(resolved.uuid, newer_uuid);
         // An empty store has no session to resolve.
-        let none_fleet = tmp_fleet("parl-session-none-");
+        let none_fleet = tmp_fleet("pilotfish-session-none-");
         assert_eq!(resolve_session(&none_fleet), None);
     }
 
     #[test]
     fn list_sessions_returns_every_row_most_recently_used_first() {
-        let fleet = tmp_fleet("parl-session-list-");
+        let fleet = tmp_fleet("pilotfish-session-list-");
         let mut store = FleetSessions::new();
         let mut older = OrchestratorSession::new("/repo");
         older.alias = Some("older".into());
@@ -578,12 +578,12 @@ mod tests {
         );
         assert_eq!(listed[0].uuid, newest_uuid);
         // A store that never existed lists nothing.
-        assert!(list_sessions(&tmp_fleet("parl-session-list-none-")).is_empty());
+        assert!(list_sessions(&tmp_fleet("pilotfish-session-list-none-")).is_empty());
     }
 
     #[test]
     fn create_session_persists_a_fresh_row_and_makes_it_the_current_one() {
-        let fleet = tmp_fleet("parl-session-create-");
+        let fleet = tmp_fleet("pilotfish-session-create-");
         let session = create_session(&fleet, Some("My Session")).unwrap();
         assert_eq!(session.alias.as_deref(), Some("My Session"));
         assert!(session.uuid != uuid::Uuid::nil());
@@ -607,7 +607,7 @@ mod tests {
 
     #[test]
     fn session_by_key_resolves_uuid_then_alias_but_never_picks_an_ambiguous_one() {
-        let fleet = tmp_fleet("parl-session-bykey-");
+        let fleet = tmp_fleet("pilotfish-session-bykey-");
         let mut store = FleetSessions::new();
         let mut first = OrchestratorSession::new("/repo");
         first.alias = Some("shared".into());
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn touch_heartbeat_stamps_only_liveness_and_tolerates_a_vacant_row() {
-        let fleet = tmp_fleet("parl-session-heartbeat-");
+        let fleet = tmp_fleet("pilotfish-session-heartbeat-");
         let session = create_session(&fleet, None).unwrap();
         let used_before = session.last_used_at.clone();
         touch_heartbeat(&fleet, session.uuid).unwrap();
@@ -673,7 +673,13 @@ mod tests {
         // An unknown (already removed) session is not an error.
         assert!(touch_heartbeat(&fleet, uuid::Uuid::new_v4()).is_ok());
         // A fleet with no store at all is not an error either.
-        assert!(touch_heartbeat(&tmp_fleet("parl-session-hb-none-"), uuid::Uuid::new_v4()).is_ok());
+        assert!(
+            touch_heartbeat(
+                &tmp_fleet("pilotfish-session-hb-none-"),
+                uuid::Uuid::new_v4()
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -727,7 +733,7 @@ mod tests {
 
     #[test]
     fn a_missing_file_and_a_foreign_version_read_as_no_session() {
-        let fleet = tmp_fleet("parl-session-missing-");
+        let fleet = tmp_fleet("pilotfish-session-missing-");
         assert_eq!(load(&fleet), None);
         assert_eq!(resolve_session(&fleet), None);
         // A newer writer's version starts fresh.
@@ -745,7 +751,7 @@ mod tests {
 
     #[test]
     fn unknown_top_level_keys_round_trip_through_store_saves() {
-        let fleet = tmp_fleet("parl-session-extra-");
+        let fleet = tmp_fleet("pilotfish-session-extra-");
         // a real session row the heartbeat will touch
         let session = create_session(&fleet, Some("alpha")).unwrap();
         // a console's prefs key and a newer writer's unknown key
@@ -796,7 +802,7 @@ mod tests {
 
     #[test]
     fn unknown_and_missing_fields_are_tolerated() {
-        let fleet = tmp_fleet("parl-session-tolerant-");
+        let fleet = tmp_fleet("pilotfish-session-tolerant-");
         // A newer writer with extra fields, an older one without launch info.
         std::fs::write(
             session_path(&fleet),

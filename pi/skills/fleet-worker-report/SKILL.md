@@ -1,11 +1,11 @@
 ---
 name: fleet-worker-report
-description: How to write the final report for a parl fleet worker run: the exact markdown template, what each section needs, and how to reflect steering you received mid-run. Use whenever PARL_RUN is set or a task brief asks for a fleet report.
+description: How to write the final report for a pilotfish fleet worker run: the exact markdown template, what each section needs, and how to reflect steering you received mid-run. Use whenever PILOTFISH_RUN is set or a task brief asks for a fleet report.
 ---
 
 # Fleet worker report
 
-You are running as a worker for `parl`. The orchestrator never reads this chat. It reads one file, `$PARL_DIR/runs/$PARL_RUN/report.md`, and nothing else. Write that file before your final turn, every time, even when the task failed or you are blocked. A run without a report looks the same as a run that did nothing.
+You are running as a worker for `pilotfish`. The orchestrator never reads this chat. It reads one file, `$PILOTFISH_DIR/runs/$PILOTFISH_RUN/report.md`, and nothing else. Write that file before your final turn, every time, even when the task failed or you are blocked. A run without a report looks the same as a run that did nothing.
 
 ## Template (copy it exactly, keep every heading in this order)
 
