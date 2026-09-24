@@ -332,6 +332,42 @@ pub fn resolve_session_by_key(fleet_dir: &Path, key: &str) -> anyhow::Result<Orc
 /// each save). N monitors share this store: without the lock, one writer's
 /// stale read can clobber another's row — losing a heartbeat, a pid, or a
 /// `sessionId` until the next event rewrites it.
+/// Rename a session; an empty name clears it. Its directory keeps the name
+/// it was made under ([`crate::paths::FleetPaths::orchestrator_dir`] finds
+/// it by uuid), so a running monitor is never pulled out from under.
+///
+/// # Errors
+///
+/// No such session, another session already has the name, or the store
+/// cannot be written.
+pub fn rename_session(
+    fleet_dir: &Path,
+    uuid: Uuid,
+    name: &str,
+) -> anyhow::Result<OrchestratorSession> {
+    let name = name.trim();
+    let alias = (!name.is_empty()).then(|| name.to_string());
+    if let Some(alias) = &alias {
+        let wanted = crate::util::sanitize_name(alias);
+        let taken = list_sessions(fleet_dir).into_iter().any(|session| {
+            session.uuid != uuid
+                && session
+                    .alias
+                    .as_deref()
+                    .is_some_and(|other| crate::util::sanitize_name(other) == wanted)
+        });
+        if taken {
+            anyhow::bail!("another session is already called {alias}");
+        }
+    }
+    with_store_mutation(fleet_dir, |store| {
+        let record = store.sessions.get_mut(&uuid)?;
+        record.alias = alias;
+        Some(record.clone())
+    })?
+    .ok_or_else(|| anyhow::anyhow!("no session {uuid}"))
+}
+
 pub fn with_store_mutation<R>(
     fleet_dir: &Path,
     mutate: impl FnOnce(&mut FleetSessions) -> R,

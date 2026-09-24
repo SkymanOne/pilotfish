@@ -154,13 +154,19 @@ impl Console {
                     ),
                     false,
                 );
+                let leaving = key.uuid == self.orch_key.uuid;
                 let mut effects = vec![Effect::RemoveSession(key)];
                 // the console cannot stay on a session that no longer
-                // exists: it moves on once the removal is done
+                // exists: it moves on once the removal is done, or, with
+                // nothing to move to, leaves sessions altogether
                 if let Some(next) = next {
                     self.prefs.last_session_uuid = Some(next.uuid.to_string());
                     effects.push(Effect::SavePrefs);
                     effects.push(Effect::SwitchSession(next));
+                } else if leaving {
+                    self.prefs.last_session_uuid = None;
+                    effects.push(Effect::SavePrefs);
+                    effects.push(Effect::LeaveSession);
                 }
                 effects
             }

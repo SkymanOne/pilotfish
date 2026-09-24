@@ -21,8 +21,8 @@ use crate::util::now_ms;
 
 use super::{
     AnswerKind, Answering, CLAUDE_EFFORT_LEVELS, ConfirmAction, ConfirmState, Console, Effect,
-    HISTORY_CAP, Overlay, PermissionOverlay, is_terminal_view, next_level, parse_answer,
-    questions_of, session_display_name, suggest_command, worker_thinking_levels,
+    HISTORY_CAP, NO_SESSION, Overlay, PermissionOverlay, is_terminal_view, next_level,
+    parse_answer, questions_of, session_display_name, suggest_command, worker_thinking_levels,
 };
 
 impl Console {
@@ -124,6 +124,26 @@ impl Console {
                     "· usage: /session new [alias], or /session <uuid-or-alias> — /sessions lists them",
                     false,
                 );
+                Vec::new()
+            }
+            Some("rename") => {
+                let name = words.collect::<Vec<_>>().join(" ");
+                if !self.session_open {
+                    self.notice(format!("! {NO_SESSION}"), true);
+                    return Vec::new();
+                }
+                match crate::orch::session::rename_session(
+                    self.fleet.root(),
+                    self.orch_key.uuid,
+                    &name,
+                ) {
+                    Ok(session) => {
+                        self.orch_key = session.key();
+                        let label = session_display_name(session.alias.as_deref(), session.uuid);
+                        self.notice(format!("· this session is now {label}"), false);
+                    }
+                    Err(err) => self.notice(format!("! {err:#}"), true),
+                }
                 Vec::new()
             }
             Some("remove") => {
@@ -231,30 +251,25 @@ and branch; unmerged work is lost:\n{}",
             ));
         }
         // leaving the session the console is on: go to the most recently
-        // used other one, or a fresh one when there is none
-        let next = (key.uuid == self.orch_key.uuid).then(|| {
-            let mut others: Vec<_> = crate::orch::session::list_sessions(self.fleet.root())
-                .into_iter()
-                .filter(|session| session.uuid != key.uuid)
-                .collect();
-            others.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
-            others
-                .first()
-                .map(crate::orch::session::OrchestratorSession::key)
-        });
-        let next = match next {
-            Some(Some(other)) => Some(other),
-            Some(None) => match crate::orch::session::create_session(self.fleet.root(), None) {
-                Ok(fresh) => Some(fresh.key()),
-                Err(err) => {
-                    self.notice(format!("! creating a session to move to: {err:#}"), true);
-                    return;
-                }
-            },
-            None => None,
-        };
+        // used other one, or to no session at all — never a fresh one, since
+        // only the user starts sessions
+        let leaving = key.uuid == self.orch_key.uuid;
+        let next = leaving
+            .then(|| {
+                let mut others: Vec<_> = crate::orch::session::list_sessions(self.fleet.root())
+                    .into_iter()
+                    .filter(|session| session.uuid != key.uuid)
+                    .collect();
+                others.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+                others
+                    .first()
+                    .map(crate::orch::session::OrchestratorSession::key)
+            })
+            .flatten();
         if next.is_some() {
             message.push_str("\nThe console moves to another session afterwards.");
+        } else if leaving {
+            message.push_str("\nNo session is left open afterwards.");
         }
         self.overlay = Some(Overlay::Confirm(ConfirmState {
             message,
@@ -306,6 +321,7 @@ and branch; unmerged work is lost:\n{}",
     /// ([`Effect::SwitchSession`]), which is what actually repopulates the
     /// rows, runs and orchestrator state.
     pub fn begin_session(&mut self, key: &SessionKey) {
+        self.session_open = true;
         self.orch_key = key.clone();
         self.orch_transcript = Transcript::new();
         self.worker_transcripts.clear();
@@ -322,6 +338,16 @@ and branch; unmerged work is lost:\n{}",
         self.pending_thinking.clear();
         self.composer.answering = None;
         self.flash = None;
+    }
+
+    /// No session open: the console forgets the one it was on, keeps its
+    /// commands, and says how to start one.
+    pub fn end_session(&mut self) {
+        self.begin_session(&SessionKey::default());
+        self.session_open = false;
+        self.prefs.last_session_uuid = None;
+        self.rows.clear();
+        self.notice(format!("· {NO_SESSION}"), false);
     }
 
     pub(super) fn name_of(&self, run_id: &str) -> String {
@@ -653,6 +679,11 @@ and branch; unmerged work is lost:\n{}",
                 question_id: Some(answering.question_id),
                 message: text,
             }];
+        }
+        // with no session there is nobody to message; commands still run
+        if !self.session_open && !text.starts_with('/') {
+            self.notice(format!("! {NO_SESSION}"), true);
+            return Vec::new();
         }
         // the console's global commands work wherever the selection is
         let (head, argument) = match text.split_once(' ') {

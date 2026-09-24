@@ -2012,7 +2012,7 @@ fn session_commands() {
         };
         assert!(state.message.contains("completely"), "{}", state.message);
         assert!(
-            state.message.contains("moves to another session"),
+            state.message.contains("No session is left open"),
             "{}",
             state.message
         );
@@ -2020,11 +2020,11 @@ fn session_commands() {
             panic!("{:?}", state.action);
         };
         assert_eq!(key, current);
-        let next = next.expect("the console cannot stay on a removed session");
-        assert_ne!(
-            next.uuid, current.uuid,
-            "a fresh one, since there is no other"
+        assert_eq!(
+            next, None,
+            "never a fresh session: only the user starts one"
         );
+        assert!(crate::orch::session::list_sessions(c.fleet.root()).is_empty());
 
         let effects = c.handle_key(ch('y'));
         assert_eq!(
@@ -2032,10 +2032,38 @@ fn session_commands() {
             vec![
                 Effect::RemoveSession(current),
                 Effect::SavePrefs,
-                Effect::SwitchSession(next.clone()),
+                Effect::LeaveSession,
             ]
         );
-        assert_eq!(c.prefs().last_session_uuid, Some(next.uuid.to_string()));
+        assert_eq!(c.prefs().last_session_uuid, None);
+    }
+    {
+        // with no session open, a message has nobody to go to; commands run
+        let mut c = test_console();
+        c.end_session();
+        assert!(!c.has_session() && c.rows().is_empty());
+        type_text(&mut c, "fix the flaky test");
+        assert!(c.handle_key(enter()).is_empty());
+        assert!(c.flash().unwrap().text.contains("/session new"));
+        let effects = c.submit("/session new payments");
+        let Some(Effect::SwitchSession(key)) = effects.last() else {
+            panic!("{effects:?}");
+        };
+        assert_eq!(key.alias.as_deref(), Some("payments"));
+    }
+    {
+        // a rename keeps the session's directory, found again by its uuid
+        let mut c = test_console();
+        let session = crate::orch::session::create_session(c.fleet.root(), Some("old")).unwrap();
+        c.begin_session(&session.key());
+        let dir = c.fleet.orchestrator_dir(&session.key());
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::orch::session::create_session(c.fleet.root(), Some("taken")).unwrap();
+        assert!(c.submit("/session rename taken").is_empty());
+        assert!(c.flash().unwrap().error, "{:?}", c.flash());
+        assert!(c.submit("/session rename payments refactor").is_empty());
+        assert_eq!(c.orch_key.alias.as_deref(), Some("payments refactor"));
+        assert_eq!(c.fleet.orchestrator_dir(&c.orch_key), dir);
     }
     {
         let mut c = setup_with_worker();

@@ -119,7 +119,8 @@ pub struct Facts {
 #[derive(Debug, Clone, Default)]
 pub struct Snapshot {
     pub closed: bool,
-    pub key: SessionKey,
+    /// The open session; none until the user starts or picks one.
+    pub key: Option<SessionKey>,
     pub sessions: Vec<SessionItem>,
     /// This session's rows: the orchestrator first, then its workers.
     pub rows: Vec<DashboardRow>,
@@ -140,6 +141,14 @@ pub struct Snapshot {
     pub patch: Option<PatchView>,
 }
 
+impl Snapshot {
+    /// The open session's uuid, if one is open.
+    #[must_use]
+    pub fn current(&self) -> Option<uuid::Uuid> {
+        self.key.as_ref().map(|key| key.uuid)
+    }
+}
+
 /// Run the console for the window until it quits or the window goes away.
 pub async fn serve(
     fleet: FleetPaths,
@@ -150,7 +159,7 @@ pub async fn serve(
 ) {
     let mut driver = Driver::open(fleet, options).await;
     let mut side = Side::default();
-    side.reload(driver.fleet(), driver.key());
+    side.reload(driver.fleet());
     side.refresh_patch().await;
     let _ = out.send(Arc::new(side.snapshot(&mut driver)));
 
@@ -164,13 +173,13 @@ pub async fn serve(
         tokio::select! {
             cmd = cmds.recv() => {
                 let Some(cmd) = cmd else { break };
-                let before = driver.key().uuid;
+                let before = driver.key().map(|key| key.uuid);
                 if side.handle(&mut driver, cmd).await {
                     break;
                 }
                 // a `/session` switch: the sidebars follow at once
-                if driver.key().uuid != before {
-                    side.reload(driver.fleet(), driver.key());
+                if driver.key().map(|key| key.uuid) != before {
+                    side.reload(driver.fleet());
                 }
             }
             _ = tail.tick() => {
@@ -179,7 +188,7 @@ pub async fn serve(
                 }
             }
             _ = feed.tick() => driver.feed().await,
-            _ = fleet_tick.tick() => side.reload(driver.fleet(), driver.key()),
+            _ = fleet_tick.tick() => side.reload(driver.fleet()),
             _ = patch_tick.tick() => {
                 if !side.patch_is_live() {
                     continue;
@@ -246,7 +255,7 @@ impl Side {
     }
 
     /// Every session and every run, reread.
-    fn reload(&mut self, fleet: &FleetPaths, _current: &SessionKey) {
+    fn reload(&mut self, fleet: &FleetPaths) {
         let now = now_ms();
         self.states = crate::fleet::run::list_runs(fleet.root())
             .into_iter()
@@ -349,7 +358,7 @@ impl Side {
 
     fn snapshot(&self, driver: &mut Driver) -> Snapshot {
         let now = now_ms();
-        let key = driver.key().clone();
+        let key = driver.key().cloned();
         let orch = driver.orch().clone();
         let console = &mut driver.console;
         let rows = console.rows().to_vec();
@@ -357,7 +366,10 @@ impl Side {
         let workers = self
             .board
             .iter()
-            .filter(|item| item.session.uuid == key.uuid)
+            .filter(|item| {
+                key.as_ref()
+                    .is_some_and(|key| item.session.uuid == key.uuid)
+            })
             .map(|item| {
                 let mut item = item.clone();
                 if let Some(row) = rows.iter().find(|row| row.key == item.row.key) {

@@ -139,8 +139,29 @@ impl FleetPaths {
 
     /// `orchestrators/<alias>-<short-uuid>/` — one session's whole state:
     /// `state.json`, `events.jsonl`, `inbox.jsonl`, `claude.log`, `prompt.md`.
+    ///
+    /// A renamed session keeps the directory it was made under — its monitor
+    /// is still writing there — so when the name the key spells is not on
+    /// disk, the directory is found by the part that never changes, the
+    /// short uuid.
     pub fn orchestrator_dir(&self, key: &SessionKey) -> PathBuf {
-        self.orchestrators_dir().join(key.dir_name())
+        let named = self.orchestrators_dir().join(key.dir_name());
+        if named.exists() {
+            return named;
+        }
+        let suffix = format!("-{}", short_uuid(&key.uuid));
+        std::fs::read_dir(self.orchestrators_dir())
+            .ok()
+            .and_then(|entries| {
+                entries.flatten().map(|entry| entry.path()).find(|path| {
+                    path.is_dir()
+                        && path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| name.ends_with(&suffix))
+                })
+            })
+            .unwrap_or(named)
     }
 
     /// `orchestrators/<key>/state.json` — monitor pid, session id, model,

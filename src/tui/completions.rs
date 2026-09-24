@@ -82,7 +82,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/session",
-        detail: "switch sessions: /session new [alias], /session <uuid-or-alias>, or /session remove <uuid-or-alias>",
+        detail: "switch sessions: /session new [alias], /session <uuid-or-alias>, /session rename <name>, or /session remove <uuid-or-alias>",
         takes_argument: true,
         worker_only: false,
         aliases: &[],

@@ -466,6 +466,10 @@ pub enum Effect {
     /// re-anchors the polls on the new key. No IO happens here — `execute`
     /// leaves it to the runtime's event loop, which watches for it.
     SwitchSession(SessionKey),
+    /// Leave the session the console is on without opening another: the one
+    /// it was on is gone, and a session is only ever made by the user. The
+    /// runtime drops the polls and the console shows that none is open.
+    LeaveSession,
     /// Steer a running worker (delivered after its current tool call).
     WorkerSteer { run_id: String, message: String },
     /// Queue a message for after the worker finishes its current work.
@@ -542,8 +546,15 @@ pub fn questions_of(request_input: &Value) -> Vec<AskQuestion> {
 }
 
 /// The console's whole state, minus the terminal.
+/// What the console says when there is no session to talk to.
+pub const NO_SESSION: &str = "no session is open: start one with /session new [name]";
+
 pub struct Console {
     fleet: FleetPaths,
+    /// Whether a session is open. With none, the console still takes
+    /// commands (`/session new`, `/routing`, …) but has no orchestrator to
+    /// message; nothing ever opens one on the user's behalf.
+    session_open: bool,
     /// Where the user config lives (`~/.pilotfish`), read by the routing
     /// panel and written by its settings. A field so tests point it at a
     /// temporary directory rather than the developer's own.
@@ -623,6 +634,7 @@ impl Console {
         };
         Self {
             fleet,
+            session_open: true,
             user_dir: crate::paths::user_dir(),
             caps: Capabilities::default(),
             // The session this console renders; the runtime replaces the
@@ -1134,7 +1146,12 @@ impl Console {
                 diff_stat: self.diff_stats.get(&run.run_id).map(String::as_str),
             })
             .collect();
-        self.rows = build_rows(&summary, &rows, now_ms());
+        // no session, no orchestrator row: nothing is there to select
+        self.rows = if self.session_open {
+            build_rows(&summary, &rows, now_ms())
+        } else {
+            Vec::new()
+        };
         if self.selected >= self.rows.len() {
             self.selected = self.rows.len().saturating_sub(1);
         }
@@ -2170,7 +2187,7 @@ impl Console {
                         crate::ops::session::remove_session(self.fleet.root(), &key).await?;
                     self.report(result.out, result.err);
                 }
-                Effect::SwitchSession(_) => {
+                Effect::SwitchSession(_) | Effect::LeaveSession => {
                     // the runtime's event loop watches for it: nothing to
                     // carry out here (it re-anchors the polls, watcher and
                     // monitor, which live in `runtime.rs`)
@@ -2288,7 +2305,16 @@ impl Console {
     }
 
     fn append_orchestrator(&self, command: &OrchestratorCommand) -> std::io::Result<()> {
+        if !self.session_open {
+            return Err(std::io::Error::other(NO_SESSION));
+        }
         self.append_orchestrator_to(&self.orch_key, command)
+    }
+
+    /// Is a session open?
+    #[must_use]
+    pub const fn has_session(&self) -> bool {
+        self.session_open
     }
 
     /// Write one envelope into a session's inbox; [`Console::append_orchestrator`]
@@ -2480,7 +2506,10 @@ pub async fn run_app(options: TuiOptions) -> anyhow::Result<crate::cli::ExitCode
 
     let code = result?;
     // what is left running decides the goodbye
-    let orch_key = crate::tui::driver::resolve_console_key(&fleet);
+    let Some(orch_key) = crate::tui::driver::resolve_console_key(&fleet) else {
+        println!("No session is open. `pilotfish` and `/session new` start one.");
+        return Ok(code);
+    };
     let orchestrator_exited = std::fs::read_to_string(fleet.orchestrator_state(&orch_key))
         .ok()
         .and_then(|raw| serde_json::from_str::<OrchestratorState>(&raw).ok())

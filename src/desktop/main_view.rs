@@ -519,7 +519,7 @@ impl MainView {
                 .bg(pal.panel);
             for (at, session) in snap.sessions.iter().enumerate() {
                 let key = session.key.clone();
-                let current = session.key.uuid == snap.key.uuid;
+                let current = Some(session.key.uuid) == snap.current();
                 rail = rail.child(
                     div()
                         .id(("rail", at))
@@ -544,7 +544,7 @@ impl MainView {
             .gap(px(1.))
             .px(px(6.));
         for (at, session) in snap.sessions.iter().enumerate() {
-            let current = session.key.uuid == snap.key.uuid;
+            let current = Some(session.key.uuid) == snap.current();
             let key = session.key.clone();
             let meta = match session.lanes.len() {
                 0 => format!("no workers, {}", ago(&session.last_used)),
@@ -612,7 +612,7 @@ impl MainView {
 
     fn open_session(&mut self, key: crate::paths::SessionKey, cx: &mut Context<Self>) {
         let snap = self.snap(cx);
-        if key.uuid == snap.key.uuid {
+        if Some(key.uuid) == snap.current() {
             self.layout.workers_open = !self.layout.workers_open;
             self.save_layout();
         } else {
@@ -658,7 +658,7 @@ impl MainView {
             open: std::rc::Rc::new(move |item: WorkerItem, window, cx| {
                 open.update(cx, |this, cx| {
                     let snap = this.snap(cx);
-                    if snap.key.uuid != item.session.uuid {
+                    if snap.current() != Some(item.session.uuid) {
                         this.send(UiCmd::Submit(format!("/session {}", item.session.uuid)), cx);
                     }
                     this.select_worker(&item.row.key, cx);
@@ -688,9 +688,12 @@ impl MainView {
         let name = snap
             .sessions
             .iter()
-            .find(|s| s.key.uuid == snap.key.uuid)
+            .find(|s| Some(s.key.uuid) == snap.current())
             .map_or_else(|| "Session".to_string(), |s| s.name.clone());
-        let short: String = snap.key.uuid.to_string().chars().take(7).collect();
+        let short: String = snap
+            .current()
+            .map(|uuid| uuid.to_string().chars().take(7).collect())
+            .unwrap_or_default();
         let mut list = div()
             .id("worker-list")
             .flex_1()

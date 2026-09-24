@@ -105,27 +105,16 @@ fn write_lock(path: &Path) -> std::io::Result<()> {
 // ---------------------------------------------------------------------------
 // Feeds: what `.pilotfish` says, folded into the state machine
 
-/// The session this console serves: the most recently used one, or — on a
-/// fleet without a store yet — a fresh row this console writes under the
-/// store's lock (the monitor boots into the most recently used, which that
-/// row now is). A store this code cannot parse is left alone, and the
-/// default session key is used read-only: nothing a console does may clobber
-/// a newer writer's store.
+/// The session this console opens on: the most recently used one, or none —
+/// a session is only ever started by the user (`/session new`). A store this
+/// code cannot parse belongs to a newer writer: its default session is used
+/// read-only rather than clobbered.
 #[must_use]
-pub(crate) fn resolve_console_key(fleet: &FleetPaths) -> SessionKey {
-    let store = session::load(fleet.root()).unwrap_or_default();
-    match store.last_used() {
-        Some(record) => record.key(),
-        None if !fleet.fleet_json().exists() => {
-            let record = OrchestratorSession::new(&repo_cwd(fleet));
-            let key = record.key();
-            let fleet_dir = fleet.root().to_path_buf();
-            let _ = crate::orch::session::with_store_mutation(&fleet_dir, |store| {
-                store.upsert(record);
-            });
-            key
-        }
-        None => SessionKey::default(),
+pub(crate) fn resolve_console_key(fleet: &FleetPaths) -> Option<SessionKey> {
+    match session::load(fleet.root()) {
+        Some(store) => store.last_used().map(OrchestratorSession::key),
+        None if fleet.fleet_json().exists() => Some(SessionKey::default()),
+        None => None,
     }
 }
 
@@ -570,41 +559,54 @@ async fn anchor_console(
 /// ([`TAIL_MS`], [`FEED_MS`]).
 pub struct Driver {
     pub console: Console,
-    poll: Poll,
+    /// The open session's poll; none while no session is open.
+    poll: Option<Poll>,
     fleet: FleetPaths,
     options: TuiOptions,
+    /// What the renderer reads while no session is open.
+    idle: OrchestratorState,
 }
 
 impl Driver {
     /// Open the console on its session. A remembered session — the uuid the
     /// `lastSessionUuid` preference holds — wins over the most recently used
     /// one; the row it left open (`lastSession`) is restored within whichever
-    /// session opens.
+    /// session opens. With no session at all the console opens on none.
     pub async fn open(fleet: FleetPaths, options: TuiOptions) -> Self {
         let repo_root = PathBuf::from(repo_cwd(&fleet));
         let mut console = Console::new(fleet.clone());
         console.load_prefs();
-        let mut key = resolve_console_key(&fleet);
-        if let Some(remembered) = console.prefs().last_session_uuid.clone()
-            && let Some(session) = crate::orch::session::session_by_key(fleet.root(), &remembered)
-        {
-            key = session.key();
-        }
-        let poll = anchor_console(
-            &fleet,
-            &options,
-            crate::paths::user_dir().as_deref(),
-            &mut console,
-            key,
-        )
-        .await;
+        let remembered = console
+            .prefs()
+            .last_session_uuid
+            .clone()
+            .and_then(|uuid| crate::orch::session::session_by_key(fleet.root(), &uuid))
+            .map(|session| session.key());
+        let poll = match remembered.or_else(|| resolve_console_key(&fleet)) {
+            Some(key) => Some(
+                anchor_console(
+                    &fleet,
+                    &options,
+                    crate::paths::user_dir().as_deref(),
+                    &mut console,
+                    key,
+                )
+                .await,
+            ),
+            None => {
+                console.end_session();
+                None
+            }
+        };
         console.set_files(list_repo_files(&repo_root).await);
         // the row that was open when the console last closed; unknown keys
         // fall back to the orchestrator row, as ever
         if let Some(row) = console.prefs().last_session.clone() {
             console.select_target(&row);
         }
-        poll.save_cursors();
+        if let Some(poll) = &poll {
+            poll.save_cursors();
+        }
         // routing switched on with no key anywhere: ask for it now, while the
         // screen is otherwise empty, rather than letting every spawn decline
         console.ask_for_missing_key();
@@ -613,20 +615,26 @@ impl Driver {
             poll,
             fleet,
             options,
+            idle: OrchestratorState::default(),
         }
     }
 
     /// Carry out what an input asked for, re-anchoring when it switched
-    /// sessions. Returns whether the console should close.
+    /// sessions (or left them). Returns whether the console should close.
     pub async fn apply(&mut self, effects: Vec<Effect>) -> bool {
         let switch = effects.iter().find_map(|effect| match effect {
             Effect::SwitchSession(key) => Some(key.clone()),
             _ => None,
         });
+        let leave = effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::LeaveSession));
         let quit = effects.iter().any(|effect| matches!(effect, Effect::Quit));
         self.console.execute_all(effects).await;
         if let Some(key) = switch {
             self.switch_to(key).await;
+        } else if leave {
+            self.leave();
         }
         quit
     }
@@ -634,40 +642,52 @@ impl Driver {
     /// Anchor on another session; the one being left keeps its watcher
     /// cursors.
     pub async fn switch_to(&mut self, key: SessionKey) {
-        self.poll.save_cursors();
-        self.poll = anchor_console(
-            &self.fleet,
-            &self.options,
-            crate::paths::user_dir().as_deref(),
-            &mut self.console,
-            key,
-        )
-        .await;
+        self.close();
+        self.poll = Some(
+            anchor_console(
+                &self.fleet,
+                &self.options,
+                crate::paths::user_dir().as_deref(),
+                &mut self.console,
+                key,
+            )
+            .await,
+        );
+    }
+
+    /// Leave the open session without opening another.
+    pub fn leave(&mut self) {
+        self.close();
+        self.poll = None;
+        self.console.end_session();
     }
 
     /// Fold new transcript lines in. Returns whether anything changed.
     pub fn tail(&mut self) -> bool {
-        self.poll.tail_events(&mut self.console)
+        self.poll
+            .as_mut()
+            .is_some_and(|poll| poll.tail_events(&mut self.console))
     }
 
     /// The slow poll: run state, the orchestrator's state and capabilities,
     /// model questions, fleet events forwarded, diff stats.
     pub async fn feed(&mut self) {
-        let poll = &mut self.poll;
         let console = &mut self.console;
-        poll.reconcile_session();
-        poll.reload_runs();
-        poll.reload_orchestrator();
-        // the session may have gained an alias (the orchestrator derives one
-        // from its first prompt): the console follows where it lives now
-        console.orch_key = poll.key.clone();
-        console.set_runs(poll.runs.clone());
-        console.set_orchestrator_state(poll.orch.clone());
-        console.set_capabilities(poll.caps.clone());
         console.set_model_questions(crate::route::pending_questions(&self.fleet));
         // a one-shot pi fetch that finished reloads the routing status, so
         // the panel picks up the fresh catalogue without the user asking again
         console.collect_pi_fetch();
+        let Some(poll) = self.poll.as_mut() else {
+            return;
+        };
+        poll.reconcile_session();
+        poll.reload_runs();
+        poll.reload_orchestrator();
+        // the session may have been renamed: the console follows its key
+        console.orch_key = poll.key.clone();
+        console.set_runs(poll.runs.clone());
+        console.set_orchestrator_state(poll.orch.clone());
+        console.set_capabilities(poll.caps.clone());
         poll.tail_events(console);
         poll.forward_fleet_events(console).await;
         poll.refresh_diff_stats(console).await;
@@ -676,28 +696,34 @@ impl Driver {
     /// The cursors outlive the console: a restart picks up where this left
     /// off.
     pub fn close(&self) {
-        self.poll.save_cursors();
+        if let Some(poll) = &self.poll {
+            poll.save_cursors();
+        }
     }
 
     /// The console with the polled facts beside it, borrowed apart so a
     /// renderer can hold both.
     pub fn parts(&mut self) -> (&mut Console, &OrchestratorState, &[RunEntry]) {
-        (&mut self.console, &self.poll.orch, &self.poll.runs)
+        match &self.poll {
+            Some(poll) => (&mut self.console, &poll.orch, &poll.runs),
+            None => (&mut self.console, &self.idle, &[]),
+        }
     }
 
     #[must_use]
     pub fn orch(&self) -> &OrchestratorState {
-        &self.poll.orch
+        self.poll.as_ref().map_or(&self.idle, |poll| &poll.orch)
     }
 
     #[must_use]
     pub fn runs(&self) -> &[RunEntry] {
-        &self.poll.runs
+        self.poll.as_ref().map_or(&[], |poll| &poll.runs)
     }
 
+    /// The open session, if any.
     #[must_use]
-    pub fn key(&self) -> &SessionKey {
-        &self.poll.key
+    pub fn key(&self) -> Option<&SessionKey> {
+        self.poll.as_ref().map(|poll| &poll.key)
     }
 
     #[must_use]
@@ -710,6 +736,13 @@ impl Driver {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// A session made the way `/session new` makes one.
+    fn new_session(fleet: &FleetPaths) -> SessionKey {
+        crate::orch::session::create_session(fleet.root(), None)
+            .unwrap()
+            .key()
+    }
 
     fn tmp_fleet() -> (std::path::PathBuf, FleetPaths) {
         let dir = std::env::temp_dir().join(format!(
@@ -833,8 +866,8 @@ mod tests {
                 "2099-01-01T00:00:00.000Z".into();
             crate::orch::session::save(fleet.root(), &mut store).unwrap();
             assert_eq!(
-                resolve_console_key(&fleet).uuid,
-                alpha.uuid,
+                resolve_console_key(&fleet).map(|key| key.uuid),
+                Some(alpha.uuid),
                 "alpha is the most recently used row"
             );
 
@@ -859,7 +892,7 @@ mod tests {
             let (_dir, fleet) = tmp_fleet();
             // no monitor alive: the spawn path records the flags into the
             // session row the console serves
-            let key = resolve_console_key(&fleet);
+            let key = new_session(&fleet);
             let mut options = tui_options(Some("fable"));
             options.budget = Some(" 2.5 ".into());
             options.permission_mode = Some("acceptEdits".into());
@@ -879,7 +912,7 @@ mod tests {
         }
         {
             let (_dir, fleet) = tmp_fleet();
-            let key = resolve_console_key(&fleet);
+            let key = new_session(&fleet);
             assert!(ensure_orchestrator(&fleet, &tui_options(None), None, &key).unwrap());
             let store = crate::orch::session::load(fleet.root()).unwrap();
             let record = &store.sessions[&key.uuid];
@@ -889,7 +922,7 @@ mod tests {
         }
         {
             let (_dir, fleet) = tmp_fleet();
-            let key = resolve_console_key(&fleet);
+            let key = new_session(&fleet);
             // A fabricated `~/.pilotfish` with an `[orchestrator] model`; injected, so
             // nothing resolves the machine's real home.
             let user_root = std::env::temp_dir().join(format!(
@@ -944,7 +977,7 @@ mod tests {
     fn fleet_with_run(name: &str) -> (tempfile::TempDir, FleetPaths, String, SessionKey) {
         let tmp = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
         let fleet = FleetPaths::new(tmp.path().join(".pilotfish"));
-        let key = resolve_console_key(&fleet);
+        let key = new_session(&fleet);
         std::fs::create_dir_all(fleet.orchestrator_dir(&key)).unwrap();
         let run_id = format!("{name}-20260830000000");
         let run_dir = fleet.root().join("runs").join(&run_id);
@@ -1168,7 +1201,7 @@ mod tests {
             git(&["commit", "-qm", "seed"], &root);
 
             let fleet = FleetPaths::new(root.join(".pilotfish"));
-            let key = resolve_console_key(&fleet);
+            let key = new_session(&fleet);
             std::fs::create_dir_all(fleet.orchestrator_dir(&key)).unwrap();
             let run_id = "auth-20260830000000";
             let info = crate::git::ensure_worktree(
