@@ -468,7 +468,7 @@ orchestrator session(s)"
 /// lines and the [`CleanupData`] lists. Per-run decisions stay here so a
 /// single failure can never abort the batch — a run that cannot be cleaned
 /// is reported, the rest are still cleaned.
-enum CleanupOutcome {
+pub(super) enum CleanupOutcome {
     /// Already archived; only a named target is told.
     AlreadyArchived,
     /// Worktree and branch are gone, the run is archived. `notes` carries
@@ -488,7 +488,7 @@ enum CleanupOutcome {
 /// Clean one run, best-effort. `all` skips live workers and other failures
 /// instead of aborting the sweep; a single named target fails loudly
 /// instead of being silently dropped.
-async fn cleanup_one(target: &RunRef, force: bool, all: bool) -> CleanupOutcome {
+pub(super) async fn cleanup_one(target: &RunRef, force: bool, all: bool) -> CleanupOutcome {
     if target.state.status == RunStatus::Archived {
         return CleanupOutcome::AlreadyArchived;
     }

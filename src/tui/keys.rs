@@ -271,7 +271,7 @@ pub const FLEET_KEYS: &[KeyHelp] = &[
     },
     KeyHelp {
         keys: "x",
-        what: "remove the worker (asks first)",
+        what: "remove the worker, or the whole session (asks)",
     },
     KeyHelp {
         keys: "t",

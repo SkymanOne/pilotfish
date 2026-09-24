@@ -270,6 +270,13 @@ pub enum ConfirmAction {
     /// Stop one named session's orchestrator and its workers; the console
     /// stays open and other sessions are untouched.
     ShutdownSession(SessionKey),
+    /// Remove a session outright: orchestrator, workers, worktrees,
+    /// branches, records. `next` is where the console goes when the session
+    /// removed is the one it is on.
+    RemoveSession {
+        key: SessionKey,
+        next: Option<SessionKey>,
+    },
 }
 
 /// The permission/question overlay's own state (port of `Approval.tsx`).
@@ -447,6 +454,8 @@ pub enum Effect {
     /// Stop one named session's orchestrator (`/shutdown <key>`); its
     /// workers are aborted alongside, and the console stays open.
     StopSession(SessionKey),
+    /// Remove a session and everything it spawned, once its work is done.
+    RemoveSession(SessionKey),
     /// Point the console at another session (`/session <key>`, `/session
     /// new`): the runtime saves the current session's watcher cursors and
     /// re-anchors the polls on the new key. No IO happens here — `execute`
@@ -2112,6 +2121,16 @@ impl Console {
                 }
                 Effect::StopSession(key) => {
                     self.append_orchestrator_to(&key, &OrchestratorCommand::Stop)?;
+                }
+                Effect::RemoveSession(key) => {
+                    let result =
+                        crate::ops::session::remove_session(self.fleet.root(), &key).await?;
+                    for line in result.out {
+                        self.notice(format!("· {line}"), false);
+                    }
+                    for line in result.err {
+                        self.notice(format!("! {line}"), true);
+                    }
                 }
                 Effect::SwitchSession(_) => {
                     // the runtime's event loop watches for it: nothing to

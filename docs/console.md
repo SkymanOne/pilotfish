@@ -57,7 +57,7 @@ Within the fleet, single letters are commands:
 | `esc` | Return to the conversation, keeping the selection |
 | `a` | Answer the pending question, dialog or model choice |
 | `s` | Stop the selected worker |
-| `x` | Remove the selected worker (asks for confirmation) |
+| `x` | Remove the selected worker; on the orchestrator's row, remove the whole session (asks for confirmation) |
 | `t` | Cycle the thinking level |
 | `m` | Switch the model (the palette, restricted to models) |
 | `p` | Cycle the permission mode (orchestrator only) |
@@ -86,7 +86,7 @@ With the orchestrator selected, the composer sends ordinary messages. With a wor
 | `/answer <text>` | `/a` | Answer the question or dialog the worker is blocked on |
 | `/followup <text>` | `/f` | Queue a message for after the worker finishes its current work |
 | `/stop` | `/s` | Abort the worker |
-| `/remove` | `/rm` | Remove the worker, its worktree, branch and fleet row (asks first if work would be lost) |
+| `/remove` | `/rm` | Remove the worker, its worktree, branch and fleet row (asks first if work would be lost); with the orchestrator selected, remove the whole session |
 | `/thinking <level>` | `/t` | Set the reasoning level: pi's `off…max` for a worker, claude's `low…max` for the orchestrator |
 | `/model <model>` | | Switch the model without restarting |
 | `/permissions <mode>` | `/perm` | Set how the orchestrator's tool use is approved; without an argument, show the current mode |
@@ -94,6 +94,8 @@ With the orchestrator selected, the composer sends ordinary messages. With a wor
 | `/verbose` | | Expand or collapse older turns' reasoning and tool output |
 | `/clear` | | Clear this session's transcript from the console; the file on disk is unchanged |
 | `/trim` | | Shorten the orchestrator's transcript file to its recent tail |
+| `/sessions` | | List every session: alias, short uuid, workers and health |
+| `/session <uuid-or-alias>` | | Switch to another session; `/session new [alias]` starts one, `/session remove <uuid-or-alias>` removes one (see below) |
 | `/mouse` | | Toggle mouse capture, as `ctrl-y` does |
 | `/help` | `/h` | Keys and commands |
 | `/quit` | `/q` | Close the console (workers keep running) |
@@ -187,5 +189,13 @@ When a turn is complete, its reasoning and tool output collapse to a single row 
 `ctrl-r` searches the transcript. Scrolling follows the latest output until you scroll up, then holds its position, and stays on the same content as older blocks are discarded.
 
 Long sessions manage their own size. The transcript file is capped, and after `[session] auto_compact_turns` turns (60 by default; `0` disables it) the orchestrator's context is compacted with claude's `/compact`, with a line in the transcript marking the point. `/clear` clears a transcript from the console without changing the file; `/trim` shortens the file itself.
+
+## Removing a session
+
+When a session's work is finished, `x` on the orchestrator's row (or `/remove` with the orchestrator selected) removes the session entirely: its orchestrator is stopped, every worker it spawned is aborted if still running and removed with its worktree and branch, and its transcript, run records and entry in `fleet.json` are deleted. Branches are deleted whether or not they were merged, so the confirmation lists each worker with its state and diff statistics before anything happens. The console then moves to the most recently used remaining session, or starts a new one. `/session remove <uuid-or-alias>` removes a session other than the current one; `/sessions` lists them. Other sessions and their workers are never touched.
+
+Removal is forced. An orchestrator or worker that does not stop when asked is terminated, together with its child processes, and a worktree that git refuses to remove (a locked one, for example) is deleted directly. Before any process is signalled, pilotfish checks that the process ID still belongs to that session's monitor or that worker's monitor. Anything that still could not be deleted is reported.
+
+## Cleaning up workers
 
 Workers are removed from the fleet when they are finished: the orchestrator removes each worker after merging and verifying its work, and the console removes any settled worker whose branch has already been merged. Unmerged, modified or running workers are never removed automatically; that requires `/remove` or `pilotfish cleanup`, both of which report exactly what would be lost before acting.

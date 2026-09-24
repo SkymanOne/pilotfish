@@ -61,7 +61,7 @@ The composer always has keyboard focus, so every printable key is text. `shift-e
 | --- | --- |
 | `a` | Answer the question or dialog the worker is blocked on |
 | `s` | Stop the worker |
-| `x` | Remove the worker, its worktree and its branch (asks for confirmation) |
+| `x` | Remove the worker, its worktree and its branch; on the orchestrator's row, the whole session (asks for confirmation) |
 | `t` / `m` | Cycle the thinking level / switch the model, without restarting |
 | `b` | Show the full brief |
 
@@ -80,6 +80,10 @@ pilotfish --permission-mode auto      # a classifier approves routine actions
 ### Resuming a session
 
 `/quit` (or `ctrl-c`) closes the console only; the orchestrator and its workers continue to run. Running `pilotfish` again in the same repository restores the session, including any turn in progress and any permission prompt raised while the console was closed. `pilotfish --fresh` starts a new orchestrator session, and `/shutdown` stops all agents.
+
+### Finishing a session
+
+When the work is done, remove the session entirely: `x` on the orchestrator's row in the fleet (or `/remove` with the orchestrator selected). This stops the orchestrator, removes every worker it spawned together with its worktree and branch (terminating any that do not stop when asked), deletes the session's transcript and run records, and moves the console to another session. Unmerged work on those branches is discarded, so the confirmation lists each worker first. `/session remove <name>` does the same for a session other than the current one.
 
 ### Model selection
 

@@ -132,6 +132,7 @@ impl Console {
                     ConfirmAction::Shutdown | ConfirmAction::ShutdownSession(_) => {
                         "· shutdown cancelled"
                     }
+                    ConfirmAction::RemoveSession { .. } => "· the session is kept",
                 },
                 false,
             );
@@ -144,6 +145,24 @@ impl Console {
             }
             ConfirmAction::Shutdown => self.shutdown_effects(),
             ConfirmAction::ShutdownSession(key) => self.shutdown_effects_for(&key),
+            ConfirmAction::RemoveSession { key, next } => {
+                self.notice(
+                    format!(
+                        "■ removing session {}",
+                        crate::tui::model::session_display_name(key.alias.as_deref(), key.uuid)
+                    ),
+                    false,
+                );
+                let mut effects = vec![Effect::RemoveSession(key)];
+                // the console cannot stay on a session that no longer
+                // exists: it moves on once the removal is done
+                if let Some(next) = next {
+                    self.prefs.last_session_uuid = Some(next.uuid.to_string());
+                    effects.push(Effect::SavePrefs);
+                    effects.push(Effect::SwitchSession(next));
+                }
+                effects
+            }
         }
     }
 

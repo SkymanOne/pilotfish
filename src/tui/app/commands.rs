@@ -126,6 +126,20 @@ impl Console {
                 );
                 Vec::new()
             }
+            Some("remove") => {
+                let Some(target) = words.next() else {
+                    self.notice(
+                        "· usage: /session remove <uuid-or-alias> — /sessions lists them",
+                        false,
+                    );
+                    return Vec::new();
+                };
+                match crate::orch::session::resolve_session_by_key(self.fleet.root(), target) {
+                    Ok(session) => self.confirm_remove_session(&session.key()),
+                    Err(err) => self.notice(format!("! {err:#}"), true),
+                }
+                Vec::new()
+            }
             Some("new") => {
                 let alias: Option<String> = {
                     let rest: Vec<&str> = words.collect();
@@ -172,6 +186,83 @@ impl Console {
                 }
             },
         }
+    }
+
+    /// Ask before removing session `key` outright, naming every worker that
+    /// goes with it and what it is doing — this is the one command that
+    /// throws unmerged work away on purpose.
+    pub(super) fn confirm_remove_session(&mut self, key: &SessionKey) {
+        let label = session_display_name(key.alias.as_deref(), key.uuid);
+        let workers: Vec<String> =
+            crate::fleet::run::list_runs_for_owner(self.fleet.root(), key.uuid)
+                .into_iter()
+                .filter_map(|summary| {
+                    let state = crate::fleet::run::load_state(&summary.run_dir).ok()?;
+                    let view = derive_view(&state, crate::fleet::run::is_alive, now_ms());
+                    (view != crate::fleet::run::DerivedView::Archived).then(|| {
+                        let diff = self
+                            .diff_stats
+                            .get(&summary.run_id)
+                            .map(|stat| format!(" {stat}"))
+                            .unwrap_or_default();
+                        format!("  {} · {view}{diff}", state.name)
+                    })
+                })
+                .collect();
+        let mut message = format!(
+            "Remove session {label} completely? Its orchestrator stops and its transcript \
+and run records are deleted."
+        );
+        if workers.is_empty() {
+            message.push_str(" It has no workers left.");
+        } else {
+            message.push_str(&format!(
+                " Its {} {} stopped (killed if {} will not stop) and removed with {} worktree \
+and branch; unmerged work is lost:\n{}",
+                workers.len(),
+                if workers.len() == 1 {
+                    "worker is"
+                } else {
+                    "workers are"
+                },
+                if workers.len() == 1 { "it" } else { "they" },
+                if workers.len() == 1 { "its" } else { "their" },
+                workers.join("\n")
+            ));
+        }
+        // leaving the session the console is on: go to the most recently
+        // used other one, or a fresh one when there is none
+        let next = (key.uuid == self.orch_key.uuid).then(|| {
+            let mut others: Vec<_> = crate::orch::session::list_sessions(self.fleet.root())
+                .into_iter()
+                .filter(|session| session.uuid != key.uuid)
+                .collect();
+            others.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
+            others
+                .first()
+                .map(crate::orch::session::OrchestratorSession::key)
+        });
+        let next = match next {
+            Some(Some(other)) => Some(other),
+            Some(None) => match crate::orch::session::create_session(self.fleet.root(), None) {
+                Ok(fresh) => Some(fresh.key()),
+                Err(err) => {
+                    self.notice(format!("! creating a session to move to: {err:#}"), true);
+                    return;
+                }
+            },
+            None => None,
+        };
+        if next.is_some() {
+            message.push_str("\nThe console moves to another session afterwards.");
+        }
+        self.overlay = Some(Overlay::Confirm(ConfirmState {
+            message,
+            action: ConfirmAction::RemoveSession {
+                key: key.clone(),
+                next,
+            },
+        }));
     }
 
     /// `/shutdown` with no argument stops the active session and closes the
@@ -401,10 +492,12 @@ impl Console {
         }
     }
 
-    /// `x`: remove the selected worker, asking first.
+    /// `x`: remove the selected worker, asking first — or, on the
+    /// orchestrator's row, the whole session.
     pub(super) fn remove_selected(&mut self) -> Vec<Effect> {
         let SessionTarget::Worker { run_id } = self.selected_target() else {
-            self.toast("! /remove needs a worker selected", true);
+            let key = self.orch_key.clone();
+            self.confirm_remove_session(&key);
             return Vec::new();
         };
         let Some(state) = self.run_state(&run_id).cloned() else {
@@ -577,6 +670,10 @@ impl Console {
                 return Vec::new();
             }
             Some("/session") => return self.session_command(argument),
+            // with a worker selected, `/remove` is that worker's
+            Some("/remove") if matches!(self.selected_target(), SessionTarget::Orchestrator(_)) => {
+                return self.remove_selected();
+            }
             Some("/mouse") => return self.toggle_mouse(),
             Some("/clear") => return self.clear_transcript(),
             Some("/verbose") => return self.toggle_verbose(),

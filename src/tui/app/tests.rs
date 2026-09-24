@@ -2425,3 +2425,66 @@ fn a_shortlist_starts_empty_when_none_is_saved() {
     assert_eq!(editor.count(), 0);
     assert_eq!(editor.visible.len(), 2, "all of them still listed");
 }
+
+#[test]
+fn remove_current_session_switches_away() {
+    let mut c = setup_with_worker();
+    let current = c.orch_key.clone();
+    select_row(&mut c, 0);
+    fleet_key(&mut c, 'x');
+    let Some(Overlay::Confirm(state)) = c.overlay() else {
+        panic!("asks first");
+    };
+    assert!(state.message.contains("completely"), "{}", state.message);
+    assert!(
+        state.message.contains("moves to another session"),
+        "{}",
+        state.message
+    );
+    let ConfirmAction::RemoveSession { key, next } = state.action.clone() else {
+        panic!("{:?}", state.action);
+    };
+    assert_eq!(key, current);
+    let next = next.expect("the console cannot stay on a removed session");
+    assert_ne!(
+        next.uuid, current.uuid,
+        "a fresh one, since there is no other"
+    );
+
+    let effects = c.handle_key(ch('y'));
+    assert_eq!(
+        effects,
+        vec![
+            Effect::RemoveSession(current),
+            Effect::SavePrefs,
+            Effect::SwitchSession(next.clone()),
+        ]
+    );
+    assert_eq!(c.prefs().last_session_uuid, Some(next.uuid.to_string()));
+}
+
+#[test]
+fn remove_other_session_by_name() {
+    let mut c = setup_with_worker();
+    let other = crate::orch::session::create_session(c.fleet.root(), Some("old-work")).unwrap();
+    assert!(c.submit("/session remove old-work").is_empty());
+    let Some(Overlay::Confirm(state)) = c.overlay() else {
+        panic!("asks first");
+    };
+    assert!(
+        state.message.contains("no workers left"),
+        "{}",
+        state.message
+    );
+    assert_eq!(
+        state.action,
+        ConfirmAction::RemoveSession {
+            key: other.key(),
+            next: None,
+        },
+        "not the session the console is on, so it stays put"
+    );
+    assert!(c.handle_key(ch('n')).is_empty());
+    assert!(c.overlay().is_none());
+    assert_eq!(c.flash().unwrap().text, "· the session is kept");
+}

@@ -75,14 +75,14 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/remove",
-        detail: "remove the worker: worktree, branch, dashboard row",
+        detail: "remove the worker (worktree, branch, row), or on the orchestrator the whole session",
         takes_argument: false,
-        worker_only: true,
+        worker_only: false,
         aliases: &["/rm", "/r"],
     },
     CommandSpec {
         name: "/session",
-        detail: "switch sessions: /session new [alias], or /session <uuid-or-alias>",
+        detail: "switch sessions: /session new [alias], /session <uuid-or-alias>, or /session remove <uuid-or-alias>",
         takes_argument: true,
         worker_only: false,
         aliases: &[],

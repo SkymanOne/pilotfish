@@ -10,6 +10,7 @@
 
 pub mod integrate;
 pub mod query;
+pub mod session;
 pub mod spawn;
 pub mod steer;
 
