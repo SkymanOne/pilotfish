@@ -9,12 +9,34 @@ repository = "https://github.com/SkymanOne/pilotfish"
 name = "pilotfish"
 path = "src/main.rs"
 
+[features]
+# `pilotfish desktop`: the GPUI window. Off by default; building it needs the
+# Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) on macOS.
+desktop = ["dep:gpui", "dep:gpui_platform", "dep:gpui-component"]
+# Scripted offscreen screenshots of the desktop (`PILOTFISH_SHOTS`), for
+# checking the UI without Screen Recording permission. Never shipped.
+desktop-shots = ["desktop", "gpui/test-support", "gpui_platform/test-support"]
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive", "env"] }
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 dirs = "6.0.0"
 futures = "0.3.34"
+# GPUI is a weekly Zed snapshot (`gpui-pre`): the three move together, pinned.
+gpui = { package = "gpui-pre", version = "=0.3.6", optional = true }
+gpui-component = { version = "=0.6.6", optional = true, features = [
+    "tree-sitter-bash",
+    "tree-sitter-javascript",
+    "tree-sitter-markdown",
+    "tree-sitter-python",
+    "tree-sitter-rust",
+    "tree-sitter-toml",
+    "tree-sitter-tsx",
+    "tree-sitter-typescript",
+    "tree-sitter-yaml",
+] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.6", optional = true, features = ["font-kit"] }
 libc = "0.2.189"
 nix = { version = "0.31.3", features = ["signal", "process"] }
 nucleo-matcher = "0.3.1"

@@ -1553,7 +1553,16 @@ impl Console {
     }
 
     fn recompute_completion(&mut self) {
-        let ctx = crate::tui::completions::CompletionContext {
+        let ctx = self.completion_context();
+        self.composer.completion = completions_for(&self.composer.input, &ctx);
+        self.composer.completion_index = 0;
+    }
+
+    /// What `/` and `@` complete against for the selected session: its
+    /// commands, the workers, the repository's files.
+    #[must_use]
+    pub fn completion_context(&self) -> crate::tui::completions::CompletionContext {
+        crate::tui::completions::CompletionContext {
             target: match self.selected_target() {
                 SessionTarget::Orchestrator(_) => CompletionTarget::Orchestrator,
                 SessionTarget::Worker { .. } => CompletionTarget::Worker,
@@ -1568,9 +1577,7 @@ impl Console {
                 .collect(),
             files: self.files.clone(),
             agent_commands: self.agent_commands_for_target(),
-        };
-        self.composer.completion = completions_for(&self.composer.input, &ctx);
-        self.composer.completion_index = 0;
+        }
     }
 
     /// The agent's own commands for whichever session is selected, verbatim.
@@ -2339,7 +2346,7 @@ pub fn worker_thinking_levels(state: &RunState) -> Vec<&str> {
 
 /// `path` with the home directory written as `~`, the way the docs and the
 /// panel name the user config.
-fn home_relative(path: &Path) -> String {
+pub fn home_relative(path: &Path) -> String {
     dirs::home_dir()
         .and_then(|home| {
             path.strip_prefix(home)

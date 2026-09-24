@@ -97,6 +97,30 @@ pub enum Command {
         #[arg(long)]
         progress_events: bool,
     },
+    /// open the fleet console in a desktop window (build with --features desktop)
+    Desktop {
+        /// Target directory (default: current).
+        #[arg(long, value_name = "DIR")]
+        cwd: Option<PathBuf>,
+        /// Model for the orchestrator (claude model alias or id).
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// How the orchestrator's tool use is approved.
+        #[arg(long, value_name = "MODE")]
+        permission_mode: Option<String>,
+        /// Put the orchestrator on Claude Code Remote Control.
+        #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+        remote_control: Option<String>,
+        /// Start a new orchestrator session instead of resuming the saved one.
+        #[arg(long)]
+        fresh: bool,
+        /// Stop the orchestrator after this much spend.
+        #[arg(long, value_name = "USD")]
+        budget: Option<String>,
+        /// Forward worker progress notes to the orchestrator.
+        #[arg(long)]
+        progress_events: bool,
+    },
 
     /// start a headless pi worker (git worktree by default; --no-worktree for read-only tasks)
     Spawn {

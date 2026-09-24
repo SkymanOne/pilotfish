@@ -1098,11 +1098,10 @@ mod tests {
             let criteria = body["questions"]["thinking"]["criteria"]
                 .as_object()
                 .unwrap();
-            assert_eq!(
-                criteria.keys().collect::<Vec<_>>(),
-                vec!["high", "off", "xhigh"],
-                "{criteria:?}"
-            );
+            // key order is serde_json's business (`preserve_order` may be on)
+            let mut levels: Vec<_> = criteria.keys().collect();
+            levels.sort();
+            assert_eq!(levels, vec!["high", "off", "xhigh"], "{criteria:?}");
             assert!(
                 body["state"]["model"]
                     .as_str()

@@ -8,6 +8,8 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod cli;
+#[cfg(feature = "desktop")]
+pub mod desktop;
 pub mod fleet;
 pub mod git;
 pub mod mcp;

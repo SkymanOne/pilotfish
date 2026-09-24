@@ -32,16 +32,60 @@ fn main() -> std::process::ExitCode {
             };
         }
     };
-    match tokio::runtime::Builder::new_multi_thread()
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(dispatch(cli)),
+        Ok(runtime) => runtime,
         Err(err) => {
             eprintln!("pilotfish: {err:#}");
-            ExitCode::Error.into()
+            return ExitCode::Error.into();
         }
+    };
+    // The desktop owns the main thread (AppKit lives there): it runs the
+    // runtime from the side instead of blocking on it.
+    if let Some(Command::Desktop {
+        cwd,
+        model,
+        permission_mode,
+        remote_control,
+        fresh,
+        budget,
+        progress_events,
+    }) = cli.command
+    {
+        return desktop_arm(
+            runtime,
+            tui::app::TuiOptions {
+                cwd,
+                model,
+                permission_mode,
+                remote_control,
+                fresh,
+                budget,
+                progress_events,
+            },
+        );
     }
+    runtime.block_on(dispatch(cli))
+}
+
+#[cfg(feature = "desktop")]
+fn desktop_arm(
+    runtime: tokio::runtime::Runtime,
+    options: tui::app::TuiOptions,
+) -> std::process::ExitCode {
+    finish(pilotfish::desktop::run(runtime, options))
+}
+
+#[cfg(not(feature = "desktop"))]
+fn desktop_arm(_: tokio::runtime::Runtime, _: tui::app::TuiOptions) -> std::process::ExitCode {
+    eprintln!(
+        "pilotfish: this build has no desktop window.\n\
+         Install it with: cargo install pilotfish --features desktop \
+         (macOS also needs `xcodebuild -downloadComponent MetalToolchain`)"
+    );
+    ExitCode::Error.into()
 }
 
 /// Dispatch a parsed command to its owning module. Exit-code-bearing results
@@ -80,6 +124,10 @@ async fn dispatch(cli: Cli) -> std::process::ExitCode {
             })
             .await
         }
+        // taken off in main(), before the runtime blocks the main thread
+        Some(Command::Desktop { .. }) => finish(Err(anyhow::anyhow!(
+            "the desktop window must start on the main thread"
+        ))),
         Some(Command::Spawn {
             name,
             brief,
