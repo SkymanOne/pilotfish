@@ -5,7 +5,7 @@
 #![allow(clippy::unwrap_used)]
 
 #[test]
-fn the_console_refuses_a_non_interactive_terminal_with_guidance() {
+fn refuses_non_tty() {
     let tmp = tempfile::tempdir().unwrap();
     // CARGO_BIN_EXE_pilotfish is the built binary; neither stdio end is a
     // terminal by construction, whatever the test harness itself has

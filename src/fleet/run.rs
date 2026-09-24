@@ -855,287 +855,133 @@ mod tests {
     }
 
     #[test]
-    fn new_state_has_neutral_defaults() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let s = base_state(&fleet, "auth-20260828141530");
-        assert_eq!(s.status, RunStatus::Starting);
-        assert_eq!(s.pid, None);
-        assert_eq!(s.steer_count, 0);
-        assert_eq!(s.worktree, None);
-        assert!(s.steering_log.is_empty());
-        assert_eq!(s.task_brief, "b");
-        assert_eq!(s.model_label(), Some("m"));
-        assert_eq!(s.pending_dialog, None);
-        assert!(s.available_models.is_empty());
-    }
-
-    #[test]
-    fn derive_view_blocks_on_pending_dialogs_too() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let mut s = base_state(&fleet, "auth-20260828141530");
-        s.status = RunStatus::Running;
-        s.pid = Some(1);
-        s.pending_dialog = Some(PendingDialog {
-            id: "u-1".into(),
-            method: "select".into(),
-            question: "Pick one".into(),
-            options: Some(vec!["a".into()]),
-            context: None,
-            asked_at: now_iso(),
-        });
-        assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Blocked);
-        s.pending_dialog = None;
-        assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Running);
-        // A state file written before the field existed still loads.
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::write(
-            run_json_path(&run_dir),
-            r#"{"id":"auth-20260828141530","name":"auth","status":"running","cwd":"/tmp/x","fleetDir":"/f","createdAt":"2026-08-28T14:15:30.000Z","taskBrief":"b"}"#,
-        )
-        .unwrap();
-        let old = load_state(&run_dir).unwrap();
-        assert_eq!(old.pending_dialog, None);
-        assert!(old.available_models.is_empty());
-    }
-
-    #[test]
-    fn save_state_is_atomic_and_load_round_trips() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
-        let loaded = load_state(&run_dir).unwrap();
-        assert_eq!(loaded.id, "auth-20260828141530");
-        let no_tmp: Vec<_> = std::fs::read_dir(&run_dir)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains(".tmp"))
-            .collect();
-        assert!(no_tmp.is_empty(), "{no_tmp:?}");
-        assert!(load_state(&run_dir.join("missing")).is_err());
-    }
-
-    #[test]
-    fn serde_tolerates_unknown_and_missing_fields() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        let path = run_json_path(&run_dir);
-        // A newer writer: extra fields, and known fields omitted.
-        std::fs::write(
-            &path,
-            r#"{
-                "id": "auth-20260828141530",
-                "name": "auth",
-                "status": "running",
-                "cwd": "/tmp/x",
-                "fleetDir": "/tmp/x/.pilotfish",
-                "createdAt": "2026-08-28T14:15:30.000Z",
-                "taskBrief": "b",
-                "someFutureField": {"deep": [1, 2, 3]}
-            }"#,
-        )
-        .unwrap();
-        let state = load_state(&run_dir).unwrap();
-        assert_eq!(state.status, RunStatus::Running);
-        assert_eq!(state.steer_count, 0);
-        assert_eq!(state.pending_question, None);
-        assert!(!state.is_git);
-        assert_eq!(state.commands, Vec::<WorkerCommand>::new());
-    }
-
-    #[test]
-    fn a_legacy_run_json_still_carrying_the_pi_catalogue_loads_and_is_stripped_on_save() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        // A state file written before the cache existed: both catalogue
-        // fields present, in the old camelCase spelling.
-        std::fs::write(
-            run_json_path(&run_dir),
-            r#"{
-                "id": "auth-20260828141530",
-                "name": "auth",
-                "status": "running",
-                "cwd": "/tmp/x",
-                "fleetDir": "/tmp/x/.pilotfish",
-                "createdAt": "2026-08-28T14:15:30.000Z",
-                "taskBrief": "b",
-                "availableModels": [{"provider": "anthropic", "id": "claude-opus-5", "name": "Opus"}],
-                "commands": [{"name": "compact-notes", "description": "Summarize the session", "source": "prompt"}]
-            }"#,
-        )
-        .unwrap();
-        // Loads without error. Without a fleet cache the catalogue reads
-        // empty: the console sources it from pi-cache.json, never from here.
-        let state = load_state(&run_dir).unwrap();
-        assert_eq!(state.status, RunStatus::Running);
-        assert!(state.available_models.is_empty());
-        assert!(state.commands.is_empty());
-        // A save never writes the catalogue back into run.json.
-        save_state(&run_dir, &state).unwrap();
-        let raw = std::fs::read_to_string(run_json_path(&run_dir)).unwrap();
-        assert!(!raw.contains("availableModels"), "{raw}");
-        assert!(!raw.contains("\"commands\""), "{raw}");
-    }
-
-    #[test]
-    fn load_state_sources_the_pi_catalogue_from_the_fleet_cache() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
-        let cache = PiCache {
-            available_models: vec![WorkerModel {
-                provider: "anthropic".into(),
-                id: "claude-opus-5".into(),
-                name: Some("Opus".into()),
-                thinking_levels: Vec::new(),
-                context_window: None,
-                cost: None,
-            }],
-            commands: vec![WorkerCommand {
-                name: "compact-notes".into(),
-                description: "Summarize the session".into(),
-                source: "prompt".into(),
-            }],
-            ..PiCache::default()
-        };
-        write_pi_cache(&fleet, &cache).unwrap();
-        let written = read_pi_cache(&fleet).expect("the cache reads back");
-        assert_eq!(written.available_models, cache.available_models);
-        assert_eq!(written.commands, cache.commands);
-        assert!(!written.fetched_at.is_empty(), "the answer is stamped");
-        let state = load_state(&run_dir).unwrap();
-        assert_eq!(state.available_models, cache.available_models);
-        assert_eq!(state.commands, cache.commands);
-        // The atomic write leaves no tmp files behind.
-        let leftovers: Vec<String> = std::fs::read_dir(&fleet)
-            .unwrap()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.contains(".tmp"))
-            .collect();
-        assert!(leftovers.is_empty(), "{leftovers:?}");
-    }
-
-    #[test]
-    fn a_missing_or_corrupt_pi_cache_degrades_to_empty() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
-        assert_eq!(read_pi_cache(&fleet), None, "no cache file yet");
-        let state = load_state(&run_dir).unwrap();
-        assert!(state.available_models.is_empty());
-        assert!(state.commands.is_empty());
-        // A stale (unparsable) cache reads as empty too, never an error.
-        std::fs::write(fleet.join(crate::paths::PI_CACHE_FILE), "{oops").unwrap();
-        assert_eq!(read_pi_cache(&fleet), None);
-        let state = load_state(&run_dir).unwrap();
-        assert!(state.available_models.is_empty());
-        assert_eq!(state.id, "auth-20260828141530");
-    }
-
-    #[test]
-    fn corrupted_run_json_is_an_error_naming_the_dir() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let run_dir = fleet.join("runs/auth-20260828141530");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::write(run_json_path(&run_dir), "{oops").unwrap();
-        let err = load_state(&run_dir).unwrap_err().to_string();
-        assert!(err.contains("Corrupted run.json"), "{err}");
-    }
-
-    #[test]
-    fn is_alive_matches_kill_zero_semantics() {
-        assert!(is_alive(Some(std::process::id() as i32)));
-        assert!(!is_alive(None));
-        assert!(!is_alive(Some(0)));
-        assert!(!is_alive(Some(i32::MAX)));
-        assert!(!is_alive(Some(-5)));
-    }
-
-    #[test]
-    fn derive_status_flags_dead_when_pid_is_gone_mid_run() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let mut s = base_state(&fleet, "auth-20260828141530");
-        s.status = RunStatus::Running;
-        s.pid = Some(1);
-        assert_eq!(
-            derive_status(&s, |pid| pid == Some(1), fixed_now()),
-            RunStatus::Running
-        );
-        assert_eq!(derive_status(&s, |_| false, fixed_now()), RunStatus::Dead);
-        s.status = RunStatus::Settled;
-        assert_eq!(
-            derive_status(&s, |_| false, fixed_now()),
-            RunStatus::Settled
-        );
-    }
-
-    #[test]
-    fn derive_status_respects_the_starting_grace_period() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let s = base_state(&fleet, "auth-20260828141530");
-        let created = parse_ts_ms(&s.created_at).unwrap();
-        assert_eq!(
-            derive_status(&s, |_| false, created + 1000),
-            RunStatus::Starting
-        );
-        assert_eq!(
-            derive_status(&s, |_| false, created + STARTING_GRACE_MS + 1),
-            RunStatus::Dead
-        );
-        // A live pid within grace is just starting.
-        assert_eq!(
-            derive_status(&s, |_| true, created + 1000),
-            RunStatus::Starting
-        );
-    }
-
-    #[test]
-    fn derive_view_adds_blocked_for_pending_questions() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let mut s = base_state(&fleet, "auth-20260828141530");
-        s.status = RunStatus::Running;
-        s.pid = Some(1);
-        assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Running);
-        s.pending_question = Some(PendingQuestion {
-            id: "m_1".into(),
-            question: "which fixture?".into(),
-            options: None,
-            context: None,
-            asked_at: now_iso(),
-        });
-        assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Blocked);
-        assert_eq!(derive_view(&s, |_| false, fixed_now()), DerivedView::Dead);
-    }
-
-    #[test]
-    fn record_steering_caps_the_log_at_twenty() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let mut s = base_state(&fleet, "auth-20260828141530");
-        for i in 0..25 {
-            record_steering(&mut s, "console", &format!("t{i}"), &format!("m{i}"));
+    fn run_json_compat() {
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let path = run_json_path(&run_dir);
+            // A newer writer: extra fields, and known fields omitted.
+            std::fs::write(
+                &path,
+                r#"{
+                    "id": "auth-20260828141530",
+                    "name": "auth",
+                    "status": "running",
+                    "cwd": "/tmp/x",
+                    "fleetDir": "/tmp/x/.pilotfish",
+                    "createdAt": "2026-08-28T14:15:30.000Z",
+                    "taskBrief": "b",
+                    "someFutureField": {"deep": [1, 2, 3]}
+                }"#,
+            )
+            .unwrap();
+            let state = load_state(&run_dir).unwrap();
+            assert_eq!(state.status, RunStatus::Running);
+            assert_eq!(state.steer_count, 0);
+            assert_eq!(state.pending_question, None);
+            assert!(!state.is_git);
+            assert_eq!(state.commands, Vec::<WorkerCommand>::new());
         }
-        assert_eq!(s.steer_count, 25);
-        assert_eq!(s.steering_log.len(), 20);
-        assert_eq!(s.steering_log.last().unwrap().message, "m24");
-        assert_eq!(s.steering_log.first().unwrap().message, "m5");
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            std::fs::write(run_json_path(&run_dir), "{oops").unwrap();
+            let err = load_state(&run_dir).unwrap_err().to_string();
+            assert!(err.contains("Corrupted run.json"), "{err}");
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            // A state file written before the cache existed: both catalogue
+            // fields present, in the old camelCase spelling.
+            std::fs::write(
+                run_json_path(&run_dir),
+                r#"{
+                    "id": "auth-20260828141530",
+                    "name": "auth",
+                    "status": "running",
+                    "cwd": "/tmp/x",
+                    "fleetDir": "/tmp/x/.pilotfish",
+                    "createdAt": "2026-08-28T14:15:30.000Z",
+                    "taskBrief": "b",
+                    "availableModels": [{"provider": "anthropic", "id": "claude-opus-5", "name": "Opus"}],
+                    "commands": [{"name": "compact-notes", "description": "Summarize the session", "source": "prompt"}]
+                }"#,
+            )
+            .unwrap();
+            // Loads without error. Without a fleet cache the catalogue reads
+            // empty: the console sources it from pi-cache.json, never from here.
+            let state = load_state(&run_dir).unwrap();
+            assert_eq!(state.status, RunStatus::Running);
+            assert!(state.available_models.is_empty());
+            assert!(state.commands.is_empty());
+            // A save never writes the catalogue back into run.json.
+            save_state(&run_dir, &state).unwrap();
+            let raw = std::fs::read_to_string(run_json_path(&run_dir)).unwrap();
+            assert!(!raw.contains("availableModels"), "{raw}");
+            assert!(!raw.contains("\"commands\""), "{raw}");
+        }
     }
 
     #[test]
-    fn record_tool_activity_updates_last_tool_and_activity() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let mut s = base_state(&fleet, "auth-20260828141530");
-        record_tool_activity(&mut s, Some("bash"));
-        assert_eq!(s.last_tool.as_deref(), Some("bash"));
-        assert!(s.last_activity.is_some());
-        record_tool_activity(&mut s, None);
-        assert_eq!(s.last_tool.as_deref(), Some("bash"));
+    fn catalogue_from_cache() {
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
+            let cache = PiCache {
+                available_models: vec![WorkerModel {
+                    provider: "anthropic".into(),
+                    id: "claude-opus-5".into(),
+                    name: Some("Opus".into()),
+                    thinking_levels: Vec::new(),
+                    context_window: None,
+                    cost: None,
+                }],
+                commands: vec![WorkerCommand {
+                    name: "compact-notes".into(),
+                    description: "Summarize the session".into(),
+                    source: "prompt".into(),
+                }],
+                ..PiCache::default()
+            };
+            write_pi_cache(&fleet, &cache).unwrap();
+            let written = read_pi_cache(&fleet).expect("the cache reads back");
+            assert_eq!(written.available_models, cache.available_models);
+            assert_eq!(written.commands, cache.commands);
+            assert!(!written.fetched_at.is_empty(), "the answer is stamped");
+            let state = load_state(&run_dir).unwrap();
+            assert_eq!(state.available_models, cache.available_models);
+            assert_eq!(state.commands, cache.commands);
+            // The atomic write leaves no tmp files behind.
+            let leftovers: Vec<String> = std::fs::read_dir(&fleet)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.contains(".tmp"))
+                .collect();
+            assert!(leftovers.is_empty(), "{leftovers:?}");
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            save_state(&run_dir, &base_state(&fleet, "auth-20260828141530")).unwrap();
+            assert_eq!(read_pi_cache(&fleet), None, "no cache file yet");
+            let state = load_state(&run_dir).unwrap();
+            assert!(state.available_models.is_empty());
+            assert!(state.commands.is_empty());
+            // A stale (unparsable) cache reads as empty too, never an error.
+            std::fs::write(fleet.join(crate::paths::PI_CACHE_FILE), "{oops").unwrap();
+            assert_eq!(read_pi_cache(&fleet), None);
+            let state = load_state(&run_dir).unwrap();
+            assert!(state.available_models.is_empty());
+            assert_eq!(state.id, "auth-20260828141530");
+        }
     }
 
     fn write_run(fleet: &Path, run_id: &str, name: &str, status: RunStatus) -> RunState {
@@ -1165,162 +1011,283 @@ mod tests {
     }
 
     #[test]
-    fn list_runs_is_newest_first_and_skips_empty_dirs() {
-        let fleet = fleet_dir("pilotfish-run-");
-        write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
-        write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
-        std::fs::create_dir_all(fleet.join("runs/auth-20260828171530")).unwrap();
-        let ids: Vec<String> = list_runs(&fleet).into_iter().map(|r| r.run_id).collect();
-        assert_eq!(ids, vec!["auth-20260828161530", "auth-20260828141530"]);
-        // No runs directory at all reads as empty.
-        assert!(list_runs(&fleet_dir("pilotfish-run-empty-")).is_empty());
+    fn list_runs_filters() {
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
+            write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
+            std::fs::create_dir_all(fleet.join("runs/auth-20260828171530")).unwrap();
+            let ids: Vec<String> = list_runs(&fleet).into_iter().map(|r| r.run_id).collect();
+            assert_eq!(ids, vec!["auth-20260828161530", "auth-20260828141530"]);
+            // No runs directory at all reads as empty.
+            assert!(list_runs(&fleet_dir("pilotfish-run-empty-")).is_empty());
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let owner = Uuid::parse_str("6e1c9a86-3b7d-4f5a-9e2c-1b8d4a7f0c3e").unwrap();
+            let other = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
+            let mut mine = write_run(&fleet, "mine-60828141530", "mine", RunStatus::Running);
+            mine.uuid = other;
+            mine.orchestrator_id = Some(owner);
+            save_state(&fleet.join("runs/mine-60828141530"), &mine).unwrap();
+            let mut theirs = write_run(&fleet, "theirs-60828141531", "theirs", RunStatus::Running);
+            theirs.orchestrator_id = Some(other);
+            save_state(&fleet.join("runs/theirs-60828141531"), &theirs).unwrap();
+            // A legacy run without an owner is nobody's.
+            write_run(&fleet, "unowned-60828141532", "unowned", RunStatus::Running);
+            let owned: Vec<String> = list_runs_for_owner(&fleet, owner)
+                .into_iter()
+                .map(|r| r.run_id)
+                .collect();
+            assert_eq!(owned, vec!["mine-60828141530"]);
+            // The unfiltered path still lists everything.
+            assert_eq!(list_runs(&fleet).len(), 3);
+        }
     }
 
     #[test]
-    fn find_run_prefers_non_archived_and_never_prefix_matches() {
-        let fleet = fleet_dir("pilotfish-run-");
-        write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
-        write_run(
-            &fleet,
-            "auth-worker-20260828141531",
-            "auth-worker",
-            RunStatus::Running,
-        );
-        assert_eq!(
-            find_run(&fleet, "auth").unwrap().run_id,
-            "auth-20260828141530"
-        );
-        assert_eq!(
-            find_run(&fleet, "auth-worker").unwrap().run_id,
-            "auth-worker-20260828141531"
-        );
-        // Casing is sanitized away.
-        assert_eq!(
-            find_run(&fleet, "Auth").unwrap().run_id,
-            "auth-20260828141530"
-        );
-        // Full ids work.
-        assert_eq!(
-            find_run(&fleet, "auth-worker-20260828141531")
-                .unwrap()
-                .run_id,
-            "auth-worker-20260828141531"
-        );
-        // A prefix of a name resolves to nothing.
-        assert!(find_run(&fleet, "auth-work").is_err());
-        assert!(find_run(&fleet, "ghost").is_err());
+    fn derived_status() {
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let mut s = base_state(&fleet, "auth-20260828141530");
+            s.status = RunStatus::Running;
+            s.pid = Some(1);
+            assert_eq!(
+                derive_status(&s, |pid| pid == Some(1), fixed_now()),
+                RunStatus::Running
+            );
+            assert_eq!(derive_status(&s, |_| false, fixed_now()), RunStatus::Dead);
+            s.status = RunStatus::Settled;
+            assert_eq!(
+                derive_status(&s, |_| false, fixed_now()),
+                RunStatus::Settled
+            );
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let s = base_state(&fleet, "auth-20260828141530");
+            let created = parse_ts_ms(&s.created_at).unwrap();
+            assert_eq!(
+                derive_status(&s, |_| false, created + 1000),
+                RunStatus::Starting
+            );
+            assert_eq!(
+                derive_status(&s, |_| false, created + STARTING_GRACE_MS + 1),
+                RunStatus::Dead
+            );
+            // A live pid within grace is just starting.
+            assert_eq!(
+                derive_status(&s, |_| true, created + 1000),
+                RunStatus::Starting
+            );
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let mut s = base_state(&fleet, "auth-20260828141530");
+            s.status = RunStatus::Running;
+            s.pid = Some(1);
+            assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Running);
+            s.pending_question = Some(PendingQuestion {
+                id: "m_1".into(),
+                question: "which fixture?".into(),
+                options: None,
+                context: None,
+                asked_at: now_iso(),
+            });
+            assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Blocked);
+            assert_eq!(derive_view(&s, |_| false, fixed_now()), DerivedView::Dead);
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let mut s = base_state(&fleet, "auth-20260828141530");
+            s.status = RunStatus::Running;
+            s.pid = Some(1);
+            s.pending_dialog = Some(PendingDialog {
+                id: "u-1".into(),
+                method: "select".into(),
+                question: "Pick one".into(),
+                options: Some(vec!["a".into()]),
+                context: None,
+                asked_at: now_iso(),
+            });
+            assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Blocked);
+            s.pending_dialog = None;
+            assert_eq!(derive_view(&s, |_| true, fixed_now()), DerivedView::Running);
+            // A state file written before the field existed still loads.
+            let run_dir = fleet.join("runs/auth-20260828141530");
+            std::fs::create_dir_all(&run_dir).unwrap();
+            std::fs::write(
+                run_json_path(&run_dir),
+                r#"{"id":"auth-20260828141530","name":"auth","status":"running","cwd":"/tmp/x","fleetDir":"/f","createdAt":"2026-08-28T14:15:30.000Z","taskBrief":"b"}"#,
+            )
+            .unwrap();
+            let old = load_state(&run_dir).unwrap();
+            assert_eq!(old.pending_dialog, None);
+            assert!(old.available_models.is_empty());
+        }
+        {
+            assert!(is_alive(Some(std::process::id() as i32)));
+            assert!(!is_alive(None));
+            assert!(!is_alive(Some(0)));
+            assert!(!is_alive(Some(i32::MAX)));
+            assert!(!is_alive(Some(-5)));
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            let mut s = base_state(&fleet, "auth-20260828141530");
+            for i in 0..25 {
+                record_steering(&mut s, "console", &format!("t{i}"), &format!("m{i}"));
+            }
+            assert_eq!(s.steer_count, 25);
+            assert_eq!(s.steering_log.len(), 20);
+            assert_eq!(s.steering_log.last().unwrap().message, "m24");
+            assert_eq!(s.steering_log.first().unwrap().message, "m5");
+        }
     }
 
     #[test]
-    fn find_run_errors_on_ambiguous_aliases_and_resolves_specific_ids() {
-        let fleet = fleet_dir("pilotfish-run-");
-        write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
-        write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
-        // Two live runs share the alias: an error naming both candidates,
-        // never a silent pick.
-        let err = find_run(&fleet, "auth").unwrap_err().to_string();
-        assert!(err.contains("ambiguous"), "{err}");
-        assert!(err.contains("auth-20260828161530"), "{err}");
-        assert!(err.contains("auth-20260828141530"), "{err}");
-        // The exact ids resolve regardless.
-        assert_eq!(
-            find_run(&fleet, "auth-20260828161530").unwrap().run_id,
-            "auth-20260828161530"
-        );
-        // Archive the newest: the alias is unambiguous again, and the
-        // remaining live one wins.
-        let newest = find_run(&fleet, "auth-20260828161530").unwrap();
-        let mut state = newest.state.clone();
-        state.status = RunStatus::Archived;
-        save_state(&newest.run_dir, &state).unwrap();
-        assert_eq!(
-            find_run(&fleet, "auth").unwrap().run_id,
-            "auth-20260828141530"
-        );
-        // All archived: still resolvable, explicitly, without ambiguity.
-        let older = find_run(&fleet, "auth-20260828141530").unwrap();
-        let mut state = older.state.clone();
-        state.status = RunStatus::Archived;
-        save_state(&older.run_dir, &state).unwrap();
-        assert_eq!(
-            find_run(&fleet, "auth").unwrap().run_id,
-            "auth-20260828161530"
-        );
+    fn find_run_resolution() {
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
+            write_run(
+                &fleet,
+                "auth-worker-20260828141531",
+                "auth-worker",
+                RunStatus::Running,
+            );
+            assert_eq!(
+                find_run(&fleet, "auth").unwrap().run_id,
+                "auth-20260828141530"
+            );
+            assert_eq!(
+                find_run(&fleet, "auth-worker").unwrap().run_id,
+                "auth-worker-20260828141531"
+            );
+            // Casing is sanitized away.
+            assert_eq!(
+                find_run(&fleet, "Auth").unwrap().run_id,
+                "auth-20260828141530"
+            );
+            // Full ids work.
+            assert_eq!(
+                find_run(&fleet, "auth-worker-20260828141531")
+                    .unwrap()
+                    .run_id,
+                "auth-worker-20260828141531"
+            );
+            // A prefix of a name resolves to nothing.
+            assert!(find_run(&fleet, "auth-work").is_err());
+            assert!(find_run(&fleet, "ghost").is_err());
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            write_run(&fleet, "auth-20260828141530", "auth", RunStatus::Running);
+            write_run(&fleet, "auth-20260828161530", "auth", RunStatus::Running);
+            // Two live runs share the alias: an error naming both candidates,
+            // never a silent pick.
+            let err = find_run(&fleet, "auth").unwrap_err().to_string();
+            assert!(err.contains("ambiguous"), "{err}");
+            assert!(err.contains("auth-20260828161530"), "{err}");
+            assert!(err.contains("auth-20260828141530"), "{err}");
+            // The exact ids resolve regardless.
+            assert_eq!(
+                find_run(&fleet, "auth-20260828161530").unwrap().run_id,
+                "auth-20260828161530"
+            );
+            // Archive the newest: the alias is unambiguous again, and the
+            // remaining live one wins.
+            let newest = find_run(&fleet, "auth-20260828161530").unwrap();
+            let mut state = newest.state.clone();
+            state.status = RunStatus::Archived;
+            save_state(&newest.run_dir, &state).unwrap();
+            assert_eq!(
+                find_run(&fleet, "auth").unwrap().run_id,
+                "auth-20260828141530"
+            );
+            // All archived: still resolvable, explicitly, without ambiguity.
+            let older = find_run(&fleet, "auth-20260828141530").unwrap();
+            let mut state = older.state.clone();
+            state.status = RunStatus::Archived;
+            save_state(&older.run_dir, &state).unwrap();
+            assert_eq!(
+                find_run(&fleet, "auth").unwrap().run_id,
+                "auth-20260828161530"
+            );
+        }
+        {
+            let fleet = fleet_dir("pilotfish-run-");
+            // A run under the new scheme: `<alias>-<short-uuid>`, a recorded
+            // uuid, an owner, and state.name as the alias.
+            let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
+            let run_id = run_id_for("auth", &uuid);
+            assert_eq!(run_id, "auth-f7a8b9c");
+            // The id is the alias plus the short uuid; the branch rule shortens
+            // the same suffix, so branch names stay valid under the scheme.
+            assert_eq!(short_uuid(&uuid), "f7a8b9c");
+            assert_eq!(crate::util::short7(&run_id), "f7a8b9c");
+            assert_eq!(
+                crate::util::branch_for("auth", &run_id),
+                "pilotfish/auth-f7a8b9c"
+            );
+            let mut state = write_run(&fleet, &run_id, "auth", RunStatus::Running);
+            state.uuid = uuid;
+            state.orchestrator_id =
+                Some(Uuid::parse_str("6e1c9a86-3b7d-4f5a-9e2c-1b8d4a7f0c3e").unwrap());
+            save_state(&fleet.join("runs").join(&run_id), &state).unwrap();
+            // The exact run id (the directory name) resolves.
+            assert_eq!(find_run(&fleet, "auth-f7a8b9c").unwrap().run_id, run_id);
+            // The exact uuid resolves.
+            assert_eq!(
+                find_run(&fleet, "9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c")
+                    .unwrap()
+                    .run_id,
+                run_id
+            );
+            // The alias resolves through the name field.
+            assert_eq!(find_run(&fleet, "auth").unwrap().run_id, run_id);
+            assert_eq!(
+                find_run(&fleet, "AUTH").unwrap().run_id,
+                run_id,
+                "casing is sanitized away"
+            );
+            // A uuid that matches nothing is a plain miss.
+            assert!(find_run(&fleet, "11111111-1111-4111-8111-111111111111").is_err());
+            // A legacy run whose state predates the name field still resolves
+            // through its directory form.
+            let legacy_dir = fleet.join("runs/db-20260828141530");
+            std::fs::create_dir_all(&legacy_dir).unwrap();
+            let mut legacy = RunState::new(
+                fleet.to_string_lossy().as_ref(),
+                "db-20260828141530",
+                "",
+                "/tmp/x",
+                "b",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            legacy.uuid = Uuid::nil();
+            legacy.status = RunStatus::Running;
+            save_state(&legacy_dir, &legacy).unwrap();
+            assert_eq!(
+                find_run(&fleet, "db").unwrap().run_id,
+                "db-20260828141530",
+                "the legacy directory form still resolves"
+            );
+        }
     }
 
     #[test]
-    fn find_run_resolves_uuids_self_named_dirs_and_ownerless_legacy_runs() {
-        let fleet = fleet_dir("pilotfish-run-");
-        // A run under the new scheme: `<alias>-<short-uuid>`, a recorded
-        // uuid, an owner, and state.name as the alias.
-        let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
-        let run_id = run_id_for("auth", &uuid);
-        assert_eq!(run_id, "auth-f7a8b9c");
-        // The id is the alias plus the short uuid; the branch rule shortens
-        // the same suffix, so branch names stay valid under the scheme.
-        assert_eq!(short_uuid(&uuid), "f7a8b9c");
-        assert_eq!(crate::util::short7(&run_id), "f7a8b9c");
-        assert_eq!(
-            crate::util::branch_for("auth", &run_id),
-            "pilotfish/auth-f7a8b9c"
-        );
-        let mut state = write_run(&fleet, &run_id, "auth", RunStatus::Running);
-        state.uuid = uuid;
-        state.orchestrator_id =
-            Some(Uuid::parse_str("6e1c9a86-3b7d-4f5a-9e2c-1b8d4a7f0c3e").unwrap());
-        save_state(&fleet.join("runs").join(&run_id), &state).unwrap();
-        // The exact run id (the directory name) resolves.
-        assert_eq!(find_run(&fleet, "auth-f7a8b9c").unwrap().run_id, run_id);
-        // The exact uuid resolves.
-        assert_eq!(
-            find_run(&fleet, "9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c")
-                .unwrap()
-                .run_id,
-            run_id
-        );
-        // The alias resolves through the name field.
-        assert_eq!(find_run(&fleet, "auth").unwrap().run_id, run_id);
-        assert_eq!(
-            find_run(&fleet, "AUTH").unwrap().run_id,
-            run_id,
-            "casing is sanitized away"
-        );
-        // A uuid that matches nothing is a plain miss.
-        assert!(find_run(&fleet, "11111111-1111-4111-8111-111111111111").is_err());
-        // A legacy run whose state predates the name field still resolves
-        // through its directory form.
-        let legacy_dir = fleet.join("runs/db-20260828141530");
-        std::fs::create_dir_all(&legacy_dir).unwrap();
-        let mut legacy = RunState::new(
-            fleet.to_string_lossy().as_ref(),
-            "db-20260828141530",
-            "",
-            "/tmp/x",
-            "b",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        legacy.uuid = Uuid::nil();
-        legacy.status = RunStatus::Running;
-        save_state(&legacy_dir, &legacy).unwrap();
-        assert_eq!(
-            find_run(&fleet, "db").unwrap().run_id,
-            "db-20260828141530",
-            "the legacy directory form still resolves"
-        );
-    }
-
-    #[test]
-    fn worker_party_is_the_run_uuid_or_the_stable_legacy_encoding() {
+    fn worker_party_encoding() {
         let fleet = fleet_dir("pilotfish-run-");
         let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
         let run_id = run_id_for("auth", &uuid);
@@ -1352,30 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn list_runs_for_owner_sees_only_owned_runs() {
-        let fleet = fleet_dir("pilotfish-run-");
-        let owner = Uuid::parse_str("6e1c9a86-3b7d-4f5a-9e2c-1b8d4a7f0c3e").unwrap();
-        let other = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
-        let mut mine = write_run(&fleet, "mine-60828141530", "mine", RunStatus::Running);
-        mine.uuid = other;
-        mine.orchestrator_id = Some(owner);
-        save_state(&fleet.join("runs/mine-60828141530"), &mine).unwrap();
-        let mut theirs = write_run(&fleet, "theirs-60828141531", "theirs", RunStatus::Running);
-        theirs.orchestrator_id = Some(other);
-        save_state(&fleet.join("runs/theirs-60828141531"), &theirs).unwrap();
-        // A legacy run without an owner is nobody's.
-        write_run(&fleet, "unowned-60828141532", "unowned", RunStatus::Running);
-        let owned: Vec<String> = list_runs_for_owner(&fleet, owner)
-            .into_iter()
-            .map(|r| r.run_id)
-            .collect();
-        assert_eq!(owned, vec!["mine-60828141530"]);
-        // The unfiltered path still lists everything.
-        assert_eq!(list_runs(&fleet).len(), 3);
-    }
-
-    #[test]
-    fn resume_hint_names_the_binary_and_session() {
+    fn resume_hint_newest_session() {
         let fleet = fleet_dir("pilotfish-run-");
         let run_dir = fleet.join("runs/auth-20260828141530");
         std::fs::create_dir_all(run_dir.join("session")).unwrap();

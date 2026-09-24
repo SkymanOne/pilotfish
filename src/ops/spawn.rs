@@ -700,43 +700,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn routing_off_is_the_spawn_that_was_always_there() {
-        let root = init_repo("pilotfish-route-off-");
-        let created = create_run_with_retry(&request("plain", "do a thing", &root, true), None)
-            .await
-            .unwrap();
-        assert_eq!(created.state.routing, None);
-        let raw = std::fs::read_to_string(created.paths.run_json(&created.run_id)).unwrap();
-        assert!(
-            !raw.contains("\"routing\""),
-            "an unrouted run.json is byte-identical to before: {raw}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pinned_model_and_thinking_level_are_never_routed() {
-        let root = init_repo("pilotfish-route-pinned-");
-        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
-        std::fs::create_dir_all(&fleet_dir).unwrap();
-        let mut req = request("pinned", "do a thing", &root, true);
-        req.model = Some("claude-opus-5".into());
-        req.thinking = Some("high".into());
-        // `--route` on, and an endpoint that would refuse: nothing is asked,
-        // because there is nothing left to decide
-        let mut with_route = req.clone();
-        with_route.route = Some(true);
-        let config = crate::paths::UserConfig {
-            routing: crate::paths::RoutingConfig {
-                enabled: true,
-                endpoint: Some("http://127.0.0.1:1/v1/systemone".into()),
-                ..crate::paths::RoutingConfig::default()
-            },
-            ..crate::paths::UserConfig::default()
-        };
-        let decided = route_request(&mut with_route, &config, &fleet_dir, &[], 1_000).await;
-        assert_eq!(decided, None, "nothing to route");
-        assert_eq!(with_route.model.as_deref(), Some("claude-opus-5"));
-        assert_eq!(with_route.thinking.as_deref(), Some("high"));
+    async fn routing_skipped() {
+        {
+            let root = init_repo("pilotfish-route-off-");
+            let created = create_run_with_retry(&request("plain", "do a thing", &root, true), None)
+                .await
+                .unwrap();
+            assert_eq!(created.state.routing, None);
+            let raw = std::fs::read_to_string(created.paths.run_json(&created.run_id)).unwrap();
+            assert!(
+                !raw.contains("\"routing\""),
+                "an unrouted run.json is byte-identical to before: {raw}"
+            );
+        }
+        {
+            let root = init_repo("pilotfish-route-pinned-");
+            let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+            std::fs::create_dir_all(&fleet_dir).unwrap();
+            let mut req = request("pinned", "do a thing", &root, true);
+            req.model = Some("claude-opus-5".into());
+            req.thinking = Some("high".into());
+            // `--route` on, and an endpoint that would refuse: nothing is asked,
+            // because there is nothing left to decide
+            let mut with_route = req.clone();
+            with_route.route = Some(true);
+            let config = crate::paths::UserConfig {
+                routing: crate::paths::RoutingConfig {
+                    enabled: true,
+                    endpoint: Some("http://127.0.0.1:1/v1/systemone".into()),
+                    ..crate::paths::RoutingConfig::default()
+                },
+                ..crate::paths::UserConfig::default()
+            };
+            let decided = route_request(&mut with_route, &config, &fleet_dir, &[], 1_000).await;
+            assert_eq!(decided, None, "nothing to route");
+            assert_eq!(with_route.model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(with_route.thinking.as_deref(), Some("high"));
+        }
     }
 
     /// A repository whose fleet dir holds pi's catalogue, as a worker's boot
@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_catalogue_fetches_pi_models_before_routing() {
+    async fn fetches_catalogue_first() {
         let (root, fleet_dir) = fleet_without_catalogue("pilotfish-route-nocat-");
         let (url, _requests) =
             crate::route::test_support::stub(vec![serde_json::json!({"answers": {
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_confident_route_sets_the_model_and_then_its_thinking() {
+    async fn confident_route() {
         let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-sure-");
         let (url, _requests) = crate::route::test_support::stub(vec![
             serde_json::json!({"answers": {
@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unsure_model_is_put_to_the_console_and_the_answer_runs() {
+    async fn unsure_asks_console() {
         let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-ask-");
         open_console(&fleet_dir);
         let (url, _requests) =
@@ -980,156 +980,154 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unanswered_model_question_keeps_the_configured_model() {
-        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-wait-");
-        open_console(&fleet_dir);
-        let (url, _requests) =
-            crate::route::test_support::stub(vec![unsure(), thinking("max")]).await;
-        let config = routing_on(url);
-        let mut req = request("wait", "do a thing", &root, true);
-        let routing = route_with_key(
-            &mut req,
-            &config,
-            &config.routing,
-            &fleet_dir,
-            &[],
-            "k",
-            "pi",
-            300,
-        )
-        .await
-        .unwrap();
-        assert_eq!(req.model, None, "the configured model stands");
-        assert_eq!(
-            req.thinking.as_deref(),
-            Some("max"),
-            "and its own levels are chosen from"
-        );
-        assert!(
-            routing
-                .note
-                .contains("no answer within 1 s; kept the configured claude-opus-5"),
-            "{}",
-            routing.note
-        );
-        let paths = FleetPaths::new(&fleet_dir);
-        assert!(crate::route::pending_questions(&paths).is_empty());
+    async fn unsure_falls_back() {
+        {
+            let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-wait-");
+            open_console(&fleet_dir);
+            let (url, _requests) =
+                crate::route::test_support::stub(vec![unsure(), thinking("max")]).await;
+            let config = routing_on(url);
+            let mut req = request("wait", "do a thing", &root, true);
+            let routing = route_with_key(
+                &mut req,
+                &config,
+                &config.routing,
+                &fleet_dir,
+                &[],
+                "k",
+                "pi",
+                300,
+            )
+            .await
+            .unwrap();
+            assert_eq!(req.model, None, "the configured model stands");
+            assert_eq!(
+                req.thinking.as_deref(),
+                Some("max"),
+                "and its own levels are chosen from"
+            );
+            assert!(
+                routing
+                    .note
+                    .contains("no answer within 1 s; kept the configured claude-opus-5"),
+                "{}",
+                routing.note
+            );
+            let paths = FleetPaths::new(&fleet_dir);
+            assert!(crate::route::pending_questions(&paths).is_empty());
+        }
+        {
+            let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-alone-");
+            let (url, _requests) =
+                crate::route::test_support::stub(vec![unsure(), thinking("high")]).await;
+            let config = routing_on(url);
+            let mut req = request("alone", "do a thing", &root, true);
+            let started = Instant::now();
+            let routing = route_with_key(
+                &mut req,
+                &config,
+                &config.routing,
+                &fleet_dir,
+                &[],
+                "k",
+                "pi",
+                60_000,
+            )
+            .await
+            .unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "no ten-minute wait"
+            );
+            assert_eq!(req.model, None);
+            assert!(routing.note.contains("no console open"), "{}", routing.note);
+        }
     }
 
     #[tokio::test]
-    async fn with_no_console_open_nobody_is_waited_for() {
-        let (root, fleet_dir) = fleet_with_catalogue("pilotfish-route-alone-");
-        let (url, _requests) =
-            crate::route::test_support::stub(vec![unsure(), thinking("high")]).await;
-        let config = routing_on(url);
-        let mut req = request("alone", "do a thing", &root, true);
-        let started = Instant::now();
-        let routing = route_with_key(
-            &mut req,
-            &config,
-            &config.routing,
-            &fleet_dir,
-            &[],
-            "k",
-            "pi",
-            60_000,
-        )
-        .await
-        .unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "no ten-minute wait"
-        );
-        assert_eq!(req.model, None);
-        assert!(routing.note.contains("no console open"), "{}", routing.note);
-    }
+    async fn create_run_layouts() {
+        {
+            let root = init_repo("pilotfish-spawn-");
+            let created =
+                create_run_with_retry(&request("auth-worker", "create hello", &root, true), None)
+                    .await
+                    .unwrap();
+            assert!(
+                regex::Regex::new(r"^auth-worker-[0-9a-f]{7}$")
+                    .unwrap()
+                    .is_match(&created.run_id)
+            );
+            // The id is the alias plus the short uuid, and the state records the
+            // same uuid plus the owning session (the default until fleet.json
+            // names one — a fresh fleet has no session rows yet).
+            assert!(!created.state.uuid.is_nil());
+            assert_eq!(
+                created.run_id,
+                format!(
+                    "auth-worker-{}",
+                    crate::util::short_uuid(&created.state.uuid)
+                )
+            );
+            assert_eq!(
+                created.state.orchestrator_id,
+                Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
+            );
+            assert!(created.paths.run_json(&created.run_id).is_file());
+            let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+            assert!(gitignore.contains(".pilotfish/"), "{gitignore}");
 
-    #[tokio::test]
-    async fn create_run_builds_layout_worktree_and_initial_state() {
-        let root = init_repo("pilotfish-spawn-");
-        let created =
-            create_run_with_retry(&request("auth-worker", "create hello", &root, true), None)
+            let worktree = created.worktree_path.clone().unwrap();
+            assert!(worktree.join("seed.txt").exists());
+            assert!(worktree.starts_with(created.paths.root().join("worktrees")));
+            assert!(
+                created
+                    .state
+                    .branch
+                    .clone()
+                    .unwrap()
+                    .starts_with("pilotfish/auth-worker-")
+            );
+            assert_eq!(
+                created.state.repo_root.as_deref(),
+                Some(root.canonicalize().unwrap().to_string_lossy().as_ref())
+            );
+            assert!(created.state.is_git);
+            let head = git::resolve_commit(&root, "HEAD").await.unwrap();
+            assert_eq!(created.state.base_commit.as_deref(), Some(head.as_str()));
+            assert_eq!(created.state.task_brief, "create hello");
+            assert_eq!(created.state.status, crate::fleet::run::RunStatus::Starting);
+            assert_eq!(
+                created.state.cwd,
+                root.canonicalize().unwrap().to_string_lossy()
+            );
+        }
+        {
+            let dir = tmp_dir("pilotfish-spawn-plain-");
+            let created = create_run_with_retry(&request("flat", "b", &dir, true), None)
                 .await
                 .unwrap();
-        assert!(
-            regex::Regex::new(r"^auth-worker-[0-9a-f]{7}$")
-                .unwrap()
-                .is_match(&created.run_id)
-        );
-        // The id is the alias plus the short uuid, and the state records the
-        // same uuid plus the owning session (the default until fleet.json
-        // names one — a fresh fleet has no session rows yet).
-        assert!(!created.state.uuid.is_nil());
-        assert_eq!(
-            created.run_id,
-            format!(
-                "auth-worker-{}",
-                crate::util::short_uuid(&created.state.uuid)
-            )
-        );
-        assert_eq!(
-            created.state.orchestrator_id,
-            Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
-        );
-        assert!(created.paths.run_json(&created.run_id).is_file());
-        let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-        assert!(gitignore.contains(".pilotfish/"), "{gitignore}");
-
-        let worktree = created.worktree_path.clone().unwrap();
-        assert!(worktree.join("seed.txt").exists());
-        assert!(worktree.starts_with(created.paths.root().join("worktrees")));
-        assert!(
-            created
-                .state
-                .branch
-                .clone()
-                .unwrap()
-                .starts_with("pilotfish/auth-worker-")
-        );
-        assert_eq!(
-            created.state.repo_root.as_deref(),
-            Some(root.canonicalize().unwrap().to_string_lossy().as_ref())
-        );
-        assert!(created.state.is_git);
-        let head = git::resolve_commit(&root, "HEAD").await.unwrap();
-        assert_eq!(created.state.base_commit.as_deref(), Some(head.as_str()));
-        assert_eq!(created.state.task_brief, "create hello");
-        assert_eq!(created.state.status, crate::fleet::run::RunStatus::Starting);
-        assert_eq!(
-            created.state.cwd,
-            root.canonicalize().unwrap().to_string_lossy()
-        );
+            assert_eq!(created.worktree_path, None);
+            assert_eq!(created.state.branch, None);
+            assert!(!created.state.is_git);
+            assert_eq!(created.state.repo_root, None);
+            assert_eq!(created.state.base_commit, None);
+        }
+        {
+            let root = init_repo("pilotfish-spawn-");
+            let created = create_run_with_retry(&request("nowt", "b", &root, false), None)
+                .await
+                .unwrap();
+            assert_eq!(created.worktree_path, None);
+            assert_eq!(created.state.branch, None);
+            assert!(
+                created.state.is_git,
+                "still a git repo, just running in place"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn create_run_in_a_plain_directory_runs_in_place() {
-        let dir = tmp_dir("pilotfish-spawn-plain-");
-        let created = create_run_with_retry(&request("flat", "b", &dir, true), None)
-            .await
-            .unwrap();
-        assert_eq!(created.worktree_path, None);
-        assert_eq!(created.state.branch, None);
-        assert!(!created.state.is_git);
-        assert_eq!(created.state.repo_root, None);
-        assert_eq!(created.state.base_commit, None);
-    }
-
-    #[tokio::test]
-    async fn create_run_skips_the_worktree_when_asked() {
-        let root = init_repo("pilotfish-spawn-");
-        let created = create_run_with_retry(&request("nowt", "b", &root, false), None)
-            .await
-            .unwrap();
-        assert_eq!(created.worktree_path, None);
-        assert_eq!(created.state.branch, None);
-        assert!(
-            created.state.is_git,
-            "still a git repo, just running in place"
-        );
-    }
-
-    #[tokio::test]
-    async fn an_exited_monitor_is_reaped_so_a_crash_can_read_dead() {
+    async fn exited_monitor_reaped() {
         let dir = tmp_dir("pilotfish-spawn-reap-");
         let paths = FleetPaths::new(dir);
         let run_id = "reap-20260828141530";
@@ -1190,116 +1188,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_archives_a_stale_namesake() {
-        let root = init_repo("pilotfish-spawn-dupe-");
-        let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
-        fleet.paths.ensure().unwrap();
-        // A settled prior run of the same name: spawning anew archives it as
-        // part of the spawn, so the name keeps exactly one live entry and
-        // `cleanup <name>` cannot resolve to a stale twin.
-        let stale = put_run(
-            &fleet.paths,
-            "auth",
-            "auth-20990101000000",
-            RunStatus::Settled,
-            None,
-        );
-        let created = create_run_with_retry(&request("auth", "new work", &root, true), None)
+    async fn namesake_rules() {
+        {
+            let root = init_repo("pilotfish-spawn-dupe-");
+            let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
+            fleet.paths.ensure().unwrap();
+            // A settled prior run of the same name: spawning anew archives it as
+            // part of the spawn, so the name keeps exactly one live entry and
+            // `cleanup <name>` cannot resolve to a stale twin.
+            let stale = put_run(
+                &fleet.paths,
+                "auth",
+                "auth-20990101000000",
+                RunStatus::Settled,
+                None,
+            );
+            let created = create_run_with_retry(&request("auth", "new work", &root, true), None)
+                .await
+                .unwrap();
+            assert_ne!(created.run_id, "auth-20990101000000", "a fresh run id");
+            assert_eq!(
+                crate::fleet::run::load_state(&stale).unwrap().status,
+                RunStatus::Archived,
+                "spawn archives the stale namesake"
+            );
+            assert_eq!(
+                crate::fleet::run::load_state(&created.run_dir)
+                    .unwrap()
+                    .status,
+                RunStatus::Starting
+            );
+        }
+        {
+            let root = init_repo("pilotfish-spawn-live-");
+            let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
+            fleet.paths.ensure().unwrap();
+            // A still-running namesake refuses the spawn, naming the live run:
+            // silently duplicating the name is how a live worker was archived.
+            let live_id = "auth-20990101000001";
+            let live_dir = put_run(
+                &fleet.paths,
+                "auth",
+                live_id,
+                RunStatus::Running,
+                Some(std::process::id().cast_signed()),
+            );
+            let err = create_run_with_env(&request("auth", "again", &root, true), None, None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(live_id), "{err}");
+            assert!(err.contains("still running"), "{err}");
+            assert!(err.contains("one live run"), "{err}");
+            assert_eq!(
+                crate::fleet::run::load_state(&live_dir).unwrap().status,
+                RunStatus::Running,
+                "the live run is untouched"
+            );
+        }
+        {
+            let dir = tmp_dir("pilotfish-spawn-bad-");
+            let err = create_run_with_env(&request("!!!", "b", &dir, false), None, None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, "spawn: <name> required");
+            let err = spawn_core(request("x", "  ", &dir, false))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, "spawn: task brief required after \"--\"");
+        }
+    }
+
+    #[tokio::test]
+    async fn model_resolution() {
+        {
+            let root = init_repo("pilotfish-spawn-cfg-");
+            let user_dir = tmp_dir("pilotfish-user-cfg-");
+            std::fs::write(
+                user_dir.join("config.toml"),
+                "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
+            )
+            .unwrap();
+            let created = create_run_with_retry(
+                &request("cfg-worker", "do the thing", &root, true),
+                Some(&user_dir),
+            )
             .await
             .unwrap();
-        assert_ne!(created.run_id, "auth-20990101000000", "a fresh run id");
-        assert_eq!(
-            crate::fleet::run::load_state(&stale).unwrap().status,
-            RunStatus::Archived,
-            "spawn archives the stale namesake"
-        );
-        assert_eq!(
-            crate::fleet::run::load_state(&created.run_dir)
-                .unwrap()
-                .status,
-            RunStatus::Starting
-        );
-    }
-
-    #[tokio::test]
-    async fn spawn_refuses_when_the_name_still_runs() {
-        let root = init_repo("pilotfish-spawn-live-");
-        let fleet = resolve_fleet_dir_with_env(Some(&root), None).await.unwrap();
-        fleet.paths.ensure().unwrap();
-        // A still-running namesake refuses the spawn, naming the live run:
-        // silently duplicating the name is how a live worker was archived.
-        let live_id = "auth-20990101000001";
-        let live_dir = put_run(
-            &fleet.paths,
-            "auth",
-            live_id,
-            RunStatus::Running,
-            Some(std::process::id().cast_signed()),
-        );
-        let err = create_run_with_env(&request("auth", "again", &root, true), None, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains(live_id), "{err}");
-        assert!(err.contains("still running"), "{err}");
-        assert!(err.contains("one live run"), "{err}");
-        assert_eq!(
-            crate::fleet::run::load_state(&live_dir).unwrap().status,
-            RunStatus::Running,
-            "the live run is untouched"
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_names_and_briefs_are_refused() {
-        let dir = tmp_dir("pilotfish-spawn-bad-");
-        let err = create_run_with_env(&request("!!!", "b", &dir, false), None, None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "spawn: <name> required");
-        let err = spawn_core(request("x", "  ", &dir, false))
-            .await
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "spawn: task brief required after \"--\"");
-    }
-
-    #[tokio::test]
-    async fn the_user_config_supplies_worker_model_and_provider_defaults() {
-        let root = init_repo("pilotfish-spawn-cfg-");
-        let user_dir = tmp_dir("pilotfish-user-cfg-");
-        std::fs::write(
-            user_dir.join("config.toml"),
-            "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
-        )
-        .unwrap();
-        let created = create_run_with_retry(
-            &request("cfg-worker", "do the thing", &root, true),
-            Some(&user_dir),
-        )
-        .await
-        .unwrap();
-        // The run records the resolved defaults, which the monitor hands to pi.
-        assert_eq!(created.state.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(created.state.provider.as_deref(), Some("opencode-go"));
-    }
-
-    #[tokio::test]
-    async fn an_explicit_worker_model_beats_the_user_config() {
-        let root = init_repo("pilotfish-spawn-cfg-explicit-");
-        let user_dir = tmp_dir("pilotfish-user-cfg-explicit-");
-        std::fs::write(
-            user_dir.join("config.toml"),
-            "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
-        )
-        .unwrap();
-        let mut req = request("cfg-explicit", "do the thing", &root, true);
-        req.model = Some("glm-5.3".into());
-        let created = create_run_with_retry(&req, Some(&user_dir)).await.unwrap();
-        assert_eq!(created.state.model.as_deref(), Some("glm-5.3"));
-        // The provider carries no explicit value, so the config still fills it.
-        assert_eq!(created.state.provider.as_deref(), Some("opencode-go"));
+            // The run records the resolved defaults, which the monitor hands to pi.
+            assert_eq!(created.state.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(created.state.provider.as_deref(), Some("opencode-go"));
+        }
+        {
+            let root = init_repo("pilotfish-spawn-cfg-explicit-");
+            let user_dir = tmp_dir("pilotfish-user-cfg-explicit-");
+            std::fs::write(
+                user_dir.join("config.toml"),
+                "[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
+            )
+            .unwrap();
+            let mut req = request("cfg-explicit", "do the thing", &root, true);
+            req.model = Some("glm-5.3".into());
+            let created = create_run_with_retry(&req, Some(&user_dir)).await.unwrap();
+            assert_eq!(created.state.model.as_deref(), Some("glm-5.3"));
+            // The provider carries no explicit value, so the config still fills it.
+            assert_eq!(created.state.provider.as_deref(), Some("opencode-go"));
+        }
     }
 
     /// A live run on disk owned by `owner` (`None` = the unowned legacy
@@ -1339,180 +1335,182 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_refuses_at_the_per_session_cap_naming_the_slots() {
-        let root = init_repo("pilotfish-spawn-cap-");
-        let fleet = fleet_of(&root);
-        let default = Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION);
-        // Three live runs of the (default) session fill the default cap of 3.
-        for i in 0..3 {
-            put_live_run(
-                &FleetPaths::new(&fleet),
-                &format!("cap{i}-6082814153{i}"),
-                &format!("cap{i}"),
-                default,
-            );
-        }
-        let before = std::fs::read_dir(fleet.join("runs"))
-            .unwrap()
-            .flatten()
-            .count();
-        let worktrees = fleet.join("worktrees");
-        let worktrees_before = std::fs::read_dir(&worktrees)
-            .map(Iterator::count)
-            .unwrap_or(0);
+    async fn cap_enforced() {
+        {
+            let root = init_repo("pilotfish-spawn-cap-");
+            let fleet = fleet_of(&root);
+            let default = Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION);
+            // Three live runs of the (default) session fill the default cap of 3.
+            for i in 0..3 {
+                put_live_run(
+                    &FleetPaths::new(&fleet),
+                    &format!("cap{i}-6082814153{i}"),
+                    &format!("cap{i}"),
+                    default,
+                );
+            }
+            let before = std::fs::read_dir(fleet.join("runs"))
+                .unwrap()
+                .flatten()
+                .count();
+            let worktrees = fleet.join("worktrees");
+            let worktrees_before = std::fs::read_dir(&worktrees)
+                .map(Iterator::count)
+                .unwrap_or(0);
 
-        let result = spawn_core_with_dirs(request("fourth", "b", &root, true), None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Error, "refused with exit 1");
-        let err = result.err.join("\n");
-        assert!(err.contains("refused"), "{err}");
-        assert!(err.contains("cap is 3"), "{err}");
-        assert!(err.contains("max_workers_per_session"), "{err}");
-        // Every holder is named, with its id and derived view.
-        for i in 0..3 {
-            assert!(err.contains(&format!("cap{i}-6082814153{i}")), "{err}");
-        }
-        // Nothing was created: no new run, no worktree.
-        let after = std::fs::read_dir(fleet.join("runs"))
-            .unwrap()
-            .flatten()
-            .count();
-        assert_eq!(after, before, "no run directory appeared");
-        let worktrees_after = std::fs::read_dir(&worktrees)
-            .map(Iterator::count)
-            .unwrap_or(0);
-        assert_eq!(worktrees_before, worktrees_after, "no worktree was cut");
-    }
-
-    #[tokio::test]
-    async fn the_cap_counts_live_runs_only_and_other_sessions_do_not_hold_slots() {
-        let root = init_repo("pilotfish-spawn-cap2-");
-        let fleet = fleet_of(&root);
-        let paths = FleetPaths::new(&fleet);
-        let other = Some(uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap());
-        // Three live runs owned by *another* session: none count toward this
-        // (default) session's cap — the whole point of a per-session limit.
-        for i in 0..3 {
-            put_live_run(
-                &paths,
-                &format!("theirs{i}-6082814153{i}"),
-                &format!("theirs{i}"),
-                other,
-            );
-        }
-        let result = spawn_core_with_dirs(request("mine", "b", &root, true), None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
-
-        // Settled runs free their slot: two live, one settled — a third
-        // live would refuse, the settled one never holds a slot.
-        let mut settled = RunState::new(
-            paths.root().to_string_lossy().as_ref(),
-            "old-60828141530",
-            "old",
-            "/tmp/x",
-            "b",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        settled.status = RunStatus::Settled;
-        settled.orchestrator_id = Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION);
-        let old_dir = paths.run_dir("old-60828141530");
-        std::fs::create_dir_all(&old_dir).unwrap();
-        save_state(&old_dir, &settled).unwrap();
-        put_live_run(&paths, "a-60828141531", "a", None);
-        put_live_run(&paths, "b-60828141532", "b", None);
-        put_live_run(
-            &paths,
-            "c-60828141533",
-            "c",
-            Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION),
-        );
-        let result = spawn_core_with_dirs(request("again", "b", &root, true), None, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Error);
-        let err = result.err.join("\n");
-        assert!(err.contains("cap is 3"), "{err}");
-        assert!(err.contains("a-60828141531"), "{err}");
-        assert!(err.contains("b-60828141532"), "{err}");
-        assert!(err.contains("c-60828141533"), "{err}");
-        assert!(!err.contains("old-"), "a settled run holds no slot: {err}");
-    }
-
-    #[tokio::test]
-    async fn the_user_config_sets_the_cap_and_zero_refuses_everything() {
-        let root = init_repo("pilotfish-spawn-capcfg-");
-        let fleet = fleet_of(&root);
-        let paths = FleetPaths::new(&fleet);
-        let user_dir = tmp_dir("pilotfish-user-cap-");
-        // A lowered cap: two live runs fill it.
-        std::fs::write(
-            user_dir.join("config.toml"),
-            "[limits]\nmax_workers_per_session = 2\n",
-        )
-        .unwrap();
-        put_live_run(&paths, "x-60828141530", "x", None);
-        put_live_run(&paths, "y-60828141531", "y", None);
-        let result = spawn_core_with_dirs(request("z", "b", &root, true), None, Some(&user_dir))
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Error);
-        assert!(
-            result.err.join("\n").contains("cap is 2"),
-            "{:?}",
-            result.err
-        );
-
-        // A cap of zero refuses even with nothing running: no spawning at
-        // all, with a hint naming the config key.
-        let empty = init_repo("pilotfish-spawn-capzero-");
-        std::fs::write(
-            user_dir.join("config.toml"),
-            "[limits]\nmax_workers_per_session = 0\n",
-        )
-        .unwrap();
-        let result =
-            spawn_core_with_dirs(request("solo", "b", &empty, true), None, Some(&user_dir))
+            let result = spawn_core_with_dirs(request("fourth", "b", &root, true), None, None)
                 .await
                 .unwrap();
-        assert_eq!(result.code, ExitCode::Error);
-        let err = result.err.join("\n");
-        assert!(err.contains("cap is 0"), "{err}");
-        assert!(
-            err.contains("raise [limits] max_workers_per_session"),
-            "actionable hint: {err}"
-        );
+            assert_eq!(result.code, ExitCode::Error, "refused with exit 1");
+            let err = result.err.join("\n");
+            assert!(err.contains("refused"), "{err}");
+            assert!(err.contains("cap is 3"), "{err}");
+            assert!(err.contains("max_workers_per_session"), "{err}");
+            // Every holder is named, with its id and derived view.
+            for i in 0..3 {
+                assert!(err.contains(&format!("cap{i}-6082814153{i}")), "{err}");
+            }
+            // Nothing was created: no new run, no worktree.
+            let after = std::fs::read_dir(fleet.join("runs"))
+                .unwrap()
+                .flatten()
+                .count();
+            assert_eq!(after, before, "no run directory appeared");
+            let worktrees_after = std::fs::read_dir(&worktrees)
+                .map(Iterator::count)
+                .unwrap_or(0);
+            assert_eq!(worktrees_before, worktrees_after, "no worktree was cut");
+        }
+        {
+            let root = init_repo("pilotfish-spawn-capcfg-");
+            let fleet = fleet_of(&root);
+            let paths = FleetPaths::new(&fleet);
+            let user_dir = tmp_dir("pilotfish-user-cap-");
+            // A lowered cap: two live runs fill it.
+            std::fs::write(
+                user_dir.join("config.toml"),
+                "[limits]\nmax_workers_per_session = 2\n",
+            )
+            .unwrap();
+            put_live_run(&paths, "x-60828141530", "x", None);
+            put_live_run(&paths, "y-60828141531", "y", None);
+            let result =
+                spawn_core_with_dirs(request("z", "b", &root, true), None, Some(&user_dir))
+                    .await
+                    .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            assert!(
+                result.err.join("\n").contains("cap is 2"),
+                "{:?}",
+                result.err
+            );
+
+            // A cap of zero refuses even with nothing running: no spawning at
+            // all, with a hint naming the config key.
+            let empty = init_repo("pilotfish-spawn-capzero-");
+            std::fs::write(
+                user_dir.join("config.toml"),
+                "[limits]\nmax_workers_per_session = 0\n",
+            )
+            .unwrap();
+            let result =
+                spawn_core_with_dirs(request("solo", "b", &empty, true), None, Some(&user_dir))
+                    .await
+                    .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            let err = result.err.join("\n");
+            assert!(err.contains("cap is 0"), "{err}");
+            assert!(
+                err.contains("raise [limits] max_workers_per_session"),
+                "actionable hint: {err}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn a_spawn_records_the_acting_session_as_owner() {
-        let root = init_repo("pilotfish-spawn-owner-");
-        let fleet = fleet_of(&root);
-        // The fleet's last-used session is the acting one; the new run is
-        // recorded as *its*, so its cap and views count exactly its runs.
-        let mut store = crate::orch::session::FleetSessions::new();
-        store.upsert(crate::orch::session::OrchestratorSession::new("/repo"));
-        let session = store.last_used().unwrap().uuid;
-        crate::orch::session::save(&fleet, &mut store).unwrap();
-        let created = create_run_with_retry(&request("owned", "b", &root, true), None)
-            .await
-            .unwrap();
-        assert_eq!(created.state.orchestrator_id, Some(session));
-        // And the session's own live runs now fill its cap: one more live
-        // run blocks this session's next spawn.
-        let state = run::load_state(&created.run_dir).unwrap();
-        assert_eq!(state.orchestrator_id, Some(session));
+    async fn cap_per_session() {
+        {
+            let root = init_repo("pilotfish-spawn-cap2-");
+            let fleet = fleet_of(&root);
+            let paths = FleetPaths::new(&fleet);
+            let other =
+                Some(uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap());
+            // Three live runs owned by *another* session: none count toward this
+            // (default) session's cap — the whole point of a per-session limit.
+            for i in 0..3 {
+                put_live_run(
+                    &paths,
+                    &format!("theirs{i}-6082814153{i}"),
+                    &format!("theirs{i}"),
+                    other,
+                );
+            }
+            let result = spawn_core_with_dirs(request("mine", "b", &root, true), None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
+
+            // Settled runs free their slot: two live, one settled — a third
+            // live would refuse, the settled one never holds a slot.
+            let mut settled = RunState::new(
+                paths.root().to_string_lossy().as_ref(),
+                "old-60828141530",
+                "old",
+                "/tmp/x",
+                "b",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            settled.status = RunStatus::Settled;
+            settled.orchestrator_id = Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION);
+            let old_dir = paths.run_dir("old-60828141530");
+            std::fs::create_dir_all(&old_dir).unwrap();
+            save_state(&old_dir, &settled).unwrap();
+            put_live_run(&paths, "a-60828141531", "a", None);
+            put_live_run(&paths, "b-60828141532", "b", None);
+            put_live_run(
+                &paths,
+                "c-60828141533",
+                "c",
+                Some(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION),
+            );
+            let result = spawn_core_with_dirs(request("again", "b", &root, true), None, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            let err = result.err.join("\n");
+            assert!(err.contains("cap is 3"), "{err}");
+            assert!(err.contains("a-60828141531"), "{err}");
+            assert!(err.contains("b-60828141532"), "{err}");
+            assert!(err.contains("c-60828141533"), "{err}");
+            assert!(!err.contains("old-"), "a settled run holds no slot: {err}");
+        }
+        {
+            let root = init_repo("pilotfish-spawn-owner-");
+            let fleet = fleet_of(&root);
+            // The fleet's last-used session is the acting one; the new run is
+            // recorded as *its*, so its cap and views count exactly its runs.
+            let mut store = crate::orch::session::FleetSessions::new();
+            store.upsert(crate::orch::session::OrchestratorSession::new("/repo"));
+            let session = store.last_used().unwrap().uuid;
+            crate::orch::session::save(&fleet, &mut store).unwrap();
+            let created = create_run_with_retry(&request("owned", "b", &root, true), None)
+                .await
+                .unwrap();
+            assert_eq!(created.state.orchestrator_id, Some(session));
+            // And the session's own live runs now fill its cap: one more live
+            // run blocks this session's next spawn.
+            let state = run::load_state(&created.run_dir).unwrap();
+            assert_eq!(state.orchestrator_id, Some(session));
+        }
     }
 }

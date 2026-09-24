@@ -1108,7 +1108,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_decision_spells_its_how_like_the_transcript_contract() {
+    fn decisions_spell_how() {
         assert_eq!(
             decision_how(&PermissionDecisionRecord::Allow {
                 updated_permissions: None,
@@ -1129,151 +1129,135 @@ mod tests {
         );
     }
 
-    /// Booting a monitor over a session record keeps its cwd, launch flags
-    /// and (unless --fresh) the claude session id.
     #[test]
-    fn boot_honours_the_saved_session_and_launch_flags() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let mut store = session::FleetSessions::new();
-        let mut record = session::OrchestratorSession::new("/repo");
-        record.session_id = Some("sess-boot123".into());
-        record.launch = session::LaunchOptions {
-            model: Some("fable".into()),
-            budget_usd: Some(5.0),
-            permission_mode: Some("acceptEdits".into()),
-            remote_control: Some(String::new()),
-            fresh: Some(true),
-            auto_compact_turns: None,
-        };
-        let key = record.key();
-        store.upsert(record);
-        session::save(&fleet, &mut store).unwrap();
+    fn boot_session_resolution() {
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let mut store = session::FleetSessions::new();
+            let mut record = session::OrchestratorSession::new("/repo");
+            record.session_id = Some("sess-boot123".into());
+            record.launch = session::LaunchOptions {
+                model: Some("fable".into()),
+                budget_usd: Some(5.0),
+                permission_mode: Some("acceptEdits".into()),
+                remote_control: Some(String::new()),
+                fresh: Some(true),
+                auto_compact_turns: None,
+            };
+            let key = record.key();
+            store.upsert(record);
+            session::save(&fleet, &mut store).unwrap();
 
-        let monitor = Monitor::boot(&fleet, None).unwrap();
-        let sh = monitor.shared();
-        assert_eq!(sh.record.session_id, None, "--fresh drops the session id");
-        assert_eq!(sh.record.uuid, key.uuid, "the monitor serves the session");
-        assert_eq!(sh.state.permission_mode, "acceptEdits");
-        assert_eq!(sh.state.remote_control, Some(String::new()));
-        assert_eq!(monitor.launch_model.as_deref(), Some("fable"));
-        assert_eq!(monitor.budget_usd, Some(5.0));
-        assert_eq!(sh.state.pid, Some(monitor.pid));
-        assert_eq!(sh.state.pending_requests, Vec::new());
-        drop(sh);
-        // The boot wrote the durable files a console reads back, in the
-        // session's own directory.
-        assert!(monitor.paths.orchestrator_prompt(&monitor.key).is_file());
-        assert!(load_orchestrator_state(&fleet, &key).is_some());
+            let monitor = Monitor::boot(&fleet, None).unwrap();
+            let sh = monitor.shared();
+            assert_eq!(sh.record.session_id, None, "--fresh drops the session id");
+            assert_eq!(sh.record.uuid, key.uuid, "the monitor serves the session");
+            assert_eq!(sh.state.permission_mode, "acceptEdits");
+            assert_eq!(sh.state.remote_control, Some(String::new()));
+            assert_eq!(monitor.launch_model.as_deref(), Some("fable"));
+            assert_eq!(monitor.budget_usd, Some(5.0));
+            assert_eq!(sh.state.pid, Some(monitor.pid));
+            assert_eq!(sh.state.pending_requests, Vec::new());
+            drop(sh);
+            // The boot wrote the durable files a console reads back, in the
+            // session's own directory.
+            assert!(monitor.paths.orchestrator_prompt(&monitor.key).is_file());
+            assert!(load_orchestrator_state(&fleet, &key).is_some());
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let monitor = Monitor::boot(&fleet, None).unwrap();
+            let sh = monitor.shared();
+            assert_eq!(sh.state.cwd, tmp.path().to_string_lossy());
+            assert_eq!(sh.state.permission_mode, "default");
+            assert_eq!(sh.state.remote_control, None);
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let mut store = session::FleetSessions::new();
+            let mut wanted = session::OrchestratorSession::new("/repo-a");
+            wanted.alias = Some("wanted".into());
+            let wanted_uuid = wanted.uuid;
+            let mut other = session::OrchestratorSession::new("/repo-b");
+            other.alias = Some("other".into());
+            other.last_used_at = "2099-01-01T00:00:00.000Z".into(); // most recent
+            store.upsert(wanted);
+            store.upsert(other);
+            session::save(&fleet, &mut store).unwrap();
+
+            let monitor = Monitor::boot(&fleet, Some(wanted_uuid)).unwrap();
+            let sh = monitor.shared();
+            assert_eq!(sh.record.uuid, wanted_uuid, "serves the named session");
+            assert_eq!(sh.record.alias.as_deref(), Some("wanted"));
+            assert_eq!(sh.record.cwd, "/repo-a");
+            assert_eq!(sh.record.pid, Some(monitor.pid));
+            assert!(
+                sh.record.pid_started_at.is_some(),
+                "the boot records its own start time for the reaper"
+            );
+            drop(sh);
+            assert!(
+                monitor.key.dir_name().starts_with("wanted-")
+                    && monitor
+                        .key
+                        .dir_name()
+                        .ends_with(&crate::util::short_uuid(&wanted_uuid)),
+                "{}",
+                monitor.key.dir_name()
+            );
+            // The monitor's state lands in the named session's directory, not
+            // the most recent one's.
+            assert!(monitor.paths.orchestrator_state(&monitor.key).is_file());
+            assert!(
+                !monitor
+                    .paths
+                    .orchestrator_state(&session::OrchestratorSession::new("/x").key())
+                    .is_file()
+            );
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let err = match Monitor::boot(&fleet, Some(uuid::Uuid::new_v4())) {
+                Ok(_) => panic!("an unknown session must not boot"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains("no session"), "{err}");
+        }
     }
 
-    /// The directory check tolerates a transient miss: only consecutive
-    /// polls without the fleet read as a deletion, and a directory that
-    /// comes back resets the count.
     #[test]
-    fn a_missing_fleet_directory_trips_only_after_consecutive_polls() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let monitor = Monitor::boot(&fleet, None).unwrap();
-        assert!(!monitor.fleet_dir_gone(), "a present fleet is not gone");
+    fn missing_dir_trips() {
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let monitor = Monitor::boot(&fleet, None).unwrap();
+            assert!(!monitor.fleet_dir_gone(), "a present fleet is not gone");
 
-        std::fs::remove_dir_all(&fleet).unwrap();
-        assert!(!monitor.fleet_dir_gone(), "one missing poll is tolerated");
-        assert!(monitor.fleet_dir_gone(), "the second consecutive one trips");
+            std::fs::remove_dir_all(&fleet).unwrap();
+            assert!(!monitor.fleet_dir_gone(), "one missing poll is tolerated");
+            assert!(monitor.fleet_dir_gone(), "the second consecutive one trips");
 
-        // restored (or moved back): the count starts over
-        std::fs::create_dir_all(monitor.paths.orchestrator_dir(&monitor.key)).unwrap();
-        assert!(!monitor.fleet_dir_gone());
-    }
-
-    /// Losing just the monitor's own session directory inside the fleet
-    /// counts as gone: its log, transcript and state all lived there.
-    #[test]
-    fn losing_the_orchestrator_directory_alone_trips_the_check() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let monitor = Monitor::boot(&fleet, None).unwrap();
-        std::fs::remove_dir_all(monitor.paths.orchestrator_dir(&monitor.key)).unwrap();
-        assert!(!monitor.fleet_dir_gone(), "one missing poll is tolerated");
-        assert!(monitor.fleet_dir_gone());
-    }
-
-    #[test]
-    fn boot_without_a_session_record_defaults_the_cwd_to_the_repo() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let monitor = Monitor::boot(&fleet, None).unwrap();
-        let sh = monitor.shared();
-        assert_eq!(sh.state.cwd, tmp.path().to_string_lossy());
-        assert_eq!(sh.state.permission_mode, "default");
-        assert_eq!(sh.state.remote_control, None);
-    }
-
-    /// `--session <uuid>` pins the monitor to one session even when another
-    /// is more recent; the row's alias shapes the key, and the recorded
-    /// start time gives the orphan reaper its guard.
-    #[test]
-    fn boot_with_an_explicit_session_serves_that_session_alone() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let mut store = session::FleetSessions::new();
-        let mut wanted = session::OrchestratorSession::new("/repo-a");
-        wanted.alias = Some("wanted".into());
-        let wanted_uuid = wanted.uuid;
-        let mut other = session::OrchestratorSession::new("/repo-b");
-        other.alias = Some("other".into());
-        other.last_used_at = "2099-01-01T00:00:00.000Z".into(); // most recent
-        store.upsert(wanted);
-        store.upsert(other);
-        session::save(&fleet, &mut store).unwrap();
-
-        let monitor = Monitor::boot(&fleet, Some(wanted_uuid)).unwrap();
-        let sh = monitor.shared();
-        assert_eq!(sh.record.uuid, wanted_uuid, "serves the named session");
-        assert_eq!(sh.record.alias.as_deref(), Some("wanted"));
-        assert_eq!(sh.record.cwd, "/repo-a");
-        assert_eq!(sh.record.pid, Some(monitor.pid));
-        assert!(
-            sh.record.pid_started_at.is_some(),
-            "the boot records its own start time for the reaper"
-        );
-        drop(sh);
-        assert!(
-            monitor.key.dir_name().starts_with("wanted-")
-                && monitor
-                    .key
-                    .dir_name()
-                    .ends_with(&crate::util::short_uuid(&wanted_uuid)),
-            "{}",
-            monitor.key.dir_name()
-        );
-        // The monitor's state lands in the named session's directory, not
-        // the most recent one's.
-        assert!(monitor.paths.orchestrator_state(&monitor.key).is_file());
-        assert!(
-            !monitor
-                .paths
-                .orchestrator_state(&session::OrchestratorSession::new("/x").key())
-                .is_file()
-        );
-    }
-
-    /// A monitor named for a session that has no row is a broken spawn and
-    /// says so — never a silent fallback onto another session.
-    #[test]
-    fn boot_with_an_unknown_session_errors_instead_of_falling_back() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        std::fs::create_dir_all(&fleet).unwrap();
-        let err = match Monitor::boot(&fleet, Some(uuid::Uuid::new_v4())) {
-            Ok(_) => panic!("an unknown session must not boot"),
-            Err(err) => err,
-        };
-        assert!(err.to_string().contains("no session"), "{err}");
+            // restored (or moved back): the count starts over
+            std::fs::create_dir_all(monitor.paths.orchestrator_dir(&monitor.key)).unwrap();
+            assert!(!monitor.fleet_dir_gone());
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            std::fs::create_dir_all(&fleet).unwrap();
+            let monitor = Monitor::boot(&fleet, None).unwrap();
+            std::fs::remove_dir_all(monitor.paths.orchestrator_dir(&monitor.key)).unwrap();
+            assert!(!monitor.fleet_dir_gone(), "one missing poll is tolerated");
+            assert!(monitor.fleet_dir_gone());
+        }
     }
 }

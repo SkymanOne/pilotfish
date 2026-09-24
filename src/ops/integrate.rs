@@ -714,101 +714,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diff_on_a_run_without_a_worktree_is_not_applicable() {
-        let dir = tmp_dir("pilotfish-int-flat-");
-        make_run(&dir, "flat", false).await;
-        let result = diff_core_with_env("flat", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert_eq!(
-            result.out,
-            vec!["not applicable (run has no isolated worktree)"]
-        );
-        assert!(!result.data.applicable);
-        assert!(result.data.dirty.is_empty());
+    async fn diff_cases() {
+        {
+            let dir = tmp_dir("pilotfish-int-flat-");
+            make_run(&dir, "flat", false).await;
+            let result = diff_core_with_env("flat", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert_eq!(
+                result.out,
+                vec!["not applicable (run has no isolated worktree)"]
+            );
+            assert!(!result.data.applicable);
+            assert!(result.data.dirty.is_empty());
+        }
+        {
+            let dir = init_repo("pilotfish-int-diff-");
+            let (_fleet, target) = make_run(&dir, "worker", true).await;
+            let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
+            commit_worktree_file(&worktree, "hello.txt", "hi\n");
+
+            let stat = diff_core_with_env("worker", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(stat.code, ExitCode::Ok);
+            assert!(stat.out[0].contains("hello.txt"), "{}", stat.out[0]);
+            assert!(stat.err.is_empty(), "{:?}", stat.err);
+
+            // An uncommitted change is invisible to diff but warned about.
+            std::fs::write(worktree.join("forgot.txt"), "u\n").unwrap();
+            let dirty = diff_core_with_env("worker", Some(&dir), true, None)
+                .await
+                .unwrap();
+            assert_eq!(dirty.out[0], "hello.txt");
+            assert_eq!(dirty.data.dirty, vec!["?? forgot.txt".to_string()]);
+            assert!(
+                dirty.err[0].contains("1 uncommitted change(s)")
+                    && dirty.err[0].contains("forgot.txt"),
+                "{}",
+                dirty.err[0]
+            );
+        }
     }
 
     #[tokio::test]
-    async fn diff_shows_committed_work_and_warns_about_dirty_files() {
-        let dir = init_repo("pilotfish-int-diff-");
-        let (_fleet, target) = make_run(&dir, "worker", true).await;
-        let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
-        commit_worktree_file(&worktree, "hello.txt", "hi\n");
+    async fn merge_cases() {
+        {
+            let dir = init_repo("pilotfish-int-merge-");
+            let (_fleet, target) = make_run(&dir, "worker", true).await;
+            let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
+            commit_worktree_file(&worktree, "hello.txt", "hi\n");
+            settle(&target.run_dir);
 
-        let stat = diff_core_with_env("worker", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(stat.code, ExitCode::Ok);
-        assert!(stat.out[0].contains("hello.txt"), "{}", stat.out[0]);
-        assert!(stat.err.is_empty(), "{:?}", stat.err);
+            let result = merge_core_with_env("worker", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
+            assert_eq!(result.data.branch, "pilotfish/worker-8141530");
+            assert!(result.data.committed);
+            assert!(
+                result.out[0].starts_with("merged pilotfish/worker-8141530 into "),
+                "{:?}",
+                result.out
+            );
+            assert_eq!(result.data.into, target.state.repo_root.clone().unwrap());
+            assert!(result.out[1].contains("integration checks"));
+            let hello = std::fs::read_to_string(dir.join("hello.txt")).unwrap();
+            assert_eq!(hello, "hi\n", "the branch actually landed");
+        }
+        {
+            let dir = init_repo("pilotfish-int-mergegates-");
+            let (_fleet, target) = make_run(&dir, "flat", false).await;
+            let result = merge_core_with_env("flat", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            assert!(
+                result.err[0].contains("is starting — only settled runs can be merged"),
+                "{}",
+                result.err[0]
+            );
+            // Settled but without a branch.
+            let mut state = target.state.clone();
+            state.status = RunStatus::Settled;
+            state.settled_at = Some(crate::util::now_iso());
+            run::save_state(&target.run_dir, &state).unwrap();
+            let result = merge_core_with_env("flat", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            assert!(result.err[0].contains("has no branch"), "{}", result.err[0]);
+        }
+        {
+            let dir = init_repo("pilotfish-int-nocommit-");
+            let (_fleet, target) = make_run(&dir, "worker", true).await;
+            let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
+            commit_worktree_file(&worktree, "feat.txt", "f\n");
+            settle(&target.run_dir);
 
-        // An uncommitted change is invisible to diff but warned about.
-        std::fs::write(worktree.join("forgot.txt"), "u\n").unwrap();
-        let dirty = diff_core_with_env("worker", Some(&dir), true, None)
-            .await
-            .unwrap();
-        assert_eq!(dirty.out[0], "hello.txt");
-        assert_eq!(dirty.data.dirty, vec!["?? forgot.txt".to_string()]);
-        assert!(
-            dirty.err[0].contains("1 uncommitted change(s)") && dirty.err[0].contains("forgot.txt"),
-            "{}",
-            dirty.err[0]
-        );
+            let result = merge_core_with_env("worker", Some(&dir), true, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert!(
+                result.out[0].contains("(staged, not committed)"),
+                "{:?}",
+                result.out
+            );
+            assert!(!result.data.committed);
+            let status = git::git_raw(&["status", "--porcelain"], &dir).await;
+            assert!(status.stdout.contains('A'), "{}", status.stdout);
+            git_sync(&dir, &["merge", "--abort"]);
+        }
     }
 
     #[tokio::test]
-    async fn merge_lands_in_the_recorded_repo_root_wherever_invoked_from() {
-        let dir = init_repo("pilotfish-int-merge-");
-        let (_fleet, target) = make_run(&dir, "worker", true).await;
-        let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
-        commit_worktree_file(&worktree, "hello.txt", "hi\n");
-        settle(&target.run_dir);
-
-        let result = merge_core_with_env("worker", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
-        assert_eq!(result.data.branch, "pilotfish/worker-8141530");
-        assert!(result.data.committed);
-        assert!(
-            result.out[0].starts_with("merged pilotfish/worker-8141530 into "),
-            "{:?}",
-            result.out
-        );
-        assert_eq!(result.data.into, target.state.repo_root.clone().unwrap());
-        assert!(result.out[1].contains("integration checks"));
-        let hello = std::fs::read_to_string(dir.join("hello.txt")).unwrap();
-        assert_eq!(hello, "hi\n", "the branch actually landed");
-    }
-
-    #[tokio::test]
-    async fn merge_refuses_unsettled_runs_and_missing_branches() {
-        let dir = init_repo("pilotfish-int-mergegates-");
-        let (_fleet, target) = make_run(&dir, "flat", false).await;
-        let result = merge_core_with_env("flat", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Error);
-        assert!(
-            result.err[0].contains("is starting — only settled runs can be merged"),
-            "{}",
-            result.err[0]
-        );
-        // Settled but without a branch.
-        let mut state = target.state.clone();
-        state.status = RunStatus::Settled;
-        state.settled_at = Some(crate::util::now_iso());
-        run::save_state(&target.run_dir, &state).unwrap();
-        let result = merge_core_with_env("flat", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Error);
-        assert!(result.err[0].contains("has no branch"), "{}", result.err[0]);
-    }
-
-    #[tokio::test]
-    async fn merge_conflicts_exit_5_with_the_rebase_hint() {
+    async fn merge_conflict_exit_5() {
         let dir = init_repo("pilotfish-int-conflict-");
         let (_fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
@@ -845,78 +867,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn merge_stages_with_no_commit() {
-        let dir = init_repo("pilotfish-int-nocommit-");
-        let (_fleet, target) = make_run(&dir, "worker", true).await;
-        let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
-        commit_worktree_file(&worktree, "feat.txt", "f\n");
-        settle(&target.run_dir);
+    async fn cleanup_keeps_report() {
+        {
+            let dir = init_repo("pilotfish-int-cleanup-");
+            let (fleet, target) = make_run(&dir, "worker", true).await;
+            let report = crate::fleet::report::report_path(&fleet, &target.run_id);
+            std::fs::write(&report, "# Fleet Report\n").unwrap();
+            let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
+            commit_worktree_file(&worktree, "hello.txt", "hi\n");
+            settle(&target.run_dir);
 
-        let result = merge_core_with_env("worker", Some(&dir), true, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert!(
-            result.out[0].contains("(staged, not committed)"),
-            "{:?}",
-            result.out
-        );
-        assert!(!result.data.committed);
-        let status = git::git_raw(&["status", "--porcelain"], &dir).await;
-        assert!(status.stdout.contains('A'), "{}", status.stdout);
-        git_sync(&dir, &["merge", "--abort"]);
+            let result = cleanup_runs(&fleet, "worker", false).await.unwrap();
+            assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
+            assert_eq!(result.out, vec![format!("archived {}", target.run_id)]);
+            assert_eq!(result.data.archived, vec![target.run_id.clone()]);
+            assert!(!worktree.exists());
+            let listed = git::git_raw(
+                &["branch", "--list", target.state.branch.as_deref().unwrap()],
+                &dir,
+            )
+            .await;
+            // The branch was never merged, so non-force cleanup keeps it.
+            assert!(!listed.stdout.trim().is_empty(), "unmerged branch kept");
+            assert!(
+                result
+                    .err
+                    .iter()
+                    .any(|e| e.contains("kept unmerged branch")),
+                "{:?}",
+                result.err
+            );
+            // The report and events survive the archive.
+            assert!(crate::fleet::report::report_path(&fleet, &target.run_id).is_file());
+
+            let again = cleanup_runs(&fleet, "worker", false).await.unwrap();
+            assert_eq!(
+                again.out,
+                vec![format!("{} is already archived", target.run_id)]
+            );
+            // diff on an archived (worktree gone) run is not applicable.
+            let diffed = diff_core_with_env("worker", Some(&dir), false, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                diffed.out,
+                vec!["not applicable (run has no isolated worktree)"]
+            );
+        }
+        {
+            let dir = init_repo("pilotfish-int-targets-");
+            let (fleet, _target) = make_run(&dir, "flat", false).await;
+            // An unknown target is a hard error.
+            let err = cleanup_runs(&fleet, "ghost", false).await.unwrap_err();
+            assert!(err.to_string().contains("No run found"), "{err}");
+            let err = cleanup_runs(&fleet, "  ", false).await.unwrap_err();
+            assert_eq!(err.to_string(), "cleanup: <name|all> required");
+        }
     }
 
     #[tokio::test]
-    async fn cleanup_archives_removes_worktree_and_keeps_the_report() {
-        let dir = init_repo("pilotfish-int-cleanup-");
-        let (fleet, target) = make_run(&dir, "worker", true).await;
-        let report = crate::fleet::report::report_path(&fleet, &target.run_id);
-        std::fs::write(&report, "# Fleet Report\n").unwrap();
-        let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
-        commit_worktree_file(&worktree, "hello.txt", "hi\n");
-        settle(&target.run_dir);
-
-        let result = cleanup_runs(&fleet, "worker", false).await.unwrap();
-        assert_eq!(result.code, ExitCode::Ok, "{:?}", result.err);
-        assert_eq!(result.out, vec![format!("archived {}", target.run_id)]);
-        assert_eq!(result.data.archived, vec![target.run_id.clone()]);
-        assert!(!worktree.exists());
-        let listed = git::git_raw(
-            &["branch", "--list", target.state.branch.as_deref().unwrap()],
-            &dir,
-        )
-        .await;
-        // The branch was never merged, so non-force cleanup keeps it.
-        assert!(!listed.stdout.trim().is_empty(), "unmerged branch kept");
-        assert!(
-            result
-                .err
-                .iter()
-                .any(|e| e.contains("kept unmerged branch")),
-            "{:?}",
-            result.err
-        );
-        // The report and events survive the archive.
-        assert!(crate::fleet::report::report_path(&fleet, &target.run_id).is_file());
-
-        let again = cleanup_runs(&fleet, "worker", false).await.unwrap();
-        assert_eq!(
-            again.out,
-            vec![format!("{} is already archived", target.run_id)]
-        );
-        // diff on an archived (worktree gone) run is not applicable.
-        let diffed = diff_core_with_env("worker", Some(&dir), false, None)
-            .await
-            .unwrap();
-        assert_eq!(
-            diffed.out,
-            vec!["not applicable (run has no isolated worktree)"]
-        );
-    }
-
-    #[tokio::test]
-    async fn cleanup_refuses_a_dirty_worktree_without_force_and_forces_with_it() {
+    async fn cleanup_dirty_needs_force() {
         let dir = init_repo("pilotfish-int-dirty-");
         let (fleet, target) = make_run(&dir, "worker", true).await;
         let worktree = PathBuf::from(target.state.worktree.clone().unwrap());
@@ -944,104 +954,180 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cleanup_force_aborts_a_running_run_then_archives() {
-        let dir = init_repo("pilotfish-int-forceabort-");
-        let (fleet, target) = make_run(&dir, "slow", false).await;
-        // A "monitor" that processes the abort 500 ms in: status goes
-        // stopped and the pid (our own test process) goes away. While it is
-        // still Running with a live pid, a plain cleanup would refuse.
-        let mut state = run::load_state(&target.run_dir).unwrap();
-        state.status = RunStatus::Running;
-        state.pid = Some(std::process::id().cast_signed());
-        run::save_state(&target.run_dir, &state).unwrap();
-        let tardy = target.run_dir.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok(mut s) = run::load_state(&tardy) {
-                s.status = RunStatus::Stopped;
-                s.pid = None;
-                run::save_state(&tardy, &s).unwrap();
-            }
-        });
+    async fn cleanup_force_aborts() {
+        {
+            let dir = init_repo("pilotfish-int-forceabort-");
+            let (fleet, target) = make_run(&dir, "slow", false).await;
+            // A "monitor" that processes the abort 500 ms in: status goes
+            // stopped and the pid (our own test process) goes away. While it is
+            // still Running with a live pid, a plain cleanup would refuse.
+            let mut state = run::load_state(&target.run_dir).unwrap();
+            state.status = RunStatus::Running;
+            state.pid = Some(std::process::id().cast_signed());
+            run::save_state(&target.run_dir, &state).unwrap();
+            let tardy = target.run_dir.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Ok(mut s) = run::load_state(&tardy) {
+                    s.status = RunStatus::Stopped;
+                    s.pid = None;
+                    run::save_state(&tardy, &s).unwrap();
+                }
+            });
 
-        let forced = cleanup_runs(&fleet, "slow", true).await.unwrap();
-        assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
-        assert!(!forced.err.iter().any(|e| e.contains("archiving anyway")));
-        let state = run::load_state(&target.run_dir).unwrap();
-        assert_eq!(state.status, RunStatus::Archived);
-        // The abort envelope reached the inbox for the monitor to see.
-        let raw = std::fs::read_to_string(
-            crate::paths::FleetPaths::new(&fleet).run_inbox(&target.run_id),
-        )
-        .unwrap();
-        assert!(raw.contains("\"abort\""), "{raw}");
+            let forced = cleanup_runs(&fleet, "slow", true).await.unwrap();
+            assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
+            assert!(!forced.err.iter().any(|e| e.contains("archiving anyway")));
+            let state = run::load_state(&target.run_dir).unwrap();
+            assert_eq!(state.status, RunStatus::Archived);
+            // The abort envelope reached the inbox for the monitor to see.
+            let raw = std::fs::read_to_string(
+                crate::paths::FleetPaths::new(&fleet).run_inbox(&target.run_id),
+            )
+            .unwrap();
+            assert!(raw.contains("\"abort\""), "{raw}");
+        }
+        {
+            let dir = init_repo("pilotfish-int-abortparty-");
+            let (fleet, target) = make_run(&dir, "slowp", false).await;
+            let mut state = run::load_state(&target.run_dir).unwrap();
+            state.status = RunStatus::Running;
+            state.pid = Some(std::process::id().cast_signed());
+            run::save_state(&target.run_dir, &state).unwrap();
+            let tardy = target.run_dir.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if let Ok(mut s) = run::load_state(&tardy) {
+                    s.status = RunStatus::Stopped;
+                    s.pid = None;
+                    run::save_state(&tardy, &s).unwrap();
+                }
+            });
+
+            let forced = cleanup_runs(&fleet, "slowp", true).await.unwrap();
+            assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
+            // The abort envelope is attributed to the fleet's acting session —
+            // the default session when fleet.json names none, like every other
+            // orchestrator-originated steering.
+            let raw = std::fs::read_to_string(
+                crate::paths::FleetPaths::new(&fleet).run_inbox(&target.run_id),
+            )
+            .unwrap();
+            let envelopes: Vec<Envelope> = raw
+                .lines()
+                .filter(|l| !l.is_empty())
+                .filter_map(Envelope::parse_line)
+                .collect();
+            assert_eq!(envelopes.len(), 1);
+            assert_eq!(
+                envelopes[0].from,
+                Party::Orchestrator(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
+            );
+        }
     }
 
     #[tokio::test]
-    async fn cleanup_all_archives_finished_runs_and_skips_running_ones() {
-        let dir = init_repo("pilotfish-int-all-");
-        let (fleet, _settled) = make_run(&dir, "done", false).await;
-        settle(&fleet.join("runs").join("done-20260828141530"));
-        // A second run that looks alive.
-        let busy_id = "busy-20260828141531";
-        let busy_dir = fleet.join("runs").join(busy_id);
-        std::fs::create_dir_all(&busy_dir).unwrap();
-        let mut busy = RunState::new(
-            fleet.to_string_lossy().as_ref(),
-            busy_id,
-            "busy",
-            "/tmp/x",
-            "b",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        busy.status = RunStatus::Running;
-        busy.pid = Some(std::process::id().cast_signed());
-        run::save_state(&busy_dir, &busy).unwrap();
+    async fn cleanup_all_sweep() {
+        {
+            let dir = init_repo("pilotfish-int-all-");
+            let (fleet, _settled) = make_run(&dir, "done", false).await;
+            settle(&fleet.join("runs").join("done-20260828141530"));
+            // A second run that looks alive.
+            let busy_id = "busy-20260828141531";
+            let busy_dir = fleet.join("runs").join(busy_id);
+            std::fs::create_dir_all(&busy_dir).unwrap();
+            let mut busy = RunState::new(
+                fleet.to_string_lossy().as_ref(),
+                busy_id,
+                "busy",
+                "/tmp/x",
+                "b",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            busy.status = RunStatus::Running;
+            busy.pid = Some(std::process::id().cast_signed());
+            run::save_state(&busy_dir, &busy).unwrap();
 
-        let all = cleanup_runs(&fleet, "all", false).await.unwrap();
-        assert_eq!(all.code, ExitCode::Ok);
-        assert_eq!(all.data.archived, vec!["done-20260828141530".to_string()]);
-        assert!(
-            all.err.iter().any(|e| e.contains("skipping busy")),
-            "{:?}",
-            all.err
-        );
-        assert_eq!(all.data.skipped, vec![busy_id.to_string()]);
-        assert_eq!(
-            run::load_state(&busy_dir).unwrap().status,
-            RunStatus::Running
-        );
-        // --force still never aborts a run the sweep was not pointed at:
-        // `all` leaves the running one alone (only an explicit name may
-        // abort a live worker), and reports it as skipped.
-        let forced = cleanup_runs(&fleet, "all", true).await.unwrap();
-        assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
-        assert_eq!(forced.data.archived, Vec::<String>::new());
-        assert_eq!(forced.data.skipped, vec![busy_id.to_string()]);
-        assert!(
-            forced.err.iter().any(|e| e.contains("skipping busy")),
-            "{:?}",
-            forced.err
-        );
-        assert_eq!(
-            run::load_state(&busy_dir).unwrap().status,
-            RunStatus::Running,
-            "`all --force` must leave a live worker alone"
-        );
+            let all = cleanup_runs(&fleet, "all", false).await.unwrap();
+            assert_eq!(all.code, ExitCode::Ok);
+            assert_eq!(all.data.archived, vec!["done-20260828141530".to_string()]);
+            assert!(
+                all.err.iter().any(|e| e.contains("skipping busy")),
+                "{:?}",
+                all.err
+            );
+            assert_eq!(all.data.skipped, vec![busy_id.to_string()]);
+            assert_eq!(
+                run::load_state(&busy_dir).unwrap().status,
+                RunStatus::Running
+            );
+            // --force still never aborts a run the sweep was not pointed at:
+            // `all` leaves the running one alone (only an explicit name may
+            // abort a live worker), and reports it as skipped.
+            let forced = cleanup_runs(&fleet, "all", true).await.unwrap();
+            assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
+            assert_eq!(forced.data.archived, Vec::<String>::new());
+            assert_eq!(forced.data.skipped, vec![busy_id.to_string()]);
+            assert!(
+                forced.err.iter().any(|e| e.contains("skipping busy")),
+                "{:?}",
+                forced.err
+            );
+            assert_eq!(
+                run::load_state(&busy_dir).unwrap().status,
+                RunStatus::Running,
+                "`all --force` must leave a live worker alone"
+            );
+        }
+        {
+            let dir = init_repo("pilotfish-int-xsession-");
+            let (fleet, mine) = make_run(&dir, "mine", false).await;
+            settle(&mine.run_dir);
+            let (_, theirs) = make_run(&dir, "theirs", false).await;
+            // The second run belongs to another orchestrator session.
+            let mut state = run::load_state(&theirs.run_dir).unwrap();
+            state.orchestrator_id =
+                Some(uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap());
+            run::save_state(&theirs.run_dir, &state).unwrap();
+            settle(&theirs.run_dir);
+
+            // The whole-fleet sweep is still legitimate, but it says out loud
+            // that it crosses sessions.
+            let all = cleanup_runs(&fleet, "all", false).await.unwrap();
+            assert_eq!(all.code, ExitCode::Ok, "{:?}", all.err);
+            assert!(
+                all.out
+                    .iter()
+                    .any(|l| l.contains("also covers 1 run(s) owned by other")),
+                "{:?}",
+                all.out
+            );
+            assert_eq!(all.data.archived.len(), 2, "both runs are still cleaned");
+            // A fleet where everything is this session's gets no note (the
+            // default-session fold includes the unowned legacy runs).
+            let (_f2, own) = make_run(&dir, "own2", false).await;
+            settle(&own.run_dir);
+            let again = cleanup_runs(&fleet, "all", false).await.unwrap();
+            assert!(
+                !again.out.iter().any(|l| l.contains("also covers")),
+                "no foreign runs left: {:?}",
+                again.out
+            );
+        }
     }
 
     #[tokio::test]
-    async fn cleanup_all_survives_one_runs_failure_and_archives_the_rest() {
+    async fn cleanup_all_survives_failure() {
         let dir = init_repo("pilotfish-int-batchfail-");
         let (fleet, broken) = make_run(&dir, "broken", true).await;
         settle(&broken.run_dir);
@@ -1088,92 +1174,5 @@ mod tests {
         assert_eq!(named.code, ExitCode::Error);
         assert_eq!(named.data.failed.len(), 1);
         assert_eq!(named.data.archived, Vec::<String>::new());
-    }
-
-    #[tokio::test]
-    async fn cleanup_target_rules() {
-        let dir = init_repo("pilotfish-int-targets-");
-        let (fleet, _target) = make_run(&dir, "flat", false).await;
-        // An unknown target is a hard error.
-        let err = cleanup_runs(&fleet, "ghost", false).await.unwrap_err();
-        assert!(err.to_string().contains("No run found"), "{err}");
-        let err = cleanup_runs(&fleet, "  ", false).await.unwrap_err();
-        assert_eq!(err.to_string(), "cleanup: <name|all> required");
-    }
-
-    #[tokio::test]
-    async fn cleanup_all_says_when_it_crosses_sessions() {
-        let dir = init_repo("pilotfish-int-xsession-");
-        let (fleet, mine) = make_run(&dir, "mine", false).await;
-        settle(&mine.run_dir);
-        let (_, theirs) = make_run(&dir, "theirs", false).await;
-        // The second run belongs to another orchestrator session.
-        let mut state = run::load_state(&theirs.run_dir).unwrap();
-        state.orchestrator_id =
-            Some(uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap());
-        run::save_state(&theirs.run_dir, &state).unwrap();
-        settle(&theirs.run_dir);
-
-        // The whole-fleet sweep is still legitimate, but it says out loud
-        // that it crosses sessions.
-        let all = cleanup_runs(&fleet, "all", false).await.unwrap();
-        assert_eq!(all.code, ExitCode::Ok, "{:?}", all.err);
-        assert!(
-            all.out
-                .iter()
-                .any(|l| l.contains("also covers 1 run(s) owned by other")),
-            "{:?}",
-            all.out
-        );
-        assert_eq!(all.data.archived.len(), 2, "both runs are still cleaned");
-        // A fleet where everything is this session's gets no note (the
-        // default-session fold includes the unowned legacy runs).
-        let (_f2, own) = make_run(&dir, "own2", false).await;
-        settle(&own.run_dir);
-        let again = cleanup_runs(&fleet, "all", false).await.unwrap();
-        assert!(
-            !again.out.iter().any(|l| l.contains("also covers")),
-            "no foreign runs left: {:?}",
-            again.out
-        );
-    }
-
-    #[tokio::test]
-    async fn cleanup_force_abort_carries_the_acting_session_provenance() {
-        let dir = init_repo("pilotfish-int-abortparty-");
-        let (fleet, target) = make_run(&dir, "slowp", false).await;
-        let mut state = run::load_state(&target.run_dir).unwrap();
-        state.status = RunStatus::Running;
-        state.pid = Some(std::process::id().cast_signed());
-        run::save_state(&target.run_dir, &state).unwrap();
-        let tardy = target.run_dir.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if let Ok(mut s) = run::load_state(&tardy) {
-                s.status = RunStatus::Stopped;
-                s.pid = None;
-                run::save_state(&tardy, &s).unwrap();
-            }
-        });
-
-        let forced = cleanup_runs(&fleet, "slowp", true).await.unwrap();
-        assert_eq!(forced.code, ExitCode::Ok, "{:?}", forced.err);
-        // The abort envelope is attributed to the fleet's acting session —
-        // the default session when fleet.json names none, like every other
-        // orchestrator-originated steering.
-        let raw = std::fs::read_to_string(
-            crate::paths::FleetPaths::new(&fleet).run_inbox(&target.run_id),
-        )
-        .unwrap();
-        let envelopes: Vec<Envelope> = raw
-            .lines()
-            .filter(|l| !l.is_empty())
-            .filter_map(Envelope::parse_line)
-            .collect();
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(
-            envelopes[0].from,
-            Party::Orchestrator(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
-        );
     }
 }

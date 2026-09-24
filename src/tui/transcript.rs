@@ -1211,281 +1211,431 @@ mod tests {
     }
 
     #[test]
-    fn sent_prompts_render_and_their_replay_is_suppressed() {
-        let mut t = Transcript::new();
-        t.push_sent("hello there");
-        assert_eq!(t.blocks()[0].kind, BlockKind::User);
-        assert_eq!(t.blocks()[0].text, "> hello there");
-        assert!(t.turn_active());
-        // the same text coming back as a replayed user message is dropped
-        let replay = serde_json::json!({
-            "type": "user",
-            "parent_tool_use_id": null,
-            "message": {"role": "user", "content": [{"type": "text", "text": "hello there"}]},
-        });
-        t.apply_claude_message(&replay);
-        let users = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::User)
-            .count();
-        assert_eq!(users, 1, "the replay is suppressed: {:?}", t.blocks());
-        // an unknown message (not from us) still renders
-        let other = serde_json::json!({
-            "type": "user",
-            "parent_tool_use_id": null,
-            "message": {"role": "user", "content": [{"type": "text", "text": "hi again"}]},
-        });
-        t.apply_claude_message(&other);
-        let users = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::User)
-            .count();
-        assert_eq!(users, 2);
-    }
-
-    #[test]
-    fn fleet_batches_render_as_one_line_and_suppress_the_batch_replay() {
-        let mut t = Transcript::new();
-        let events = vec![
-            FleetEvent::new(FleetEventKind::Settled, "r1", "db", vec![]),
-            FleetEvent::new(FleetEventKind::Question, "r2", "api", vec![]),
-        ];
-        t.push_fleet(&events, "FULL BATCH TEXT");
-        assert_eq!(
-            t.blocks().last().unwrap().text,
-            "⚑ settled db · question api"
-        );
-        assert!(t.pending_echoes.contains(&"FULL BATCH TEXT".to_string()));
-    }
-
-    #[test]
-    fn partial_is_owned_and_stable_across_calls_no_matter_how_often_the_view_asks() {
-        let mut t = Transcript::new();
-        let update =
-            |body: Value| serde_json::json!({"type": "message_update", "ev": body}).to_string();
-        t.apply_worker_lines(&[
-            update(serde_json::json!({"type": "text_start", "contentIndex": 0})),
-            update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "st"})),
-            update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "rea"})),
-            update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "ming"})),
-        ]);
-        // the session view calls this every frame while a worker streams;
-        // each call must hand back its own string, all saying the same thing
-        let first = t.partial().unwrap();
-        let second = t.partial().unwrap();
-        assert_eq!(first, "streaming");
-        assert_eq!(second, "streaming");
-        assert_eq!(first, second);
-        // the orchestrator's coalesced partial reads the same way
-        let mut o = Transcript::new();
-        o.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
-            text: "hal".into(),
-        }));
-        o.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
-            text: "lo".into(),
-        }));
-        assert_eq!(o.partial().as_deref(), Some("hallo"));
-    }
-
-    #[test]
-    fn streamed_text_accumulates_then_lands_as_text_blocks() {
-        let mut t = Transcript::new();
-        t.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
-            text: "hel".into(),
-        }));
-        t.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
-            text: "lo".into(),
-        }));
-        assert_eq!(t.partial().as_deref(), Some("hello"));
-        assert!(t.activity().is_some(), "streaming marks the activity");
-        assert!(t.turn_active());
-        // the committed assistant message clears the partial
-        t.apply_orchestrator_record(&claude_message(assistant("hello\nworld")));
-        assert_eq!(t.partial(), None);
-        let texts: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Text)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(texts, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn a_task_notification_is_a_system_block_not_a_prompt() {
-        let mut t = Transcript::new();
-        let msg = serde_json::json!({
-            "type": "user",
-            "parent_tool_use_id": null,
-            "message": {"role": "user", "content": concat!(
-                "<task-notification>\n",
-                "<task-id>bp8o9ho35</task-id>\n",
-                "<tool-use-id>toolu_01KrKcxKBLorGKu9aZtwHATU</tool-use-id>\n",
-                "<status>completed</status>\n",
-                "<summary>Background command \"cargo test\" completed (exit code 0)</summary>\n",
-                "</task-notification>",
-            )},
-        });
-        t.apply_claude_message(&msg);
-        assert!(
-            t.blocks().iter().all(|b| b.kind == BlockKind::System),
-            "claude wrote it, not the human: {:?}",
-            t.blocks()
-        );
-        let text: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(text[0], "· task-notification");
-        assert!(
-            text.iter().any(|l| l.contains("task-id: bp8o9ho35")),
-            "{text:?}"
-        );
-        assert!(
-            text.iter().any(|l| l.contains("status: completed")),
-            "{text:?}"
-        );
-        assert!(
-            text.iter().any(|l| l.contains("cargo test")),
-            "the summary is the point: {text:?}"
-        );
-        assert!(
-            !text.iter().any(|l| l.contains("toolu_")),
-            "the correlation id costs a row and says nothing: {text:?}"
-        );
-    }
-
-    #[test]
-    fn tool_output_progress_lines_cannot_tear_the_frame() {
-        let mut t = Transcript::new();
-        let msg = serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git rebase"}},
-            ]},
-        });
-        t.apply_claude_message(&msg);
-        // the real payload: git draws progress with carriage returns
-        let result = serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": [{
-                "type": "tool_result", "tool_use_id": "t1",
-                "content": "Rebasing (1/6)\rRebasing (2/6)\rRebasing (6/6)\rSuccessfully rebased and updated refs/heads/feat/escrow.\n=== exit: 0 ===",
-            }]},
-        });
-        t.apply_claude_message(&result);
-        let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
-        assert!(
-            texts.iter().all(|l| !l.chars().any(char::is_control)),
-            "no block carries a control character: {texts:?}"
-        );
-        assert!(
-            texts
+    fn prompt_records() {
+        {
+            let mut t = Transcript::new();
+            t.push_sent("hello there");
+            assert_eq!(t.blocks()[0].kind, BlockKind::User);
+            assert_eq!(t.blocks()[0].text, "> hello there");
+            assert!(t.turn_active());
+            // the same text coming back as a replayed user message is dropped
+            let replay = serde_json::json!({
+                "type": "user",
+                "parent_tool_use_id": null,
+                "message": {"role": "user", "content": [{"type": "text", "text": "hello there"}]},
+            });
+            t.apply_claude_message(&replay);
+            let users = t
+                .blocks()
                 .iter()
-                .any(|l| l.contains("Successfully rebased and updated")),
-            "what the progress finally said survives: {texts:?}"
-        );
-        assert!(
-            !texts.iter().any(|l| l.contains("Rebasing (1/6)")),
-            "the overwritten steps do not: {texts:?}"
-        );
+                .filter(|b| b.kind == BlockKind::User)
+                .count();
+            assert_eq!(users, 1, "the replay is suppressed: {:?}", t.blocks());
+            // an unknown message (not from us) still renders
+            let other = serde_json::json!({
+                "type": "user",
+                "parent_tool_use_id": null,
+                "message": {"role": "user", "content": [{"type": "text", "text": "hi again"}]},
+            });
+            t.apply_claude_message(&other);
+            let users = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::User)
+                .count();
+            assert_eq!(users, 2);
+        }
+        {
+            let mut t = Transcript::new();
+            let msg = serde_json::json!({
+                "type": "user",
+                "parent_tool_use_id": null,
+                "message": {"role": "user", "content": "<task-notification> is what I want to discuss"},
+            });
+            t.apply_claude_message(&msg);
+            assert_eq!(t.blocks()[0].kind, BlockKind::User);
+        }
+        {
+            let mut t = Transcript::new();
+            let msg = serde_json::json!({
+                "type": "user",
+                "parent_tool_use_id": null,
+                "message": {"role": "user", "content": concat!(
+                    "<task-notification>\n",
+                    "<task-id>bp8o9ho35</task-id>\n",
+                    "<tool-use-id>toolu_01KrKcxKBLorGKu9aZtwHATU</tool-use-id>\n",
+                    "<status>completed</status>\n",
+                    "<summary>Background command \"cargo test\" completed (exit code 0)</summary>\n",
+                    "</task-notification>",
+                )},
+            });
+            t.apply_claude_message(&msg);
+            assert!(
+                t.blocks().iter().all(|b| b.kind == BlockKind::System),
+                "claude wrote it, not the human: {:?}",
+                t.blocks()
+            );
+            let text: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+            assert_eq!(text[0], "· task-notification");
+            assert!(
+                text.iter().any(|l| l.contains("task-id: bp8o9ho35")),
+                "{text:?}"
+            );
+            assert!(
+                text.iter().any(|l| l.contains("status: completed")),
+                "{text:?}"
+            );
+            assert!(
+                text.iter().any(|l| l.contains("cargo test")),
+                "the summary is the point: {text:?}"
+            );
+            assert!(
+                !text.iter().any(|l| l.contains("toolu_")),
+                "the correlation id costs a row and says nothing: {text:?}"
+            );
+        }
+        {
+            let mut t = Transcript::new();
+            let events = vec![
+                FleetEvent::new(FleetEventKind::Settled, "r1", "db", vec![]),
+                FleetEvent::new(FleetEventKind::Question, "r2", "api", vec![]),
+            ];
+            t.push_fleet(&events, "FULL BATCH TEXT");
+            assert_eq!(
+                t.blocks().last().unwrap().text,
+                "⚑ settled db · question api"
+            );
+            assert!(t.pending_echoes.contains(&"FULL BATCH TEXT".to_string()));
+        }
+        {
+            let events = vec![
+                crate::fleet::event::FleetEvent::new(
+                    crate::fleet::event::FleetEventKind::Settled,
+                    "add-auth-1f2e3d4",
+                    "add-auth",
+                    vec![],
+                ),
+                crate::fleet::event::FleetEvent::new(
+                    crate::fleet::event::FleetEventKind::Question,
+                    "api-9a8b7c6",
+                    "api",
+                    vec![],
+                ),
+            ];
+            let batch = crate::fleet::event::format_fleet_batch(&events, 10);
+            // a reopened console: no pending echo, just claude's replay of the batch
+            let mut t = Transcript::new();
+            t.apply_claude_message(&serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": batch},
+                "parent_tool_use_id": null,
+            }));
+            let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                vec!["⚑ settled add-auth · question api"],
+                "{texts:?}"
+            );
+            assert!(t.blocks().iter().all(|b| b.kind == BlockKind::Fleet));
+        }
     }
 
     #[test]
-    fn a_real_prompt_is_still_a_prompt() {
-        let mut t = Transcript::new();
-        let msg = serde_json::json!({
-            "type": "user",
-            "parent_tool_use_id": null,
-            "message": {"role": "user", "content": "<task-notification> is what I want to discuss"},
-        });
-        t.apply_claude_message(&msg);
-        assert_eq!(t.blocks()[0].kind, BlockKind::User);
-    }
+    fn streaming() {
+        {
+            let mut t = Transcript::new();
+            let update =
+                |body: Value| serde_json::json!({"type": "message_update", "ev": body}).to_string();
+            t.apply_worker_lines(&[
+                update(serde_json::json!({"type": "text_start", "contentIndex": 0})),
+                update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "st"})),
+                update(
+                    serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "rea"}),
+                ),
+                update(
+                    serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "ming"}),
+                ),
+            ]);
+            // the session view calls this every frame while a worker streams;
+            // each call must hand back its own string, all saying the same thing
+            let first = t.partial().unwrap();
+            let second = t.partial().unwrap();
+            assert_eq!(first, "streaming");
+            assert_eq!(second, "streaming");
+            assert_eq!(first, second);
+            // the orchestrator's coalesced partial reads the same way
+            let mut o = Transcript::new();
+            o.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
+                text: "hal".into(),
+            }));
+            o.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
+                text: "lo".into(),
+            }));
+            assert_eq!(o.partial().as_deref(), Some("hallo"));
+        }
+        {
+            let mut t = Transcript::new();
+            t.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
+                text: "hel".into(),
+            }));
+            t.apply_orchestrator_record(&record(&OrchestratorEvent::StreamText {
+                text: "lo".into(),
+            }));
+            assert_eq!(t.partial().as_deref(), Some("hello"));
+            assert!(t.activity().is_some(), "streaming marks the activity");
+            assert!(t.turn_active());
+            // the committed assistant message clears the partial
+            t.apply_orchestrator_record(&claude_message(assistant("hello\nworld")));
+            assert_eq!(t.partial(), None);
+            let texts: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Text)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(texts, vec!["hello", "world"]);
+        }
+        {
+            let mut t = Transcript::new();
+            stream(&mut t, "text", "Two steps:\n\n- one\n");
+            assert_eq!(
+                text_blocks(&t),
+                vec!["Two steps:", "", "- one"],
+                "whole lines commit as they arrive"
+            );
+            assert_eq!(t.partial(), None, "nothing incomplete is left over");
 
-    #[test]
-    fn tool_calls_show_the_command_in_full_and_results_are_previews() {
-        let mut t = Transcript::new();
-        let msg = serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git status\nsecond line"}},
-            ]},
-        });
-        t.apply_claude_message(&msg);
-        let tool_lines: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Tool)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(tool_lines, vec!["⚙ Bash git status", "      second line"]);
-        assert_eq!(
-            t.activity().map(|a| a.label.clone()),
-            Some(Some("Bash".to_string()))
-        );
-        let result = serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": [
-                    {"type": "text", "text": "line1\nline2\nline3\nline4\nline5\nline6"},
+            stream(&mut t, "text", "- two");
+            assert_eq!(
+                t.partial().as_deref(),
+                Some("- two"),
+                "the incomplete line stays in flight"
+            );
+
+            // the assistant message repeats everything; only the tail is new
+            t.apply_claude_message(&serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "Two steps:\n\n- one\n- two"}
                 ]},
-            ]},
-        });
-        t.apply_claude_message(&result);
-        let results: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::ToolResult)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(
-            results.len(),
-            5,
-            "4 lines plus the counted remainder: {results:?}"
-        );
-        assert_eq!(results[0], "  ↳ Bash: line1");
-        assert_eq!(results[4], "      … 2 more lines", "indent capped at 6");
+            }));
+            assert_eq!(
+                text_blocks(&t),
+                vec!["Two steps:", "", "- one", "- two"],
+                "the reply is on screen once, not twice"
+            );
+            assert_eq!(t.partial(), None);
+        }
+        {
+            let mut t = Transcript::new();
+            t.apply_claude_message(&serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "a\nb"}]},
+            }));
+            assert_eq!(text_blocks(&t), vec!["a", "b"]);
+        }
+        {
+            let mut t = Transcript::new();
+            for i in 0..12 {
+                stream(&mut t, "thinking", &format!("line{i}\n"));
+            }
+            stream(&mut t, "text", "the answer\n");
+            let kinds: Vec<BlockKind> = t.blocks().iter().map(|b| b.kind).collect();
+            let first_text = kinds.iter().position(|k| *k == BlockKind::Text).unwrap();
+            let last_thinking = kinds
+                .iter()
+                .rposition(|k| *k == BlockKind::Thinking)
+                .unwrap();
+            assert!(
+                last_thinking < first_text,
+                "reasoning is drawn before the reply it produced: {kinds:?}"
+            );
+            let thinking: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Thinking)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(thinking.len(), 9, "8 lines plus one count: {thinking:?}");
+            assert!(thinking[0].starts_with("✻ line0"));
+            assert_eq!(thinking[8], "  … 4 more lines of thinking");
+
+            // the assistant message carries the same reasoning; it is not redrawn
+            t.apply_claude_message(&serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "line0"},
+                    {"type": "text", "text": "the answer"},
+                ]},
+            }));
+            let thinking_now = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Thinking)
+                .count();
+            assert_eq!(thinking_now, 9, "reasoning is not repeated");
+            assert_eq!(text_blocks(&t), vec!["the answer"]);
+        }
+        {
+            let mut t = Transcript::new();
+            stream(&mut t, "text", "\x1b[31mred\x1b[0m\n");
+            assert_eq!(text_blocks(&t), vec!["red"], "no escape litter in a block");
+            stream(&mut t, "text", "in\x1b[2Kflight");
+            assert_eq!(
+                t.partial().as_deref(),
+                Some("inflight"),
+                "the in-flight line is scrubbed too"
+            );
+        }
     }
 
     #[test]
-    fn a_cut_mid_line_counts_the_characters_left_out() {
-        let mut t = Transcript::new();
-        let long = "x".repeat(700);
-        t.apply_worker_lines(&[serde_json::json!({
-            "type": "tool_execution_end", "result": {"content": [{"text": long}]},
-        })
-        .to_string()]);
-        let results: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::ToolResult)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(results.len(), 2, "{results:?}");
-        assert!(results[1].contains("100 more characters"), "{results:?}");
-    }
-
-    #[test]
-    fn thinking_is_shown_as_a_counted_head() {
-        let mut t = Transcript::new();
-        let body = (0..12)
-            .map(|i| format!("line{i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let msg = serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": body}]},
-        });
-        t.apply_claude_message(&msg);
-        let thinking: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Thinking)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(thinking.len(), 9, "8 lines plus the count: {thinking:?}");
-        assert!(thinking[0].starts_with("✻ line0"));
-        assert_eq!(thinking[8], "  … 4 more lines of thinking");
+    fn tool_blocks() {
+        {
+            let mut t = Transcript::new();
+            let msg = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git rebase"}},
+                ]},
+            });
+            t.apply_claude_message(&msg);
+            // the real payload: git draws progress with carriage returns
+            let result = serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [{
+                    "type": "tool_result", "tool_use_id": "t1",
+                    "content": "Rebasing (1/6)\rRebasing (2/6)\rRebasing (6/6)\rSuccessfully rebased and updated refs/heads/feat/escrow.\n=== exit: 0 ===",
+                }]},
+            });
+            t.apply_claude_message(&result);
+            let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+            assert!(
+                texts.iter().all(|l| !l.chars().any(char::is_control)),
+                "no block carries a control character: {texts:?}"
+            );
+            assert!(
+                texts
+                    .iter()
+                    .any(|l| l.contains("Successfully rebased and updated")),
+                "what the progress finally said survives: {texts:?}"
+            );
+            assert!(
+                !texts.iter().any(|l| l.contains("Rebasing (1/6)")),
+                "the overwritten steps do not: {texts:?}"
+            );
+        }
+        {
+            let mut t = Transcript::new();
+            let msg = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git status\nsecond line"}},
+                ]},
+            });
+            t.apply_claude_message(&msg);
+            let tool_lines: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Tool)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(tool_lines, vec!["⚙ Bash git status", "      second line"]);
+            assert_eq!(
+                t.activity().map(|a| a.label.clone()),
+                Some(Some("Bash".to_string()))
+            );
+            let result = serde_json::json!({
+                "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": [
+                        {"type": "text", "text": "line1\nline2\nline3\nline4\nline5\nline6"},
+                    ]},
+                ]},
+            });
+            t.apply_claude_message(&result);
+            let results: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::ToolResult)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(
+                results.len(),
+                5,
+                "4 lines plus the counted remainder: {results:?}"
+            );
+            assert_eq!(results[0], "  ↳ Bash: line1");
+            assert_eq!(results[4], "      … 2 more lines", "indent capped at 6");
+        }
+        {
+            let mut t = Transcript::new();
+            let long = "x".repeat(700);
+            t.apply_worker_lines(&[serde_json::json!({
+                "type": "tool_execution_end", "result": {"content": [{"text": long}]},
+            })
+            .to_string()]);
+            let results: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::ToolResult)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(results.len(), 2, "{results:?}");
+            assert!(results[1].contains("100 more characters"), "{results:?}");
+        }
+        {
+            let mut t = Transcript::new();
+            let long = format!("{}\n{}", "x".repeat(700), "y".repeat(700));
+            t.apply_worker_lines(&[serde_json::json!({
+                "type": "tool_execution_end", "result": {"content": [{"text": long}]},
+            })
+            .to_string()]);
+            let results: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::ToolResult)
+                .map(|b| b.text.as_str())
+                .collect();
+            // line 1 cut at 600 chars; a second line remains, so it is counted
+            assert!(
+                results.last().unwrap().contains("1 more line"),
+                "{results:?}"
+            );
+        }
+        {
+            let mut t = Transcript::new();
+            let msg = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "t9", "name": "Read", "input": {"file_path": "src/main.rs"}},
+                ]},
+            });
+            t.apply_claude_message(&msg);
+            assert!(t.blocks().last().unwrap().text.contains("Read src/main.rs"));
+            assert_eq!(t.tool_names.get("t9").map(String::as_str), Some("Read"));
+        }
+        {
+            let mut t = Transcript::new();
+            let body = (0..12)
+                .map(|i| format!("line{i}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let msg = serde_json::json!({
+                "type": "assistant",
+                "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": body}]},
+            });
+            t.apply_claude_message(&msg);
+            let thinking: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Thinking)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(thinking.len(), 9, "8 lines plus the count: {thinking:?}");
+            assert!(thinking[0].starts_with("✻ line0"));
+            assert_eq!(thinking[8], "  … 4 more lines of thinking");
+        }
     }
 
     /// The record stream a real turn produces: deltas, then the assistant
@@ -1511,373 +1661,195 @@ mod tests {
     }
 
     #[test]
-    fn a_streamed_reply_is_committed_once_and_not_repeated_at_turn_end() {
-        let mut t = Transcript::new();
-        stream(&mut t, "text", "Two steps:\n\n- one\n");
-        assert_eq!(
-            text_blocks(&t),
-            vec!["Two steps:", "", "- one"],
-            "whole lines commit as they arrive"
-        );
-        assert_eq!(t.partial(), None, "nothing incomplete is left over");
-
-        stream(&mut t, "text", "- two");
-        assert_eq!(
-            t.partial().as_deref(),
-            Some("- two"),
-            "the incomplete line stays in flight"
-        );
-
-        // the assistant message repeats everything; only the tail is new
-        t.apply_claude_message(&serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "text", "text": "Two steps:\n\n- one\n- two"}
-            ]},
-        }));
-        assert_eq!(
-            text_blocks(&t),
-            vec!["Two steps:", "", "- one", "- two"],
-            "the reply is on screen once, not twice"
-        );
-        assert_eq!(t.partial(), None);
-    }
-
-    #[test]
-    fn a_reply_that_never_streamed_still_lands_whole() {
-        let mut t = Transcript::new();
-        t.apply_claude_message(&serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "a\nb"}]},
-        }));
-        assert_eq!(text_blocks(&t), vec!["a", "b"]);
-    }
-
-    #[test]
-    fn streamed_reasoning_arrives_before_the_reply_and_keeps_its_budget() {
-        let mut t = Transcript::new();
-        for i in 0..12 {
-            stream(&mut t, "thinking", &format!("line{i}\n"));
+    fn worker_records() {
+        {
+            let mut t = Transcript::new();
+            let events = [
+                serde_json::json!({"type": "task_prompt", "brief": "fix the tests\nmore"}),
+                serde_json::json!({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "cargo test"}}),
+                serde_json::json!({"type": "tool_execution_end", "result": {"content": [{"text": "ok"}]}}),
+                serde_json::json!({"type": "worker_progress", "message": "halfway"}),
+                serde_json::json!({"type": "worker_question", "question": "bcrypt or argon2?", "options": ["bcrypt", "argon2"]}),
+                serde_json::json!({"type": "steering_delivered", "source": "console", "message": "use argon2"}),
+                serde_json::json!({"type": "run_failed", "error": "disk full"}),
+            ];
+            t.apply_worker_lines(&events.iter().map(Value::to_string).collect::<Vec<_>>());
+            let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                vec![
+                    "▶ task: fix the tests",
+                    "⚙ bash cargo test",
+                    "  ↳ ok",
+                    "· halfway",
+                    "? bcrypt or argon2? [bcrypt | argon2]",
+                    "▶ console: use argon2",
+                    "✖ disk full",
+                ],
+                "{texts:?}"
+            );
         }
-        stream(&mut t, "text", "the answer\n");
-        let kinds: Vec<BlockKind> = t.blocks().iter().map(|b| b.kind).collect();
-        let first_text = kinds.iter().position(|k| *k == BlockKind::Text).unwrap();
-        let last_thinking = kinds
-            .iter()
-            .rposition(|k| *k == BlockKind::Thinking)
+        {
+            let mut t = Transcript::new();
+            let update =
+                |body: Value| serde_json::json!({"type": "message_update", "ev": body}).to_string();
+            t.apply_worker_lines(&[
+                update(serde_json::json!({"type": "text_start", "contentIndex": 0})),
+                update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "he"})),
+                update(
+                    serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "llo"}),
+                ),
+            ]);
+            assert_eq!(t.partial().as_deref(), Some("hello"));
+            t.apply_worker_lines(&[update(serde_json::json!({
+                "type": "text_end", "contentIndex": 0, "content": "hello\nworld",
+            }))]);
+            assert_eq!(t.partial(), None);
+            let texts: Vec<&str> = t
+                .blocks()
+                .iter()
+                .filter(|b| b.kind == BlockKind::Text)
+                .map(|b| b.text.as_str())
+                .collect();
+            assert_eq!(texts, vec!["hello", "world"]);
+        }
+        {
+            let mut t = Transcript::new();
+            let deltas = [
+                serde_json::json!({"type":"message_update","ev":{"type":"text_start","contentIndex":0}}),
+                serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"one\n"}}),
+                serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"two"}}),
+                serde_json::json!({"type":"message_update","ev":{"type":"text_end","contentIndex":0,"content":"one\ntwo"}}),
+            ];
+            t.apply_worker_lines(&deltas.iter().map(ToString::to_string).collect::<Vec<_>>());
+            assert_eq!(text_blocks(&t), vec!["one", "two"]);
+        }
+        {
+            let mut t = Transcript::new();
+            t.apply_worker_lines(&[
+                serde_json::json!({"type": "worker_dialog", "method": "select", "question": "Pick one", "options": ["a", "b"]}).to_string(),
+                serde_json::json!({"type": "dialog_cancelled"}).to_string(),
+                serde_json::json!({"type": "worker_question_resolved", "how": "timeout"}).to_string(),
+                serde_json::json!({"type": "agent_settled"}).to_string(),
+            ]);
+            let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+            assert_eq!(
+                texts,
+                vec![
+                    "? Pick one [a | b]",
+                    "· dialog cancelled",
+                    "! no answer in time; worker proceeds on its own judgment",
+                    "● settled",
+                ]
+            );
+        }
+        {
+            let dir = std::env::temp_dir().join(format!(
+                "pilotfish-tui-transcript-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("events.jsonl");
+            std::fs::write(
+                &path,
+                format!(
+                    "{}\n{}\nnot json\n",
+                    serde_json::json!({"type": "worker_progress", "message": "one"}),
+                    serde_json::json!({"type": "worker_progress", "message": "two"}),
+                ),
+            )
             .unwrap();
-        assert!(
-            last_thinking < first_text,
-            "reasoning is drawn before the reply it produced: {kinds:?}"
-        );
-        let thinking: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Thinking)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(thinking.len(), 9, "8 lines plus one count: {thinking:?}");
-        assert!(thinking[0].starts_with("✻ line0"));
-        assert_eq!(thinking[8], "  … 4 more lines of thinking");
-
-        // the assistant message carries the same reasoning; it is not redrawn
-        t.apply_claude_message(&serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "thinking", "thinking": "line0"},
-                {"type": "text", "text": "the answer"},
-            ]},
-        }));
-        let thinking_now = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Thinking)
-            .count();
-        assert_eq!(thinking_now, 9, "reasoning is not repeated");
-        assert_eq!(text_blocks(&t), vec!["the answer"]);
-    }
-
-    #[test]
-    fn streamed_text_is_scrubbed_of_control_characters() {
-        let mut t = Transcript::new();
-        stream(&mut t, "text", "\x1b[31mred\x1b[0m\n");
-        assert_eq!(text_blocks(&t), vec!["red"], "no escape litter in a block");
-        stream(&mut t, "text", "in\x1b[2Kflight");
-        assert_eq!(
-            t.partial().as_deref(),
-            Some("inflight"),
-            "the in-flight line is scrubbed too"
-        );
-    }
-
-    #[test]
-    fn a_worker_reply_is_not_drawn_twice_at_text_end() {
-        let mut t = Transcript::new();
-        let deltas = [
-            serde_json::json!({"type":"message_update","ev":{"type":"text_start","contentIndex":0}}),
-            serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"one\n"}}),
-            serde_json::json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":0,"delta":"two"}}),
-            serde_json::json!({"type":"message_update","ev":{"type":"text_end","contentIndex":0,"content":"one\ntwo"}}),
-        ];
-        t.apply_worker_lines(&deltas.iter().map(ToString::to_string).collect::<Vec<_>>());
-        assert_eq!(text_blocks(&t), vec!["one", "two"]);
-    }
-
-    #[test]
-    fn a_fleet_batch_replayed_from_the_file_reads_as_the_live_line_not_markup() {
-        let events = vec![
-            crate::fleet::event::FleetEvent::new(
-                crate::fleet::event::FleetEventKind::Settled,
-                "add-auth-1f2e3d4",
-                "add-auth",
-                vec![],
-            ),
-            crate::fleet::event::FleetEvent::new(
-                crate::fleet::event::FleetEventKind::Question,
-                "api-9a8b7c6",
-                "api",
-                vec![],
-            ),
-        ];
-        let batch = crate::fleet::event::format_fleet_batch(&events, 10);
-        // a reopened console: no pending echo, just claude's replay of the batch
-        let mut t = Transcript::new();
-        t.apply_claude_message(&serde_json::json!({
-            "type": "user",
-            "message": {"role": "user", "content": batch},
-            "parent_tool_use_id": null,
-        }));
-        let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(
-            texts,
-            vec!["⚑ settled add-auth · question api"],
-            "{texts:?}"
-        );
-        assert!(t.blocks().iter().all(|b| b.kind == BlockKind::Fleet));
-    }
-
-    #[test]
-    fn system_init_records_the_session_and_model() {
-        let mut t = Transcript::new();
-        let init = serde_json::json!({
-            "type": "system", "subtype": "init",
-            "session_id": "sess-abcdef12-3456",
-            "model": "fake-model",
-            "tools": ["Bash", "mcp__fleet__fleet_spawn"],
-            "mcp_servers": [{"name": "fleet", "status": "connected"}],
-        });
-        t.apply_claude_message(&init);
-        assert_eq!(t.session_id(), Some("sess-abcdef12-3456"));
-        assert_eq!(t.model(), Some("fake-model"));
-        assert!(t.blocks()[0].text.contains("mcp fleet:connected"));
-        // a re-init (new session id) does not repeat the banner
-        let init2 = serde_json::json!({
-            "type": "system", "subtype": "init",
-            "session_id": "sess-ffff", "model": "other", "tools": [],
-        });
-        t.apply_claude_message(&init2);
-        assert_eq!(t.session_id(), Some("sess-ffff"));
-        assert_eq!(t.blocks().len(), 1);
-    }
-
-    #[test]
-    fn results_update_cost_and_turns_and_report_failures() {
-        let mut t = Transcript::new();
-        let result = serde_json::json!({
-            "type": "result", "subtype": "success",
-            "total_cost_usd": 0.12, "num_turns": 3, "is_error": false,
-        });
-        t.apply_claude_message(&result);
-        assert!((t.cost_usd() - 0.12).abs() < 1e-9);
-        // claude's `num_turns` is per query, so a result counts as one turn
-        // whatever it says
-        assert_eq!(t.num_turns(), 1);
-        assert!(!t.turn_active());
-        assert_eq!(t.activity(), None);
-        let failed = serde_json::json!({
-            "type": "result", "subtype": "error_during_execution",
-            "is_error": true, "errors": ["boom", "crash"],
-        });
-        t.apply_claude_message(&failed);
-        assert_eq!(
-            t.blocks().last().unwrap().text,
-            "! turn failed (error_during_execution): boom; crash"
-        );
-        assert_eq!(t.num_turns(), 2, "a failed turn is still a turn");
-    }
-
-    #[test]
-    fn exit_records_the_end() {
-        let mut t = Transcript::new();
-        t.apply_orchestrator_record(&record(&OrchestratorEvent::Exit {
-            code: None,
-            signal: Some("SIGTERM".into()),
-        }));
-        assert!(t.exited());
-        assert!(!t.turn_active());
-        assert_eq!(
-            t.blocks().last().unwrap().text,
-            "orchestrator exited (SIGTERM)"
-        );
-    }
-
-    #[test]
-    fn worker_events_fold_into_their_blocks() {
-        let mut t = Transcript::new();
-        let events = [
-            serde_json::json!({"type": "task_prompt", "brief": "fix the tests\nmore"}),
-            serde_json::json!({"type": "tool_execution_start", "toolName": "bash", "args": {"command": "cargo test"}}),
-            serde_json::json!({"type": "tool_execution_end", "result": {"content": [{"text": "ok"}]}}),
-            serde_json::json!({"type": "worker_progress", "message": "halfway"}),
-            serde_json::json!({"type": "worker_question", "question": "bcrypt or argon2?", "options": ["bcrypt", "argon2"]}),
-            serde_json::json!({"type": "steering_delivered", "source": "console", "message": "use argon2"}),
-            serde_json::json!({"type": "run_failed", "error": "disk full"}),
-        ];
-        t.apply_worker_lines(&events.iter().map(Value::to_string).collect::<Vec<_>>());
-        let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(
-            texts,
-            vec![
-                "▶ task: fix the tests",
-                "⚙ bash cargo test",
-                "  ↳ ok",
-                "· halfway",
-                "? bcrypt or argon2? [bcrypt | argon2]",
-                "▶ console: use argon2",
-                "✖ disk full",
-            ],
-            "{texts:?}"
-        );
-    }
-
-    #[test]
-    fn worker_streaming_lands_as_text_blocks_on_text_end() {
-        let mut t = Transcript::new();
-        let update =
-            |body: Value| serde_json::json!({"type": "message_update", "ev": body}).to_string();
-        t.apply_worker_lines(&[
-            update(serde_json::json!({"type": "text_start", "contentIndex": 0})),
-            update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "he"})),
-            update(serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "llo"})),
-        ]);
-        assert_eq!(t.partial().as_deref(), Some("hello"));
-        t.apply_worker_lines(&[update(serde_json::json!({
-            "type": "text_end", "contentIndex": 0, "content": "hello\nworld",
-        }))]);
-        assert_eq!(t.partial(), None);
-        let texts: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::Text)
-            .map(|b| b.text.as_str())
-            .collect();
-        assert_eq!(texts, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn question_resolved_and_dialog_events_render() {
-        let mut t = Transcript::new();
-        t.apply_worker_lines(&[
-            serde_json::json!({"type": "worker_dialog", "method": "select", "question": "Pick one", "options": ["a", "b"]}).to_string(),
-            serde_json::json!({"type": "dialog_cancelled"}).to_string(),
-            serde_json::json!({"type": "worker_question_resolved", "how": "timeout"}).to_string(),
-            serde_json::json!({"type": "agent_settled"}).to_string(),
-        ]);
-        let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(
-            texts,
-            vec![
-                "? Pick one [a | b]",
-                "· dialog cancelled",
-                "! no answer in time; worker proceeds on its own judgment",
-                "● settled",
-            ]
-        );
-    }
-
-    #[test]
-    fn long_output_is_counted_not_hidden() {
-        let mut t = Transcript::new();
-        let long = format!("{}\n{}", "x".repeat(700), "y".repeat(700));
-        t.apply_worker_lines(&[serde_json::json!({
-            "type": "tool_execution_end", "result": {"content": [{"text": long}]},
-        })
-        .to_string()]);
-        let results: Vec<&str> = t
-            .blocks()
-            .iter()
-            .filter(|b| b.kind == BlockKind::ToolResult)
-            .map(|b| b.text.as_str())
-            .collect();
-        // line 1 cut at 600 chars; a second line remains, so it is counted
-        assert!(
-            results.last().unwrap().contains("1 more line"),
-            "{results:?}"
-        );
-    }
-
-    #[test]
-    fn the_transcript_is_capped_and_trims_the_oldest() {
-        let mut t = Transcript::new();
-        for i in 0..600 {
-            t.push_notice(&format!("note {i}"));
+            let t = Transcript::replay_worker(&path);
+            assert_eq!(t.blocks().len(), 2);
+            assert_eq!(t.blocks()[1].text, "· two");
+            // a missing file is an empty transcript, not an error
+            assert_eq!(
+                Transcript::replay_worker(&dir.join("none")).blocks().len(),
+                0
+            );
         }
-        assert_eq!(t.blocks().len(), MAX_BLOCKS);
-        assert_eq!(t.blocks()[0].text, "note 100");
     }
 
     #[test]
-    fn assistant_with_tools_builds_a_tool_block() {
-        let mut t = Transcript::new();
-        let msg = serde_json::json!({
-            "type": "assistant",
-            "message": {"role": "assistant", "content": [
-                {"type": "tool_use", "id": "t9", "name": "Read", "input": {"file_path": "src/main.rs"}},
-            ]},
-        });
-        t.apply_claude_message(&msg);
-        assert!(t.blocks().last().unwrap().text.contains("Read src/main.rs"));
-        assert_eq!(t.tool_names.get("t9").map(String::as_str), Some("Read"));
-    }
-
-    #[test]
-    fn replay_worker_reads_the_file() {
-        let dir = std::env::temp_dir().join(format!(
-            "pilotfish-tui-transcript-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("events.jsonl");
-        std::fs::write(
-            &path,
-            format!(
-                "{}\n{}\nnot json\n",
-                serde_json::json!({"type": "worker_progress", "message": "one"}),
-                serde_json::json!({"type": "worker_progress", "message": "two"}),
-            ),
-        )
-        .unwrap();
-        let t = Transcript::replay_worker(&path);
-        assert_eq!(t.blocks().len(), 2);
-        assert_eq!(t.blocks()[1].text, "· two");
-        // a missing file is an empty transcript, not an error
-        assert_eq!(
-            Transcript::replay_worker(&dir.join("none")).blocks().len(),
-            0
-        );
-    }
-
-    #[test]
-    fn age_since_never_goes_negative() {
-        assert_eq!(
-            age_since(Some("2026-09-30T11:59:52.000Z"), "", 1_790_769_600_000),
-            8_000
-        );
-        assert_eq!(
-            age_since(None, "2026-09-30T11:59:52.000Z", 1_790_769_600_000),
-            8_000
-        );
-        assert_eq!(age_since(None, "bogus", 1_790_769_600_000), 0);
+    fn session_records() {
+        {
+            let mut t = Transcript::new();
+            let init = serde_json::json!({
+                "type": "system", "subtype": "init",
+                "session_id": "sess-abcdef12-3456",
+                "model": "fake-model",
+                "tools": ["Bash", "mcp__fleet__fleet_spawn"],
+                "mcp_servers": [{"name": "fleet", "status": "connected"}],
+            });
+            t.apply_claude_message(&init);
+            assert_eq!(t.session_id(), Some("sess-abcdef12-3456"));
+            assert_eq!(t.model(), Some("fake-model"));
+            assert!(t.blocks()[0].text.contains("mcp fleet:connected"));
+            // a re-init (new session id) does not repeat the banner
+            let init2 = serde_json::json!({
+                "type": "system", "subtype": "init",
+                "session_id": "sess-ffff", "model": "other", "tools": [],
+            });
+            t.apply_claude_message(&init2);
+            assert_eq!(t.session_id(), Some("sess-ffff"));
+            assert_eq!(t.blocks().len(), 1);
+        }
+        {
+            let mut t = Transcript::new();
+            let result = serde_json::json!({
+                "type": "result", "subtype": "success",
+                "total_cost_usd": 0.12, "num_turns": 3, "is_error": false,
+            });
+            t.apply_claude_message(&result);
+            assert!((t.cost_usd() - 0.12).abs() < 1e-9);
+            // claude's `num_turns` is per query, so a result counts as one turn
+            // whatever it says
+            assert_eq!(t.num_turns(), 1);
+            assert!(!t.turn_active());
+            assert_eq!(t.activity(), None);
+            let failed = serde_json::json!({
+                "type": "result", "subtype": "error_during_execution",
+                "is_error": true, "errors": ["boom", "crash"],
+            });
+            t.apply_claude_message(&failed);
+            assert_eq!(
+                t.blocks().last().unwrap().text,
+                "! turn failed (error_during_execution): boom; crash"
+            );
+            assert_eq!(t.num_turns(), 2, "a failed turn is still a turn");
+        }
+        {
+            let mut t = Transcript::new();
+            t.apply_orchestrator_record(&record(&OrchestratorEvent::Exit {
+                code: None,
+                signal: Some("SIGTERM".into()),
+            }));
+            assert!(t.exited());
+            assert!(!t.turn_active());
+            assert_eq!(
+                t.blocks().last().unwrap().text,
+                "orchestrator exited (SIGTERM)"
+            );
+        }
+        {
+            let mut t = Transcript::new();
+            for i in 0..600 {
+                t.push_notice(&format!("note {i}"));
+            }
+            assert_eq!(t.blocks().len(), MAX_BLOCKS);
+            assert_eq!(t.blocks()[0].text, "note 100");
+        }
+        {
+            assert_eq!(
+                age_since(Some("2026-09-30T11:59:52.000Z"), "", 1_790_769_600_000),
+                8_000
+            );
+            assert_eq!(
+                age_since(None, "2026-09-30T11:59:52.000Z", 1_790_769_600_000),
+                8_000
+            );
+            assert_eq!(age_since(None, "bogus", 1_790_769_600_000), 0);
+        }
     }
 }

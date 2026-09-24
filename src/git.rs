@@ -404,217 +404,213 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn git_raw_reports_real_exit_codes() {
-        let root = init_repo("pilotfish-git-");
-        let r = git_raw(&["rev-parse", "--is-inside-work-tree"], &root).await;
-        assert!(r.ok());
-        assert_eq!(r.stdout.trim(), "true");
-        let bad = git_raw(&["rev-parse", "--verify", "nope"], &root).await;
-        assert!(!bad.ok());
-        assert!(bad.stderr.contains("fatal"), "{}", bad.stderr);
-    }
-
-    #[tokio::test]
-    async fn repo_detection_and_root_resolution() {
-        // A git spawn can transiently fail when the machine is loaded (this
-        // suite runs many git subprocesses in parallel). Repo setup retries
-        // inside the shared helper; the production probes are single-shot by
-        // design, so poll them against the same bound before failing the
-        // test.
-        let deadline = Instant::now() + RETRY_BOUND;
-        loop {
+    async fn git_basics() {
+        {
             let root = init_repo("pilotfish-git-");
-            // Under heavy load `git rev-parse --show-toplevel` has been
-            // observed to hand back a root that fails `canonicalize` with
-            // NotFound a moment later (forensics: git itself never reports a
-            // ghost toplevel; the loss is environmental). Fold the resolution
-            // into the retried condition instead of asserting it — a
-            // persistent mismatch still fails the test via the bound.
-            if is_git_repo(&root).await
-                && let Some(resolved) = repo_root(&root).await
-                && let (Ok(resolved_real), Ok(root_real)) =
-                    (resolved.canonicalize(), root.canonicalize())
-                && resolved_real == root_real
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "git repo not detected at {}",
-                root.display()
-            );
-            tokio::time::sleep(RETRY_INTERVAL).await;
+            let r = git_raw(&["rev-parse", "--is-inside-work-tree"], &root).await;
+            assert!(r.ok());
+            assert_eq!(r.stdout.trim(), "true");
+            let bad = git_raw(&["rev-parse", "--verify", "nope"], &root).await;
+            assert!(!bad.ok());
+            assert!(bad.stderr.contains("fatal"), "{}", bad.stderr);
         }
-        let plain = tmp_dir("pilotfish-plain-");
-        assert!(!is_git_repo(&plain).await);
-        assert_eq!(repo_root(&plain).await, None);
-    }
-
-    #[tokio::test]
-    async fn worktree_lifecycle_merged_and_unmerged() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        let info = ensure_worktree(&root, &worktrees, "auth-20260828141530", "auth", None)
-            .await
-            .unwrap();
-        assert_eq!(info.branch, "pilotfish/auth-8141530");
-        assert_eq!(info.base_ref, "HEAD");
-        assert!(info.worktree_path.join("seed.txt").exists());
-        assert_eq!(
-            resolve_commit(&root, "HEAD").await.unwrap(),
-            info.base_commit
-        );
-
-        // Commit work on the branch, then merge it into main.
-        std::fs::write(info.worktree_path.join("hello.txt"), "hi\n").unwrap();
-        git_sync(&info.worktree_path, &["add", "."]);
-        git_sync(&info.worktree_path, &["commit", "-qm", "hello"]);
-        assert!(!worktree_is_dirty(&info.worktree_path).await);
-        git_sync(&root, &["merge", &info.branch, "-q", "--no-edit"]);
-        assert!(branch_is_merged(&root, &info.branch).await);
-
-        let r = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
-            .await
-            .unwrap();
-        assert!(r.worktree_removed);
-        assert!(r.branch_deleted);
-        assert!(!info.worktree_path.exists());
-        assert!(
-            !branch_is_merged(&root, &info.branch).await || {
-                // branch gone: merged check is moot, just confirm it's deleted
-                let listed = git_raw(&["branch", "--list", &info.branch], &root).await;
-                listed.stdout.trim().is_empty()
+        {
+            // A git spawn can transiently fail when the machine is loaded (this
+            // suite runs many git subprocesses in parallel). Repo setup retries
+            // inside the shared helper; the production probes are single-shot by
+            // design, so poll them against the same bound before failing the
+            // test.
+            let deadline = Instant::now() + RETRY_BOUND;
+            loop {
+                let root = init_repo("pilotfish-git-");
+                // Under heavy load `git rev-parse --show-toplevel` has been
+                // observed to hand back a root that fails `canonicalize` with
+                // NotFound a moment later (forensics: git itself never reports a
+                // ghost toplevel; the loss is environmental). Fold the resolution
+                // into the retried condition instead of asserting it — a
+                // persistent mismatch still fails the test via the bound.
+                if is_git_repo(&root).await
+                    && let Some(resolved) = repo_root(&root).await
+                    && let (Ok(resolved_real), Ok(root_real)) =
+                        (resolved.canonicalize(), root.canonicalize())
+                    && resolved_real == root_real
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "git repo not detected at {}",
+                    root.display()
+                );
+                tokio::time::sleep(RETRY_INTERVAL).await;
             }
-        );
-    }
-
-    #[tokio::test]
-    async fn unmerged_branch_is_kept_unless_forced() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        let info = ensure_worktree(&root, &worktrees, "x-20260828141530", "x", None)
-            .await
-            .unwrap();
-        std::fs::write(info.worktree_path.join("unmerged.txt"), "u\n").unwrap();
-        git_sync(&info.worktree_path, &["add", "."]);
-        git_sync(&info.worktree_path, &["commit", "-qm", "u"]);
-        assert!(!branch_is_merged(&root, &info.branch).await);
-
-        let soft = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
-            .await
-            .unwrap();
-        assert!(soft.worktree_removed);
-        assert!(!soft.branch_deleted);
-        let hard = remove_worktree(&root, &info.worktree_path, Some(&info.branch), true)
-            .await
-            .unwrap();
-        // Worktree already gone; the branch delete now succeeds.
-        assert!(!hard.worktree_removed);
-        assert!(hard.branch_deleted);
-    }
-
-    #[tokio::test]
-    async fn diff_and_dirty_checks() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        let info = ensure_worktree(&root, &worktrees, "d-20260828141530", "d", None)
-            .await
-            .unwrap();
-        std::fs::write(info.worktree_path.join("hello.txt"), "hi\n").unwrap();
-        git_sync(&info.worktree_path, &["add", "."]);
-        git_sync(&info.worktree_path, &["commit", "-qm", "hello"]);
-        // Uncommitted change the worker forgot to commit.
-        std::fs::write(info.worktree_path.join("forgot.txt"), "uncommitted\n").unwrap();
-        let dirty = dirty_files(&info.worktree_path).await;
-        assert_eq!(dirty, vec!["?? forgot.txt".to_string()]);
-        assert!(worktree_is_dirty(&info.worktree_path).await);
-
-        let stat = diff_against_base(&info.worktree_path, &info.base_commit, false)
-            .await
-            .unwrap();
-        assert!(stat.contains("hello.txt"), "{stat}");
-        let names = diff_against_base(&info.worktree_path, &info.base_commit, true)
-            .await
-            .unwrap();
-        assert_eq!(names, "hello.txt");
-        // A nonsense base fails with git's message.
-        assert!(
-            diff_against_base(&info.worktree_path, "not-a-ref", false)
+            let plain = tmp_dir("pilotfish-plain-");
+            assert!(!is_git_repo(&plain).await);
+            assert_eq!(repo_root(&plain).await, None);
+        }
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            let info = ensure_worktree(&root, &worktrees, "d-20260828141530", "d", None)
                 .await
-                .is_err()
-        );
-    }
+                .unwrap();
+            std::fs::write(info.worktree_path.join("hello.txt"), "hi\n").unwrap();
+            git_sync(&info.worktree_path, &["add", "."]);
+            git_sync(&info.worktree_path, &["commit", "-qm", "hello"]);
+            // Uncommitted change the worker forgot to commit.
+            std::fs::write(info.worktree_path.join("forgot.txt"), "uncommitted\n").unwrap();
+            let dirty = dirty_files(&info.worktree_path).await;
+            assert_eq!(dirty, vec!["?? forgot.txt".to_string()]);
+            assert!(worktree_is_dirty(&info.worktree_path).await);
 
-    #[tokio::test]
-    async fn merge_detects_conflicts_and_aborts_clean() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        // The branch is cut from the current HEAD (spawn time)…
-        let info = ensure_worktree(&root, &worktrees, "c-20260828141530", "c", None)
-            .await
-            .unwrap();
-        // …then the parent moves on…
-        std::fs::write(root.join("seed.txt"), "parent version\n").unwrap();
-        git_sync(&root, &["commit", "-qam", "parent version"]);
-        // …while the worker edits the same file on its branch.
-        std::fs::write(info.worktree_path.join("seed.txt"), "worker version\n").unwrap();
-        git_sync(&info.worktree_path, &["add", "."]);
-        git_sync(&info.worktree_path, &["commit", "-qm", "worker version"]);
-
-        let outcome = merge_branch(&root, &info.branch, false, true).await;
-        match outcome {
-            MergeOutcome::Conflicted(files) => assert_eq!(files, vec!["seed.txt".to_string()]),
-            other => panic!("{other:?}"),
+            let stat = diff_against_base(&info.worktree_path, &info.base_commit, false)
+                .await
+                .unwrap();
+            assert!(stat.contains("hello.txt"), "{stat}");
+            let names = diff_against_base(&info.worktree_path, &info.base_commit, true)
+                .await
+                .unwrap();
+            assert_eq!(names, "hello.txt");
+            // A nonsense base fails with git's message.
+            assert!(
+                diff_against_base(&info.worktree_path, "not-a-ref", false)
+                    .await
+                    .is_err()
+            );
         }
-        // The abort left the checkout clean.
-        assert!(!worktree_is_dirty(&root).await);
-        let aborted = git_raw(&["status"], &root).await;
-        assert!(!aborted.stdout.contains("All conflicts fixed"));
-
-        // Without abort-on-conflict the conflicted index stays for the caller.
-        let outcome = merge_branch(&root, &info.branch, false, false).await;
-        assert!(matches!(outcome, MergeOutcome::Conflicted(_)));
-        git_sync(&root, &["merge", "--abort"]);
     }
 
     #[tokio::test]
-    async fn merge_staged_with_no_commit_and_fails_on_bad_ref() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        let info = ensure_worktree(&root, &worktrees, "s-20260828141530", "s", None)
-            .await
-            .unwrap();
-        std::fs::write(info.worktree_path.join("feat.txt"), "f\n").unwrap();
-        git_sync(&info.worktree_path, &["add", "."]);
-        git_sync(&info.worktree_path, &["commit", "-qm", "feat"]);
+    async fn worktree_removal() {
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            let info = ensure_worktree(&root, &worktrees, "auth-20260828141530", "auth", None)
+                .await
+                .unwrap();
+            assert_eq!(info.branch, "pilotfish/auth-8141530");
+            assert_eq!(info.base_ref, "HEAD");
+            assert!(info.worktree_path.join("seed.txt").exists());
+            assert_eq!(
+                resolve_commit(&root, "HEAD").await.unwrap(),
+                info.base_commit
+            );
 
-        let staged = merge_branch(&root, &info.branch, true, false).await;
-        assert_eq!(staged, MergeOutcome::Staged);
-        // Nothing committed yet: HEAD unchanged, change staged.
-        let status = git_raw(&["status", "--porcelain"], &root).await;
-        assert!(status.stdout.contains('A'), "{}", status.stdout);
-        git_sync(&root, &["merge", "--abort"]);
+            // Commit work on the branch, then merge it into main.
+            std::fs::write(info.worktree_path.join("hello.txt"), "hi\n").unwrap();
+            git_sync(&info.worktree_path, &["add", "."]);
+            git_sync(&info.worktree_path, &["commit", "-qm", "hello"]);
+            assert!(!worktree_is_dirty(&info.worktree_path).await);
+            git_sync(&root, &["merge", &info.branch, "-q", "--no-edit"]);
+            assert!(branch_is_merged(&root, &info.branch).await);
 
-        let merged = merge_branch(&root, &info.branch, false, false).await;
-        assert_eq!(merged, MergeOutcome::Merged);
+            let r = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
+                .await
+                .unwrap();
+            assert!(r.worktree_removed);
+            assert!(r.branch_deleted);
+            assert!(!info.worktree_path.exists());
+            assert!(
+                !branch_is_merged(&root, &info.branch).await || {
+                    // branch gone: merged check is moot, just confirm it's deleted
+                    let listed = git_raw(&["branch", "--list", &info.branch], &root).await;
+                    listed.stdout.trim().is_empty()
+                }
+            );
+        }
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            let info = ensure_worktree(&root, &worktrees, "x-20260828141530", "x", None)
+                .await
+                .unwrap();
+            std::fs::write(info.worktree_path.join("unmerged.txt"), "u\n").unwrap();
+            git_sync(&info.worktree_path, &["add", "."]);
+            git_sync(&info.worktree_path, &["commit", "-qm", "u"]);
+            assert!(!branch_is_merged(&root, &info.branch).await);
 
-        let failed = merge_branch(&root, "pilotfish/never-existed", false, false).await;
-        assert!(matches!(failed, MergeOutcome::Failed(_)));
+            let soft = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
+                .await
+                .unwrap();
+            assert!(soft.worktree_removed);
+            assert!(!soft.branch_deleted);
+            let hard = remove_worktree(&root, &info.worktree_path, Some(&info.branch), true)
+                .await
+                .unwrap();
+            // Worktree already gone; the branch delete now succeeds.
+            assert!(!hard.worktree_removed);
+            assert!(hard.branch_deleted);
+        }
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            let info = ensure_worktree(&root, &worktrees, "m-20260828141530", "m", None)
+                .await
+                .unwrap();
+            // Simulate a worktree removed out from under us.
+            std::fs::remove_dir_all(&info.worktree_path).unwrap();
+            let r = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
+                .await
+                .unwrap();
+            assert!(!r.worktree_removed);
+            assert!(r.branch_deleted);
+        }
     }
 
     #[tokio::test]
-    async fn missing_worktree_prunes_and_falls_through_to_branch_delete() {
-        let root = init_repo("pilotfish-git-");
-        let worktrees = root.join(".pilotfish").join("worktrees");
-        let info = ensure_worktree(&root, &worktrees, "m-20260828141530", "m", None)
-            .await
-            .unwrap();
-        // Simulate a worktree removed out from under us.
-        std::fs::remove_dir_all(&info.worktree_path).unwrap();
-        let r = remove_worktree(&root, &info.worktree_path, Some(&info.branch), false)
-            .await
-            .unwrap();
-        assert!(!r.worktree_removed);
-        assert!(r.branch_deleted);
+    async fn merge_outcomes() {
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            // The branch is cut from the current HEAD (spawn time)…
+            let info = ensure_worktree(&root, &worktrees, "c-20260828141530", "c", None)
+                .await
+                .unwrap();
+            // …then the parent moves on…
+            std::fs::write(root.join("seed.txt"), "parent version\n").unwrap();
+            git_sync(&root, &["commit", "-qam", "parent version"]);
+            // …while the worker edits the same file on its branch.
+            std::fs::write(info.worktree_path.join("seed.txt"), "worker version\n").unwrap();
+            git_sync(&info.worktree_path, &["add", "."]);
+            git_sync(&info.worktree_path, &["commit", "-qm", "worker version"]);
+
+            let outcome = merge_branch(&root, &info.branch, false, true).await;
+            match outcome {
+                MergeOutcome::Conflicted(files) => assert_eq!(files, vec!["seed.txt".to_string()]),
+                other => panic!("{other:?}"),
+            }
+            // The abort left the checkout clean.
+            assert!(!worktree_is_dirty(&root).await);
+            let aborted = git_raw(&["status"], &root).await;
+            assert!(!aborted.stdout.contains("All conflicts fixed"));
+
+            // Without abort-on-conflict the conflicted index stays for the caller.
+            let outcome = merge_branch(&root, &info.branch, false, false).await;
+            assert!(matches!(outcome, MergeOutcome::Conflicted(_)));
+            git_sync(&root, &["merge", "--abort"]);
+        }
+        {
+            let root = init_repo("pilotfish-git-");
+            let worktrees = root.join(".pilotfish").join("worktrees");
+            let info = ensure_worktree(&root, &worktrees, "s-20260828141530", "s", None)
+                .await
+                .unwrap();
+            std::fs::write(info.worktree_path.join("feat.txt"), "f\n").unwrap();
+            git_sync(&info.worktree_path, &["add", "."]);
+            git_sync(&info.worktree_path, &["commit", "-qm", "feat"]);
+
+            let staged = merge_branch(&root, &info.branch, true, false).await;
+            assert_eq!(staged, MergeOutcome::Staged);
+            // Nothing committed yet: HEAD unchanged, change staged.
+            let status = git_raw(&["status", "--porcelain"], &root).await;
+            assert!(status.stdout.contains('A'), "{}", status.stdout);
+            git_sync(&root, &["merge", "--abort"]);
+
+            let merged = merge_branch(&root, &info.branch, false, false).await;
+            assert_eq!(merged, MergeOutcome::Merged);
+
+            let failed = merge_branch(&root, "pilotfish/never-existed", false, false).await;
+            assert!(matches!(failed, MergeOutcome::Failed(_)));
+        }
     }
 }

@@ -429,409 +429,379 @@ mod tests {
     }
 
     #[test]
-    fn a_new_session_has_no_session_id_a_fresh_uuid_and_version_two() {
-        let session = OrchestratorSession::new("/repo");
-        assert_eq!(session.version, SESSION_VERSION);
-        assert!(!session.uuid.is_nil(), "every new session gets an identity");
-        assert_eq!(session.alias, None);
-        assert_eq!(session.last_heartbeat, None);
-        assert_eq!(session.session_id, None);
-        assert_eq!(session.pid, None);
-        assert_eq!(session.pid_started_at, None);
-        assert_eq!(session.cwd, "/repo");
-        assert_eq!(session.launch, LaunchOptions::default());
-        assert!(session.watcher.cursors.is_empty());
-        assert!(session.started_at.ends_with('Z'));
-        // The layout key mirrors the session's identity.
-        let key = session.key();
-        assert_eq!(key.uuid, session.uuid);
-        assert!(
-            key.dir_name()
-                .ends_with(&crate::util::short_uuid(&session.uuid))
-        );
-    }
+    fn store_round_trip() {
+        {
+            let fleet = tmp_fleet("pilotfish-session-");
+            let mut store = FleetSessions::new();
+            let mut session = OrchestratorSession::new("/repo");
+            session.session_id = Some("sess-abc12345".into());
+            session.pid = Some(4321);
+            session.model = Some("claude-fable-5".into());
+            session.claude_version = Some("2.1.251".into());
+            session.watcher.cursors.insert(
+                "auth-20260828141530".into(),
+                RunCursor {
+                    events_offset: 128,
+                    last_view: Some("blocked".into()),
+                },
+            );
+            session.launch = LaunchOptions {
+                model: Some("fable".into()),
+                budget_usd: Some(5.0),
+                permission_mode: Some("acceptEdits".into()),
+                remote_control: Some(String::new()),
+                fresh: Some(true),
+                auto_compact_turns: Some(40),
+            };
+            let session_uuid = session.uuid;
+            store.upsert(session);
+            // A second session shares the store; each keeps its own cursors.
+            let mut other = OrchestratorSession::new("/elsewhere");
+            other.watcher.cursors.insert(
+                "db-9f8e7d6".into(),
+                RunCursor {
+                    events_offset: 64,
+                    last_view: Some("running".into()),
+                },
+            );
+            let other_uuid = other.uuid;
+            store.upsert(other);
+            save(&fleet, &mut store).unwrap();
 
-    #[test]
-    fn save_and_load_round_trip_a_map_of_sessions_with_cursors_and_launch() {
-        let fleet = tmp_fleet("pilotfish-session-");
-        let mut store = FleetSessions::new();
-        let mut session = OrchestratorSession::new("/repo");
-        session.session_id = Some("sess-abc12345".into());
-        session.pid = Some(4321);
-        session.model = Some("claude-fable-5".into());
-        session.claude_version = Some("2.1.251".into());
-        session.watcher.cursors.insert(
-            "auth-20260828141530".into(),
-            RunCursor {
-                events_offset: 128,
-                last_view: Some("blocked".into()),
-            },
-        );
-        session.launch = LaunchOptions {
-            model: Some("fable".into()),
-            budget_usd: Some(5.0),
-            permission_mode: Some("acceptEdits".into()),
-            remote_control: Some(String::new()),
-            fresh: Some(true),
-            auto_compact_turns: Some(40),
-        };
-        let session_uuid = session.uuid;
-        store.upsert(session);
-        // A second session shares the store; each keeps its own cursors.
-        let mut other = OrchestratorSession::new("/elsewhere");
-        other.watcher.cursors.insert(
-            "db-9f8e7d6".into(),
-            RunCursor {
-                events_offset: 64,
-                last_view: Some("running".into()),
-            },
-        );
-        let other_uuid = other.uuid;
-        store.upsert(other);
-        save(&fleet, &mut store).unwrap();
-
-        let loaded = load(&fleet).unwrap();
-        assert_eq!(loaded.sessions.len(), 2);
-        let session = &loaded.sessions[&session_uuid];
-        assert_eq!(session.session_id.as_deref(), Some("sess-abc12345"));
-        assert_eq!(session.pid, Some(4321));
-        assert_eq!(session.model.as_deref(), Some("claude-fable-5"));
-        let (run_id, cursor) = session.watcher.cursors.iter().next().unwrap();
-        assert_eq!(run_id, "auth-20260828141530");
-        assert_eq!(cursor.events_offset, 128);
-        assert_eq!(cursor.last_view.as_deref(), Some("blocked"));
-        assert_eq!(session.launch.budget_usd, Some(5.0));
-        assert_eq!(
-            session.launch.permission_mode.as_deref(),
-            Some("acceptEdits")
-        );
-        assert_eq!(session.launch.remote_control.as_deref(), Some(""));
-        // The other session's cursors are its own.
-        assert_eq!(
-            loaded.sessions[&other_uuid]
-                .watcher
-                .cursors
-                .get("db-9f8e7d6")
-                .unwrap()
-                .events_offset,
-            64
-        );
-        // camelCase on disk (pretty-printed, like every atomic write),
-        // matching the JSON the fleet tooling speaks.
-        let raw = std::fs::read_to_string(session_path(&fleet)).unwrap();
-        assert!(raw.contains(r#""version": 2"#), "{raw}");
-        assert!(raw.contains(r#""sessionId": "sess-abc12345""#), "{raw}");
-        assert!(raw.contains(r#""eventsOffset": 128"#), "{raw}");
-        assert!(raw.contains(r#""lastUsedAt":"#), "{raw}");
-        assert!(raw.contains(&format!("\"{session_uuid}\"")), "{raw}");
-    }
-
-    #[test]
-    fn last_used_picks_the_newest_session_and_resolution_follows() {
-        let fleet = tmp_fleet("pilotfish-session-used-");
-        // A console touches last_used_at when it opens a session.
-        let mut store = FleetSessions::new();
-        let mut older = OrchestratorSession::new("/repo");
-        older.last_used_at = "2026-08-01T00:00:00.000Z".into();
-        let mut newer = OrchestratorSession::new("/repo");
-        newer.last_used_at = "2026-09-01T00:00:00.000Z".into();
-        let newer_uuid = newer.uuid;
-        store.upsert(older);
-        store.upsert(newer);
-        assert_eq!(store.last_used().unwrap().uuid, newer_uuid);
-        save(&fleet, &mut store).unwrap();
-        let resolved = resolve_session(&fleet).unwrap();
-        assert_eq!(resolved.uuid, newer_uuid);
-        // An empty store has no session to resolve.
-        let none_fleet = tmp_fleet("pilotfish-session-none-");
-        assert_eq!(resolve_session(&none_fleet), None);
-    }
-
-    #[test]
-    fn list_sessions_returns_every_row_most_recently_used_first() {
-        let fleet = tmp_fleet("pilotfish-session-list-");
-        let mut store = FleetSessions::new();
-        let mut older = OrchestratorSession::new("/repo");
-        older.alias = Some("older".into());
-        older.last_used_at = "2026-08-01T00:00:00.000Z".into();
-        let mut mid = OrchestratorSession::new("/repo");
-        mid.alias = Some("mid".into());
-        mid.last_used_at = "2026-08-15T00:00:00.000Z".into();
-        let mut newest = OrchestratorSession::new("/repo");
-        newest.alias = Some("newest".into());
-        newest.last_used_at = "2026-09-01T00:00:00.000Z".into();
-        let newest_uuid = newest.uuid;
-        store.upsert(older);
-        store.upsert(newest);
-        store.upsert(mid);
-        save(&fleet, &mut store).unwrap();
-
-        let listed = list_sessions(&fleet);
-        let aliases: Vec<Option<String>> = listed.iter().map(|s| s.alias.clone()).collect();
-        assert_eq!(
-            aliases,
-            vec![
-                Some("newest".into()),
-                Some("mid".into()),
-                Some("older".into())
-            ]
-        );
-        assert_eq!(listed[0].uuid, newest_uuid);
-        // A store that never existed lists nothing.
-        assert!(list_sessions(&tmp_fleet("pilotfish-session-list-none-")).is_empty());
-    }
-
-    #[test]
-    fn create_session_persists_a_fresh_row_and_makes_it_the_current_one() {
-        let fleet = tmp_fleet("pilotfish-session-create-");
-        let session = create_session(&fleet, Some("My Session")).unwrap();
-        assert_eq!(session.alias.as_deref(), Some("My Session"));
-        assert!(session.uuid != uuid::Uuid::nil());
-        assert_eq!(session.pid, None);
-        // The cwd defaults to the directory holding the fleet.
-        assert_eq!(
-            session.cwd,
-            fleet.parent().unwrap().to_string_lossy().into_owned()
-        );
-        // The row is on disk and is the one a reopened console resolves.
-        let resolved = resolve_session(&fleet).unwrap();
-        assert_eq!(resolved.uuid, session.uuid);
-        assert_eq!(resolved.alias.as_deref(), Some("My Session"));
-        // The layout key carries the new identity.
-        assert_eq!(session.key().uuid, session.uuid);
-        // Without an alias the row stays anonymous.
-        let anon = create_session(&fleet, None).unwrap();
-        assert_eq!(anon.alias, None);
-        assert_eq!(resolve_session(&fleet).unwrap().uuid, anon.uuid);
-    }
-
-    #[test]
-    fn session_by_key_resolves_uuid_then_alias_but_never_picks_an_ambiguous_one() {
-        let fleet = tmp_fleet("pilotfish-session-bykey-");
-        let mut store = FleetSessions::new();
-        let mut first = OrchestratorSession::new("/repo");
-        first.alias = Some("shared".into());
-        let first_uuid = first.uuid;
-        let mut second = OrchestratorSession::new("/repo");
-        second.alias = Some("shared".into());
-        let second_uuid = second.uuid;
-        let mut unique = OrchestratorSession::new("/repo");
-        unique.alias = Some("Backup DB".into());
-        let unique_uuid = unique.uuid;
-        store.upsert(first);
-        store.upsert(second);
-        store.upsert(unique);
-        save(&fleet, &mut store).unwrap();
-
-        // The exact uuid resolves regardless of alias collisions.
-        assert_eq!(
-            session_by_key(&fleet, &first_uuid.to_string())
-                .unwrap()
-                .uuid,
-            first_uuid
-        );
-        assert_eq!(
-            session_by_key(&fleet, &second_uuid.to_string())
-                .unwrap()
-                .uuid,
-            second_uuid
-        );
-        // A unique alias resolves, sanitized both sides.
-        assert_eq!(
-            session_by_key(&fleet, "backup db").unwrap().uuid,
-            unique_uuid
-        );
-        // Two live sessions share the alias: never a silent pick.
-        assert_eq!(session_by_key(&fleet, "shared"), None);
-        let err = resolve_session_by_key(&fleet, "shared")
-            .expect_err("the ambiguity is an error, not a guess")
-            .to_string();
-        assert!(
-            err.contains("several live sessions")
-                && err.contains(&first_uuid.to_string())
-                && err.contains(&second_uuid.to_string()),
-            "names the candidates: {err}"
-        );
-        // Nothing matches: missing is missing, and not an error anyone guesses through.
-        assert_eq!(session_by_key(&fleet, "nope"), None);
-        assert!(resolve_session_by_key(&fleet, "nope").is_err());
-    }
-
-    #[test]
-    fn touch_heartbeat_stamps_only_liveness_and_tolerates_a_vacant_row() {
-        let fleet = tmp_fleet("pilotfish-session-heartbeat-");
-        let session = create_session(&fleet, None).unwrap();
-        let used_before = session.last_used_at.clone();
-        touch_heartbeat(&fleet, session.uuid).unwrap();
-        let store = load(&fleet).unwrap();
-        let row = &store.sessions[&session.uuid];
-        assert!(row.last_heartbeat.is_some(), "the heartbeat was stamped");
-        assert_eq!(
-            row.last_used_at, used_before,
-            "a heartbeat never bumps recency: monitors do not own the session"
-        );
-        // An unknown (already removed) session is not an error.
-        assert!(touch_heartbeat(&fleet, uuid::Uuid::new_v4()).is_ok());
-        // A fleet with no store at all is not an error either.
-        assert!(
-            touch_heartbeat(
-                &tmp_fleet("pilotfish-session-hb-none-"),
-                uuid::Uuid::new_v4()
+            let loaded = load(&fleet).unwrap();
+            assert_eq!(loaded.sessions.len(), 2);
+            let session = &loaded.sessions[&session_uuid];
+            assert_eq!(session.session_id.as_deref(), Some("sess-abc12345"));
+            assert_eq!(session.pid, Some(4321));
+            assert_eq!(session.model.as_deref(), Some("claude-fable-5"));
+            let (run_id, cursor) = session.watcher.cursors.iter().next().unwrap();
+            assert_eq!(run_id, "auth-20260828141530");
+            assert_eq!(cursor.events_offset, 128);
+            assert_eq!(cursor.last_view.as_deref(), Some("blocked"));
+            assert_eq!(session.launch.budget_usd, Some(5.0));
+            assert_eq!(
+                session.launch.permission_mode.as_deref(),
+                Some("acceptEdits")
+            );
+            assert_eq!(session.launch.remote_control.as_deref(), Some(""));
+            // The other session's cursors are its own.
+            assert_eq!(
+                loaded.sessions[&other_uuid]
+                    .watcher
+                    .cursors
+                    .get("db-9f8e7d6")
+                    .unwrap()
+                    .events_offset,
+                64
+            );
+            // camelCase on disk (pretty-printed, like every atomic write),
+            // matching the JSON the fleet tooling speaks.
+            let raw = std::fs::read_to_string(session_path(&fleet)).unwrap();
+            assert!(raw.contains(r#""version": 2"#), "{raw}");
+            assert!(raw.contains(r#""sessionId": "sess-abc12345""#), "{raw}");
+            assert!(raw.contains(r#""eventsOffset": 128"#), "{raw}");
+            assert!(raw.contains(r#""lastUsedAt":"#), "{raw}");
+            assert!(raw.contains(&format!("\"{session_uuid}\"")), "{raw}");
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-missing-");
+            assert_eq!(load(&fleet), None);
+            assert_eq!(resolve_session(&fleet), None);
+            // A newer writer's version starts fresh.
+            std::fs::write(session_path(&fleet), r#"{"version":3,"sessions":{}}"#).unwrap();
+            assert_eq!(load(&fleet), None, "a newer writer starts fresh");
+            // The v1 single-session shape is foreign too: no migration, no
+            // guess at how it keys — it starts fresh.
+            std::fs::write(
+                session_path(&fleet),
+                r#"{"version":1,"cwd":"/repo","sessionId":"s"}"#,
             )
-            .is_ok()
-        );
-    }
+            .unwrap();
+            assert_eq!(load(&fleet), None);
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-extra-");
+            // a real session row the heartbeat will touch
+            let session = create_session(&fleet, Some("alpha")).unwrap();
+            // a console's prefs key and a newer writer's unknown key
+            let mut value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(session_path(&fleet)).unwrap())
+                    .unwrap();
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("console".into(), json!({"railMode": "wide"}));
+            value
+                .as_object_mut()
+                .unwrap()
+                .insert("somethingNew".into(), json!({ "deep": [1, 2] }));
+            std::fs::write(session_path(&fleet), value.to_string()).unwrap();
 
-    #[test]
-    fn monitor_health_derives_running_wedged_and_stopped() {
-        let now = crate::util::now_ms();
-        let stale =
-            crate::util::iso_at(time::OffsetDateTime::now_utc() - time::Duration::seconds(60));
-        let fresh = crate::util::now_iso();
+            // load sees them, without swallowing the modeled keys
+            let store = load(&fleet).unwrap();
+            assert_eq!(
+                store
+                    .extra
+                    .get("console")
+                    .and_then(|v| v.get("railMode"))
+                    .and_then(serde_json::Value::as_str),
+                Some("wide")
+            );
+            assert!(store.extra.contains_key("somethingNew"));
+            assert_eq!(store.sessions.len(), 1);
 
-        let mut running = OrchestratorSession::new("/repo");
-        running.pid = Some(42);
-        running.last_heartbeat = Some(fresh);
-        assert_eq!(
-            monitor_health(&running, |_| true, now),
-            MonitorHealth::Running
-        );
-
-        // The heartbeat stopped while the pid stayed alive: a wedged monitor.
-        let mut wedged = OrchestratorSession::new("/repo");
-        wedged.pid = Some(42);
-        wedged.last_heartbeat = Some(stale);
-        assert_eq!(
-            monitor_health(&wedged, |_| true, now),
-            MonitorHealth::Wedged
-        );
-
-        // No pid at all, and a pid whose process is gone: stopped both.
-        assert_eq!(
-            monitor_health(
-                &OrchestratorSession::new("/repo"),
-                crate::fleet::run::is_alive,
-                now
-            ),
-            MonitorHealth::Stopped
-        );
-        let mut dead = OrchestratorSession::new("/repo");
-        dead.pid = Some(42);
-        assert_eq!(
-            monitor_health(&dead, |_| false, now),
-            MonitorHealth::Stopped
-        );
-
-        // A live pid that has not ticked yet is not judged.
-        let mut unticked = OrchestratorSession::new("/repo");
-        unticked.pid = Some(42);
-        assert_eq!(
-            monitor_health(&unticked, |_| true, now),
-            MonitorHealth::Running
-        );
-    }
-
-    #[test]
-    fn a_missing_file_and_a_foreign_version_read_as_no_session() {
-        let fleet = tmp_fleet("pilotfish-session-missing-");
-        assert_eq!(load(&fleet), None);
-        assert_eq!(resolve_session(&fleet), None);
-        // A newer writer's version starts fresh.
-        std::fs::write(session_path(&fleet), r#"{"version":3,"sessions":{}}"#).unwrap();
-        assert_eq!(load(&fleet), None, "a newer writer starts fresh");
-        // The v1 single-session shape is foreign too: no migration, no
-        // guess at how it keys — it starts fresh.
-        std::fs::write(
-            session_path(&fleet),
-            r#"{"version":1,"cwd":"/repo","sessionId":"s"}"#,
-        )
-        .unwrap();
-        assert_eq!(load(&fleet), None);
-    }
-
-    #[test]
-    fn unknown_top_level_keys_round_trip_through_store_saves() {
-        let fleet = tmp_fleet("pilotfish-session-extra-");
-        // a real session row the heartbeat will touch
-        let session = create_session(&fleet, Some("alpha")).unwrap();
-        // a console's prefs key and a newer writer's unknown key
-        let mut value: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(session_path(&fleet)).unwrap()).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("console".into(), json!({"railMode": "wide"}));
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("somethingNew".into(), json!({ "deep": [1, 2] }));
-        std::fs::write(session_path(&fleet), value.to_string()).unwrap();
-
-        // load sees them, without swallowing the modeled keys
-        let store = load(&fleet).unwrap();
-        assert_eq!(
-            store
-                .extra
-                .get("console")
-                .and_then(|v| v.get("railMode"))
-                .and_then(serde_json::Value::as_str),
-            Some("wide")
-        );
-        assert!(store.extra.contains_key("somethingNew"));
-        assert_eq!(store.sessions.len(), 1);
-
-        // load → touch_heartbeat → save: the unknown keys come back intact
-        touch_heartbeat(&fleet, session.uuid).unwrap();
-        let raw = std::fs::read_to_string(session_path(&fleet)).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        assert_eq!(value["console"]["railMode"], "wide", "{raw}");
-        assert_eq!(value["somethingNew"]["deep"][0], 1, "{raw}");
-        // the modeled keys are still theirs, not captured by the flatten
-        assert_eq!(value["version"], SESSION_VERSION, "{raw}");
-        assert!(
-            value["sessions"][session.uuid.to_string()].is_object(),
-            "{raw}"
-        );
-        // and a later load still reads the heartbeat
-        let store = load(&fleet).unwrap();
-        assert!(
-            store.sessions[&session.uuid].last_heartbeat.is_some(),
-            "touch_heartbeat still lands in the row"
-        );
-    }
-
-    #[test]
-    fn unknown_and_missing_fields_are_tolerated() {
-        let fleet = tmp_fleet("pilotfish-session-tolerant-");
-        // A newer writer with extra fields, an older one without launch info.
-        std::fs::write(
-            session_path(&fleet),
-            json!({
-                "version": 2,
-                "sessions": {
-                    "9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c": {
-                        "cwd": "/repo",
-                        "someFutureField": {"deep": [1]},
+            // load → touch_heartbeat → save: the unknown keys come back intact
+            touch_heartbeat(&fleet, session.uuid).unwrap();
+            let raw = std::fs::read_to_string(session_path(&fleet)).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(value["console"]["railMode"], "wide", "{raw}");
+            assert_eq!(value["somethingNew"]["deep"][0], 1, "{raw}");
+            // the modeled keys are still theirs, not captured by the flatten
+            assert_eq!(value["version"], SESSION_VERSION, "{raw}");
+            assert!(
+                value["sessions"][session.uuid.to_string()].is_object(),
+                "{raw}"
+            );
+            // and a later load still reads the heartbeat
+            let store = load(&fleet).unwrap();
+            assert!(
+                store.sessions[&session.uuid].last_heartbeat.is_some(),
+                "touch_heartbeat still lands in the row"
+            );
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-tolerant-");
+            // A newer writer with extra fields, an older one without launch info.
+            std::fs::write(
+                session_path(&fleet),
+                json!({
+                    "version": 2,
+                    "sessions": {
+                        "9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c": {
+                            "cwd": "/repo",
+                            "someFutureField": {"deep": [1]},
+                        }
                     }
-                }
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let store = load(&fleet).unwrap();
-        let session = &store.sessions
-            [&uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap()];
-        assert_eq!(session.cwd, "/repo");
-        assert_eq!(session.session_id, None);
-        assert_eq!(session.launch, LaunchOptions::default());
-        assert!(session.watcher.cursors.is_empty());
-        // A session row without a uuid is a nil-uuid row, which is itself a
-        // parseable (if degenerate) identity — never a failure.
-        // A session row without a uuid is a nil-uuid row, which is itself a
-        // parseable (if degenerate) identity — never a failure.
-        assert!(session.uuid.is_nil(), "uuid was {:?}", session.uuid);
-        // Corrupt JSON is not a store either.
-        std::fs::write(session_path(&fleet), "{oops").unwrap();
-        assert_eq!(load(&fleet), None);
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let store = load(&fleet).unwrap();
+            let session = &store.sessions
+                [&uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap()];
+            assert_eq!(session.cwd, "/repo");
+            assert_eq!(session.session_id, None);
+            assert_eq!(session.launch, LaunchOptions::default());
+            assert!(session.watcher.cursors.is_empty());
+            // A session row without a uuid is a nil-uuid row, which is itself a
+            // parseable (if degenerate) identity — never a failure.
+            // A session row without a uuid is a nil-uuid row, which is itself a
+            // parseable (if degenerate) identity — never a failure.
+            assert!(session.uuid.is_nil(), "uuid was {:?}", session.uuid);
+            // Corrupt JSON is not a store either.
+            std::fs::write(session_path(&fleet), "{oops").unwrap();
+            assert_eq!(load(&fleet), None);
+        }
+    }
+
+    #[test]
+    fn session_lookup() {
+        {
+            let fleet = tmp_fleet("pilotfish-session-used-");
+            // A console touches last_used_at when it opens a session.
+            let mut store = FleetSessions::new();
+            let mut older = OrchestratorSession::new("/repo");
+            older.last_used_at = "2026-08-01T00:00:00.000Z".into();
+            let mut newer = OrchestratorSession::new("/repo");
+            newer.last_used_at = "2026-09-01T00:00:00.000Z".into();
+            let newer_uuid = newer.uuid;
+            store.upsert(older);
+            store.upsert(newer);
+            assert_eq!(store.last_used().unwrap().uuid, newer_uuid);
+            save(&fleet, &mut store).unwrap();
+            let resolved = resolve_session(&fleet).unwrap();
+            assert_eq!(resolved.uuid, newer_uuid);
+            // An empty store has no session to resolve.
+            let none_fleet = tmp_fleet("pilotfish-session-none-");
+            assert_eq!(resolve_session(&none_fleet), None);
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-list-");
+            let mut store = FleetSessions::new();
+            let mut older = OrchestratorSession::new("/repo");
+            older.alias = Some("older".into());
+            older.last_used_at = "2026-08-01T00:00:00.000Z".into();
+            let mut mid = OrchestratorSession::new("/repo");
+            mid.alias = Some("mid".into());
+            mid.last_used_at = "2026-08-15T00:00:00.000Z".into();
+            let mut newest = OrchestratorSession::new("/repo");
+            newest.alias = Some("newest".into());
+            newest.last_used_at = "2026-09-01T00:00:00.000Z".into();
+            let newest_uuid = newest.uuid;
+            store.upsert(older);
+            store.upsert(newest);
+            store.upsert(mid);
+            save(&fleet, &mut store).unwrap();
+
+            let listed = list_sessions(&fleet);
+            let aliases: Vec<Option<String>> = listed.iter().map(|s| s.alias.clone()).collect();
+            assert_eq!(
+                aliases,
+                vec![
+                    Some("newest".into()),
+                    Some("mid".into()),
+                    Some("older".into())
+                ]
+            );
+            assert_eq!(listed[0].uuid, newest_uuid);
+            // A store that never existed lists nothing.
+            assert!(list_sessions(&tmp_fleet("pilotfish-session-list-none-")).is_empty());
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-create-");
+            let session = create_session(&fleet, Some("My Session")).unwrap();
+            assert_eq!(session.alias.as_deref(), Some("My Session"));
+            assert!(session.uuid != uuid::Uuid::nil());
+            assert_eq!(session.pid, None);
+            // The cwd defaults to the directory holding the fleet.
+            assert_eq!(
+                session.cwd,
+                fleet.parent().unwrap().to_string_lossy().into_owned()
+            );
+            // The row is on disk and is the one a reopened console resolves.
+            let resolved = resolve_session(&fleet).unwrap();
+            assert_eq!(resolved.uuid, session.uuid);
+            assert_eq!(resolved.alias.as_deref(), Some("My Session"));
+            // The layout key carries the new identity.
+            assert_eq!(session.key().uuid, session.uuid);
+            // Without an alias the row stays anonymous.
+            let anon = create_session(&fleet, None).unwrap();
+            assert_eq!(anon.alias, None);
+            assert_eq!(resolve_session(&fleet).unwrap().uuid, anon.uuid);
+        }
+        {
+            let fleet = tmp_fleet("pilotfish-session-bykey-");
+            let mut store = FleetSessions::new();
+            let mut first = OrchestratorSession::new("/repo");
+            first.alias = Some("shared".into());
+            let first_uuid = first.uuid;
+            let mut second = OrchestratorSession::new("/repo");
+            second.alias = Some("shared".into());
+            let second_uuid = second.uuid;
+            let mut unique = OrchestratorSession::new("/repo");
+            unique.alias = Some("Backup DB".into());
+            let unique_uuid = unique.uuid;
+            store.upsert(first);
+            store.upsert(second);
+            store.upsert(unique);
+            save(&fleet, &mut store).unwrap();
+
+            // The exact uuid resolves regardless of alias collisions.
+            assert_eq!(
+                session_by_key(&fleet, &first_uuid.to_string())
+                    .unwrap()
+                    .uuid,
+                first_uuid
+            );
+            assert_eq!(
+                session_by_key(&fleet, &second_uuid.to_string())
+                    .unwrap()
+                    .uuid,
+                second_uuid
+            );
+            // A unique alias resolves, sanitized both sides.
+            assert_eq!(
+                session_by_key(&fleet, "backup db").unwrap().uuid,
+                unique_uuid
+            );
+            // Two live sessions share the alias: never a silent pick.
+            assert_eq!(session_by_key(&fleet, "shared"), None);
+            let err = resolve_session_by_key(&fleet, "shared")
+                .expect_err("the ambiguity is an error, not a guess")
+                .to_string();
+            assert!(
+                err.contains("several live sessions")
+                    && err.contains(&first_uuid.to_string())
+                    && err.contains(&second_uuid.to_string()),
+                "names the candidates: {err}"
+            );
+            // Nothing matches: missing is missing, and not an error anyone guesses through.
+            assert_eq!(session_by_key(&fleet, "nope"), None);
+            assert!(resolve_session_by_key(&fleet, "nope").is_err());
+        }
+    }
+
+    #[test]
+    fn heartbeat_health() {
+        {
+            let fleet = tmp_fleet("pilotfish-session-heartbeat-");
+            let session = create_session(&fleet, None).unwrap();
+            let used_before = session.last_used_at.clone();
+            touch_heartbeat(&fleet, session.uuid).unwrap();
+            let store = load(&fleet).unwrap();
+            let row = &store.sessions[&session.uuid];
+            assert!(row.last_heartbeat.is_some(), "the heartbeat was stamped");
+            assert_eq!(
+                row.last_used_at, used_before,
+                "a heartbeat never bumps recency: monitors do not own the session"
+            );
+            // An unknown (already removed) session is not an error.
+            assert!(touch_heartbeat(&fleet, uuid::Uuid::new_v4()).is_ok());
+            // A fleet with no store at all is not an error either.
+            assert!(
+                touch_heartbeat(
+                    &tmp_fleet("pilotfish-session-hb-none-"),
+                    uuid::Uuid::new_v4()
+                )
+                .is_ok()
+            );
+        }
+        {
+            let now = crate::util::now_ms();
+            let stale =
+                crate::util::iso_at(time::OffsetDateTime::now_utc() - time::Duration::seconds(60));
+            let fresh = crate::util::now_iso();
+
+            let mut running = OrchestratorSession::new("/repo");
+            running.pid = Some(42);
+            running.last_heartbeat = Some(fresh);
+            assert_eq!(
+                monitor_health(&running, |_| true, now),
+                MonitorHealth::Running
+            );
+
+            // The heartbeat stopped while the pid stayed alive: a wedged monitor.
+            let mut wedged = OrchestratorSession::new("/repo");
+            wedged.pid = Some(42);
+            wedged.last_heartbeat = Some(stale);
+            assert_eq!(
+                monitor_health(&wedged, |_| true, now),
+                MonitorHealth::Wedged
+            );
+
+            // No pid at all, and a pid whose process is gone: stopped both.
+            assert_eq!(
+                monitor_health(
+                    &OrchestratorSession::new("/repo"),
+                    crate::fleet::run::is_alive,
+                    now
+                ),
+                MonitorHealth::Stopped
+            );
+            let mut dead = OrchestratorSession::new("/repo");
+            dead.pid = Some(42);
+            assert_eq!(
+                monitor_health(&dead, |_| false, now),
+                MonitorHealth::Stopped
+            );
+
+            // A live pid that has not ticked yet is not judged.
+            let mut unticked = OrchestratorSession::new("/repo");
+            unticked.pid = Some(42);
+            assert_eq!(
+                monitor_health(&unticked, |_| true, now),
+                MonitorHealth::Running
+            );
+        }
     }
 }

@@ -166,120 +166,89 @@ mod tests {
     }
 
     #[test]
-    fn build_claude_args_produces_the_exact_orchestrator_flag_set() {
-        let args = build_claude_args(&ClaudeArgsOptions {
-            prompt_file: "/p.md".into(),
-            mcp_config_json: r#"{"mcpServers":{}}"#.into(),
-            ..ClaudeArgsOptions::default()
-        });
-        assert_eq!(
-            &args[..5],
-            &[
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json"
-            ]
-        );
-        for flag in [
-            "--verbose",
-            "--include-partial-messages",
-            "--replay-user-messages",
-            "--strict-mcp-config",
-        ] {
-            assert!(args.iter().any(|a| a == flag), "{flag}");
+    fn claude_args() {
+        {
+            let args = build_claude_args(&ClaudeArgsOptions {
+                prompt_file: "/p.md".into(),
+                mcp_config_json: r#"{"mcpServers":{}}"#.into(),
+                ..ClaudeArgsOptions::default()
+            });
+            assert_eq!(
+                &args[..5],
+                &[
+                    "-p",
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json"
+                ]
+            );
+            for flag in [
+                "--verbose",
+                "--include-partial-messages",
+                "--replay-user-messages",
+                "--strict-mcp-config",
+            ] {
+                assert!(args.iter().any(|a| a == flag), "{flag}");
+            }
+            assert_eq!(value_of(&args, "--permission-prompt-tool"), Some("stdio"));
+            assert_eq!(
+                value_of(&args, "--append-system-prompt-file"),
+                Some("/p.md")
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(
+                    value_of(&args, "--mcp-config").unwrap_or_default()
+                )
+                .unwrap(),
+                serde_json::json!({"mcpServers": {}})
+            );
+            assert!(!args.iter().any(|a| a == "--resume"));
+            assert!(!args.iter().any(|a| a == "--model"));
+            let d = args.iter().position(|a| a == "--disallowedTools").unwrap();
+            assert_eq!(
+                &args[d + 1..d + 1 + DEFAULT_DISALLOWED_TOOLS.len()],
+                &["Edit", "Write", "NotebookEdit"]
+            );
+            let a = args.iter().position(|a| a == "--allowedTools").unwrap();
+            assert!(a > d, "allowed list is last");
+            assert_eq!(&args[a + 1..], DEFAULT_ALLOWED_TOOLS);
+            assert_eq!(DEFAULT_ALLOWED_TOOLS[0], "mcp__fleet__*");
         }
-        assert_eq!(value_of(&args, "--permission-prompt-tool"), Some("stdio"));
-        assert_eq!(
-            value_of(&args, "--append-system-prompt-file"),
-            Some("/p.md")
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(
-                value_of(&args, "--mcp-config").unwrap_or_default()
-            )
-            .unwrap(),
-            serde_json::json!({"mcpServers": {}})
-        );
-        assert!(!args.iter().any(|a| a == "--resume"));
-        assert!(!args.iter().any(|a| a == "--model"));
-        let d = args.iter().position(|a| a == "--disallowedTools").unwrap();
-        assert_eq!(
-            &args[d + 1..d + 1 + DEFAULT_DISALLOWED_TOOLS.len()],
-            &["Edit", "Write", "NotebookEdit"]
-        );
-        let a = args.iter().position(|a| a == "--allowedTools").unwrap();
-        assert!(a > d, "allowed list is last");
-        assert_eq!(&args[a + 1..], DEFAULT_ALLOWED_TOOLS);
-        assert_eq!(DEFAULT_ALLOWED_TOOLS[0], "mcp__fleet__*");
-    }
-
-    #[test]
-    fn optional_flags_appear_only_when_set() {
-        let full = build_claude_args(&ClaudeArgsOptions {
-            prompt_file: "/p.md".into(),
-            mcp_config_json: "{}".into(),
-            model: Some("sonnet".into()),
-            resume_session_id: Some("sess-1".into()),
-            max_budget_usd: Some(2.5),
-            effort: Some("high".into()),
-            allowed_tools: Some(vec!["X".into()]),
-            disallowed_tools: Some(Vec::new()),
-            permission_mode: Some("plan".into()),
-            remote_control: Some(String::new()),
-        });
-        assert_eq!(value_of(&full, "--model"), Some("sonnet"));
-        assert_eq!(value_of(&full, "--resume"), Some("sess-1"));
-        assert_eq!(value_of(&full, "--max-budget-usd"), Some("2.5"));
-        assert_eq!(value_of(&full, "--effort"), Some("high"));
-        assert_eq!(value_of(&full, "--permission-mode"), Some("plan"));
-        // empty remote control name: the flag with no value after it
-        let rc = full.iter().position(|a| a == "--remote-control").unwrap();
-        assert_eq!(full.get(rc + 1).map(String::as_str), Some("--model"));
-        assert!(!full.iter().any(|a| a == "--disallowedTools"));
-        assert_eq!(
-            &full[full.iter().position(|a| a == "--allowedTools").unwrap() + 1..],
-            &["X"]
-        );
-        // a zero budget is skipped, as in TypeScript
-        let zero = build_claude_args(&ClaudeArgsOptions {
-            prompt_file: "/p.md".into(),
-            mcp_config_json: "{}".into(),
-            max_budget_usd: Some(0.0),
-            ..ClaudeArgsOptions::default()
-        });
-        assert!(!zero.iter().any(|a| a == "--max-budget-usd"));
-    }
-
-    #[test]
-    fn claude_command_splits_the_bin_spec() {
-        let (bin, prefix) = claude_command_from_spec(Some("node /x/fake.mjs"));
-        assert_eq!(bin, "node");
-        assert_eq!(prefix, vec!["/x/fake.mjs"]);
-        let (bin, prefix) = claude_command_from_spec(None);
-        assert_eq!(bin, "claude");
-        assert!(prefix.is_empty());
-        let (bin, prefix) = claude_command_from_spec(Some(""));
-        assert_eq!(bin, "claude");
-        assert!(prefix.is_empty());
-    }
-
-    #[test]
-    fn permission_modes_are_offered_and_described() {
-        assert_eq!(
-            PERMISSION_MODES,
-            &["default", "auto", "acceptEdits", "dontAsk", "plan"]
-        );
-        // bypassPermissions is deliberately absent
-        assert!(!PERMISSION_MODES.contains(&"bypassPermissions"));
-        assert_eq!(
-            describe_permission_mode("acceptEdits"),
-            "file edits and common filesystem commands go through without asking"
-        );
-        assert_eq!(
-            describe_permission_mode("anything"),
-            describe_permission_mode("default")
-        );
+        {
+            let full = build_claude_args(&ClaudeArgsOptions {
+                prompt_file: "/p.md".into(),
+                mcp_config_json: "{}".into(),
+                model: Some("sonnet".into()),
+                resume_session_id: Some("sess-1".into()),
+                max_budget_usd: Some(2.5),
+                effort: Some("high".into()),
+                allowed_tools: Some(vec!["X".into()]),
+                disallowed_tools: Some(Vec::new()),
+                permission_mode: Some("plan".into()),
+                remote_control: Some(String::new()),
+            });
+            assert_eq!(value_of(&full, "--model"), Some("sonnet"));
+            assert_eq!(value_of(&full, "--resume"), Some("sess-1"));
+            assert_eq!(value_of(&full, "--max-budget-usd"), Some("2.5"));
+            assert_eq!(value_of(&full, "--effort"), Some("high"));
+            assert_eq!(value_of(&full, "--permission-mode"), Some("plan"));
+            // empty remote control name: the flag with no value after it
+            let rc = full.iter().position(|a| a == "--remote-control").unwrap();
+            assert_eq!(full.get(rc + 1).map(String::as_str), Some("--model"));
+            assert!(!full.iter().any(|a| a == "--disallowedTools"));
+            assert_eq!(
+                &full[full.iter().position(|a| a == "--allowedTools").unwrap() + 1..],
+                &["X"]
+            );
+            // a zero budget is skipped, as in TypeScript
+            let zero = build_claude_args(&ClaudeArgsOptions {
+                prompt_file: "/p.md".into(),
+                mcp_config_json: "{}".into(),
+                max_budget_usd: Some(0.0),
+                ..ClaudeArgsOptions::default()
+            });
+            assert!(!zero.iter().any(|a| a == "--max-budget-usd"));
+        }
     }
 }

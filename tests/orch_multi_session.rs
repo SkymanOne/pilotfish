@@ -262,7 +262,7 @@ fn watcher_for(fleet_dir: &Path, owner: uuid::Uuid) -> FleetWatcher {
 }
 
 #[tokio::test]
-async fn two_live_sessions_are_isolated_and_one_dir_removal_stops_only_its_own_monitor() {
+async fn sessions_isolated() {
     if !node_available() {
         eprintln!("skipping: node is not available");
         return;

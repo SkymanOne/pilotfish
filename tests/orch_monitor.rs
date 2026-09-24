@@ -200,309 +200,294 @@ fn argv_of(cwd: &Path) -> Vec<String> {
 // Tests
 
 #[tokio::test]
-async fn the_monitor_owns_the_claude_session_and_consoles_come_and_go() {
+async fn session_ownership() {
     if !node_available() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let fixture = Fixture::new("sess-detach01");
-    let first = fixture.client(true);
-    let mut rx = first.subscribe();
-    let started = first.start().unwrap();
-    assert!(!started, "there was nothing to attach to yet");
+    {
+        let fixture = Fixture::new("sess-detach01");
+        let first = fixture.client(true);
+        let mut rx = first.subscribe();
+        let started = first.start().unwrap();
+        assert!(!started, "there was nothing to attach to yet");
 
-    // claude only announces its session on the first turn, so wait for the
-    // monitor itself, then send
-    wait(WAIT, || first.running()).await;
-    first.send("hello there").await.unwrap();
-    wait_event(
-        &mut rx,
-        WAIT,
-        |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
-    )
-    .await;
+        // claude only announces its session on the first turn, so wait for the
+        // monitor itself, then send
+        wait(WAIT, || first.running()).await;
+        first.send("hello there").await.unwrap();
+        wait_event(
+            &mut rx,
+            WAIT,
+            |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
+        )
+        .await;
 
-    let state = state_of(&fixture.fleet_dir).unwrap();
-    assert_eq!(state.session_id.as_deref(), Some("sess-detach01"));
-    assert_eq!(state.model.as_deref(), Some("fake-model"));
-    let monitor = state.pid.expect("a monitor pid");
-    assert!(is_alive(Some(monitor)), "a monitor is running");
-    let caps = caps_of(&fixture.fleet_dir);
-    let names: Vec<&str> = caps.commands.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["model", "usage", "research"]);
-    assert!(!caps.fetched_at.is_empty(), "the answer is stamped");
-    wait(Duration::from_secs(5), || {
-        transcript_of(&fixture.fleet_dir)
-            .iter()
-            .any(|record| record.kind == "stream_text")
-    })
-    .await;
-
-    // this is what /quit does: the console goes away, the orchestrator does not
-    first.stop();
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        is_alive(Some(monitor)),
-        "the orchestrator survived the console"
-    );
-
-    // reopening picks the same session back up: the same monitor, not a new one
-    let second = fixture.client(false);
-    let reattached = second.start().unwrap();
-    assert!(reattached, "it attached rather than starting another one");
-    wait(WAIT, || monitor_pid(&fixture.fleet_dir) == Some(monitor)).await;
-
-    // and it still works
-    second.send("again").await.unwrap();
-    wait(WAIT, || count_results(&fixture.fleet_dir) >= 2).await;
-    second.stop();
-    stop_monitor(&fixture.fleet_dir).await;
-}
-
-#[tokio::test]
-async fn a_permission_request_waits_until_some_console_answers_it() {
-    if !node_available() {
-        eprintln!("skipping: node is not available");
-        return;
-    }
-    let fixture = Fixture::new("sess-perm01");
-    let first = fixture.client(true);
-    let mut rx = first.subscribe();
-    first.start().unwrap();
-    wait(WAIT, || first.running()).await;
-
-    first.send("perm:touch a.txt").await.unwrap();
-    let asked = wait_event(&mut rx, WAIT, |event| {
-        matches!(event, ClientEvent::PermissionRequest(_))
-    })
-    .await;
-    let ClientEvent::PermissionRequest(pending) = asked else {
-        unreachable!()
-    };
-    assert_eq!(pending.request.tool_name, "Bash");
-    wait(Duration::from_secs(5), || {
-        state_of(&fixture.fleet_dir).is_some_and(|state| state.pending_requests.len() == 1)
-    })
-    .await;
-    let request_id = pending.request_id.clone();
-
-    // a console that dies mid-question leaves the request for the next one
-    first.stop();
-    let next = fixture.client(false);
-    let mut rx2 = next.subscribe();
-    next.start().unwrap();
-    let again = wait_event(&mut rx2, WAIT, |event| {
-        matches!(event, ClientEvent::PermissionRequest(req) if req.request_id == request_id)
-    })
-    .await;
-    let ClientEvent::PermissionRequest(again) = again else {
-        unreachable!()
-    };
-    assert_eq!(again.request_id, request_id, "the same question, re-asked");
-
-    next.allow(&again.request_id, None).await.unwrap();
-    wait(WAIT, || {
-        transcript_of(&fixture.fleet_dir)
-            .iter()
-            .any(|record| record.kind == "result")
-    })
-    .await;
-    wait(Duration::from_secs(5), || {
-        state_of(&fixture.fleet_dir).is_some_and(|state| state.pending_requests.is_empty())
-    })
-    .await;
-    next.stop();
-    stop_monitor(&fixture.fleet_dir).await;
-}
-
-#[tokio::test]
-async fn a_restarted_monitor_resumes_the_session_and_fresh_starts_over() {
-    if !node_available() {
-        eprintln!("skipping: node is not available");
-        return;
-    }
-    let fixture = Fixture::new("sess-restore1");
-    let first = fixture.client(true);
-    first.start().unwrap();
-    wait(WAIT, || first.running()).await;
-    first.send("remember this").await.unwrap();
-    wait(WAIT, || {
-        transcript_of(&fixture.fleet_dir)
-            .iter()
-            .any(|record| record.kind == "result")
-    })
-    .await;
-    first.stop();
-
-    // the monitor dies (a reboot, a kill): the console must still come back
-    // to the same conversation
-    stop_monitor(&fixture.fleet_dir).await;
-
-    let second = fixture.client(false);
-    assert!(
-        !second.start().unwrap(),
-        "there was nothing alive to attach to"
-    );
-    wait(WAIT, || second.running()).await;
-    // the transcript says where the seam is, and claude resumes the session
-    wait(Duration::from_secs(10), || {
-        transcript_of(&fixture.fleet_dir).iter().any(|record| {
-            record.kind == "notice"
-                && record
-                    .body
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| t.contains("resumed the orchestrator session"))
+        let state = state_of(&fixture.fleet_dir).unwrap();
+        assert_eq!(state.session_id.as_deref(), Some("sess-detach01"));
+        assert_eq!(state.model.as_deref(), Some("fake-model"));
+        let monitor = state.pid.expect("a monitor pid");
+        assert!(is_alive(Some(monitor)), "a monitor is running");
+        let caps = caps_of(&fixture.fleet_dir);
+        let names: Vec<&str> = caps.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["model", "usage", "research"]);
+        assert!(!caps.fetched_at.is_empty(), "the answer is stamped");
+        wait(Duration::from_secs(5), || {
+            transcript_of(&fixture.fleet_dir)
+                .iter()
+                .any(|record| record.kind == "stream_text")
         })
-    })
-    .await;
-    wait(WAIT, || {
-        std::path::Path::new(&fixture.cwd.join("argv.json")).is_file()
-            && argv_of(&fixture.cwd).contains(&"--resume".to_string())
-    })
-    .await;
-    let argv = argv_of(&fixture.cwd);
-    let resume_at = argv.iter().position(|a| a == "--resume").expect("--resume");
-    assert_eq!(argv[resume_at + 1], "sess-restore1");
-    second.stop();
-    stop_monitor(&fixture.fleet_dir).await;
+        .await;
 
-    // --fresh is the way to start over: no --resume, empty transcript
-    let third = fixture.client(true);
-    let mut rx3 = third.subscribe();
-    third.start().unwrap();
-    wait(WAIT, || third.running()).await;
-    wait(Duration::from_secs(10), || {
-        transcript_of(&fixture.fleet_dir)
-            .iter()
-            .any(|record| record.kind == "notice")
-    })
-    .await;
-    wait(Duration::from_secs(5), || rx3.try_recv().is_ok()).await;
-    assert!(
-        !transcript_of(&fixture.fleet_dir)
-            .iter()
-            .any(|record| record.kind == "notice"
-                && record
-                    .body
-                    .get("text")
-                    .and_then(|t| t.as_str())
-                    .is_some_and(|t| t.contains("resumed"))),
-        "a fresh session does not resume"
-    );
-    wait(Duration::from_secs(10), || {
-        std::path::Path::new(&fixture.cwd.join("argv.json")).is_file()
-            && !argv_of(&fixture.cwd).contains(&"--resume".to_string())
-    })
-    .await;
-    third.stop();
-    stop_monitor(&fixture.fleet_dir).await;
+        // this is what /quit does: the console goes away, the orchestrator does not
+        first.stop();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            is_alive(Some(monitor)),
+            "the orchestrator survived the console"
+        );
+
+        // reopening picks the same session back up: the same monitor, not a new one
+        let second = fixture.client(false);
+        let reattached = second.start().unwrap();
+        assert!(reattached, "it attached rather than starting another one");
+        wait(WAIT, || monitor_pid(&fixture.fleet_dir) == Some(monitor)).await;
+
+        // and it still works
+        second.send("again").await.unwrap();
+        wait(WAIT, || count_results(&fixture.fleet_dir) >= 2).await;
+        second.stop();
+        stop_monitor(&fixture.fleet_dir).await;
+    }
+    {
+        let fixture = Fixture::new("sess-restore1");
+        let first = fixture.client(true);
+        first.start().unwrap();
+        wait(WAIT, || first.running()).await;
+        first.send("remember this").await.unwrap();
+        wait(WAIT, || {
+            transcript_of(&fixture.fleet_dir)
+                .iter()
+                .any(|record| record.kind == "result")
+        })
+        .await;
+        first.stop();
+
+        // the monitor dies (a reboot, a kill): the console must still come back
+        // to the same conversation
+        stop_monitor(&fixture.fleet_dir).await;
+
+        let second = fixture.client(false);
+        assert!(
+            !second.start().unwrap(),
+            "there was nothing alive to attach to"
+        );
+        wait(WAIT, || second.running()).await;
+        // the transcript says where the seam is, and claude resumes the session
+        wait(Duration::from_secs(10), || {
+            transcript_of(&fixture.fleet_dir).iter().any(|record| {
+                record.kind == "notice"
+                    && record
+                        .body
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t.contains("resumed the orchestrator session"))
+            })
+        })
+        .await;
+        wait(WAIT, || {
+            std::path::Path::new(&fixture.cwd.join("argv.json")).is_file()
+                && argv_of(&fixture.cwd).contains(&"--resume".to_string())
+        })
+        .await;
+        let argv = argv_of(&fixture.cwd);
+        let resume_at = argv.iter().position(|a| a == "--resume").expect("--resume");
+        assert_eq!(argv[resume_at + 1], "sess-restore1");
+        second.stop();
+        stop_monitor(&fixture.fleet_dir).await;
+
+        // --fresh is the way to start over: no --resume, empty transcript
+        let third = fixture.client(true);
+        let mut rx3 = third.subscribe();
+        third.start().unwrap();
+        wait(WAIT, || third.running()).await;
+        wait(Duration::from_secs(10), || {
+            transcript_of(&fixture.fleet_dir)
+                .iter()
+                .any(|record| record.kind == "notice")
+        })
+        .await;
+        wait(Duration::from_secs(5), || rx3.try_recv().is_ok()).await;
+        assert!(
+            !transcript_of(&fixture.fleet_dir)
+                .iter()
+                .any(|record| record.kind == "notice"
+                    && record
+                        .body
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| t.contains("resumed"))),
+            "a fresh session does not resume"
+        );
+        wait(Duration::from_secs(10), || {
+            std::path::Path::new(&fixture.cwd.join("argv.json")).is_file()
+                && !argv_of(&fixture.cwd).contains(&"--resume".to_string())
+        })
+        .await;
+        third.stop();
+        stop_monitor(&fixture.fleet_dir).await;
+    }
 }
 
 #[tokio::test]
-async fn the_model_command_switches_the_session_and_shutdown_ends_the_monitor() {
+async fn console_commands() {
     if !node_available() {
         eprintln!("skipping: node is not available");
         return;
     }
-    let fixture = Fixture::new("sess-model01");
-    let client = fixture.client(true);
-    client.start().unwrap();
-    wait(WAIT, || client.running()).await;
-    client.send("hello").await.unwrap();
-    wait(WAIT, || count_results(&fixture.fleet_dir) >= 1).await;
-    let before = state_of(&fixture.fleet_dir).unwrap();
-    assert_eq!(before.model.as_deref(), Some("fake-model"));
+    {
+        let fixture = Fixture::new("sess-perm01");
+        let first = fixture.client(true);
+        let mut rx = first.subscribe();
+        first.start().unwrap();
+        wait(WAIT, || first.running()).await;
 
-    // a live model switch: claude's receipt lands in the state
-    client.set_model("fable").await.unwrap();
-    wait(Duration::from_secs(10), || {
-        state_of(&fixture.fleet_dir).is_some_and(|state| state.model.as_deref() == Some("fable"))
-    })
-    .await;
+        first.send("perm:touch a.txt").await.unwrap();
+        let asked = wait_event(&mut rx, WAIT, |event| {
+            matches!(event, ClientEvent::PermissionRequest(_))
+        })
+        .await;
+        let ClientEvent::PermissionRequest(pending) = asked else {
+            unreachable!()
+        };
+        assert_eq!(pending.request.tool_name, "Bash");
+        wait(Duration::from_secs(5), || {
+            state_of(&fixture.fleet_dir).is_some_and(|state| state.pending_requests.len() == 1)
+        })
+        .await;
+        let request_id = pending.request_id.clone();
 
-    // shutdown ends the orchestrator for good, and the state records it
-    let pid = monitor_pid(&fixture.fleet_dir).unwrap();
-    client.shutdown().await.unwrap();
-    wait(WAIT, || !is_alive(Some(pid))).await;
-    let state = state_of(&fixture.fleet_dir).unwrap();
-    assert!(state.exited.is_some(), "the state records that it is gone");
-    assert_eq!(state.pid, None);
-    assert!(
-        !client.running(),
-        "the console no longer has a live session"
-    );
-    client.stop();
+        // a console that dies mid-question leaves the request for the next one
+        first.stop();
+        let next = fixture.client(false);
+        let mut rx2 = next.subscribe();
+        next.start().unwrap();
+        let again = wait_event(&mut rx2, WAIT, |event| {
+            matches!(event, ClientEvent::PermissionRequest(req) if req.request_id == request_id)
+        })
+        .await;
+        let ClientEvent::PermissionRequest(again) = again else {
+            unreachable!()
+        };
+        assert_eq!(again.request_id, request_id, "the same question, re-asked");
 
-    // the next console starts a new one rather than attaching to a corpse
-    let after = fixture.client(false);
-    assert!(
-        !after.start().unwrap(),
-        "a new console starts its own session"
-    );
-    wait(WAIT, || after.running()).await;
-    after.stop();
-    stop_monitor(&fixture.fleet_dir).await;
-}
-
-/// Capabilities are asked for, not snapshotted: a skill installed after the
-/// handshake shows up on the next refresh, and `state.json` never carries
-/// the command list at all.
-#[tokio::test]
-async fn refreshing_capabilities_picks_up_a_command_installed_later() {
-    if !node_available() {
-        eprintln!("skipping: node is not available");
-        return;
+        next.allow(&again.request_id, None).await.unwrap();
+        wait(WAIT, || {
+            transcript_of(&fixture.fleet_dir)
+                .iter()
+                .any(|record| record.kind == "result")
+        })
+        .await;
+        wait(Duration::from_secs(5), || {
+            state_of(&fixture.fleet_dir).is_some_and(|state| state.pending_requests.is_empty())
+        })
+        .await;
+        next.stop();
+        stop_monitor(&fixture.fleet_dir).await;
     }
-    let fixture = Fixture::new("sess-caps01");
-    let client = fixture.client(true);
-    let mut rx = client.subscribe();
-    client.start().unwrap();
-    wait(WAIT, || client.running()).await;
-    client.send("hello").await.unwrap();
-    wait_event(
-        &mut rx,
-        WAIT,
-        |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
-    )
-    .await;
+    {
+        let fixture = Fixture::new("sess-model01");
+        let client = fixture.client(true);
+        client.start().unwrap();
+        wait(WAIT, || client.running()).await;
+        client.send("hello").await.unwrap();
+        wait(WAIT, || count_results(&fixture.fleet_dir) >= 1).await;
+        let before = state_of(&fixture.fleet_dir).unwrap();
+        assert_eq!(before.model.as_deref(), Some("fake-model"));
 
-    // The handshake's answer, and nothing about it in state.json.
-    wait(WAIT, || !caps_of(&fixture.fleet_dir).commands.is_empty()).await;
-    let first = caps_of(&fixture.fleet_dir);
-    let names: Vec<&str> = first.commands.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(names, vec!["model", "usage", "research"]);
-    assert!(
-        first.tools.iter().any(|t| t == "Bash"),
-        "init's tool list is kept, not dropped: {:?}",
-        first.tools
-    );
-    let raw = std::fs::read_to_string(
-        FleetPaths::new(&fixture.fleet_dir).orchestrator_state(&session_key(&fixture.fleet_dir)),
-    )
-    .unwrap();
-    assert!(
-        !raw.contains("\"commands\""),
-        "state.json no longer snapshots the command list: {raw}"
-    );
+        // a live model switch: claude's receipt lands in the state
+        client.set_model("fable").await.unwrap();
+        wait(Duration::from_secs(10), || {
+            state_of(&fixture.fleet_dir)
+                .is_some_and(|state| state.model.as_deref() == Some("fable"))
+        })
+        .await;
 
-    // Ask again; the fake answers the second initialize with one more command.
-    client.refresh_capabilities().await.unwrap();
-    wait(WAIT, || {
-        caps_of(&fixture.fleet_dir)
-            .commands
-            .iter()
-            .any(|c| c.name == "late-skill")
-    })
-    .await;
+        // shutdown ends the orchestrator for good, and the state records it
+        let pid = monitor_pid(&fixture.fleet_dir).unwrap();
+        client.shutdown().await.unwrap();
+        wait(WAIT, || !is_alive(Some(pid))).await;
+        let state = state_of(&fixture.fleet_dir).unwrap();
+        assert!(state.exited.is_some(), "the state records that it is gone");
+        assert_eq!(state.pid, None);
+        assert!(
+            !client.running(),
+            "the console no longer has a live session"
+        );
+        client.stop();
 
-    stop_and_wait(&client, &fixture.fleet_dir).await;
+        // the next console starts a new one rather than attaching to a corpse
+        let after = fixture.client(false);
+        assert!(
+            !after.start().unwrap(),
+            "a new console starts its own session"
+        );
+        wait(WAIT, || after.running()).await;
+        after.stop();
+        stop_monitor(&fixture.fleet_dir).await;
+    }
+    {
+        let fixture = Fixture::new("sess-caps01");
+        let client = fixture.client(true);
+        let mut rx = client.subscribe();
+        client.start().unwrap();
+        wait(WAIT, || client.running()).await;
+        client.send("hello").await.unwrap();
+        wait_event(
+            &mut rx,
+            WAIT,
+            |event| matches!(event, ClientEvent::Record(record) if record.kind == "result"),
+        )
+        .await;
+
+        // The handshake's answer, and nothing about it in state.json.
+        wait(WAIT, || !caps_of(&fixture.fleet_dir).commands.is_empty()).await;
+        let first = caps_of(&fixture.fleet_dir);
+        let names: Vec<&str> = first.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["model", "usage", "research"]);
+        assert!(
+            first.tools.iter().any(|t| t == "Bash"),
+            "init's tool list is kept, not dropped: {:?}",
+            first.tools
+        );
+        let raw = std::fs::read_to_string(
+            FleetPaths::new(&fixture.fleet_dir)
+                .orchestrator_state(&session_key(&fixture.fleet_dir)),
+        )
+        .unwrap();
+        assert!(
+            !raw.contains("\"commands\""),
+            "state.json no longer snapshots the command list: {raw}"
+        );
+
+        // Ask again; the fake answers the second initialize with one more command.
+        client.refresh_capabilities().await.unwrap();
+        wait(WAIT, || {
+            caps_of(&fixture.fleet_dir)
+                .commands
+                .iter()
+                .any(|c| c.name == "late-skill")
+        })
+        .await;
+
+        stop_and_wait(&client, &fixture.fleet_dir).await;
+    }
 }
 
 /// A long session keeps itself small: the monitor compacts claude's context
 /// once the turn threshold is crossed, and caps the transcript file.
 #[tokio::test]
-async fn a_session_past_its_turn_threshold_compacts_itself() {
+async fn auto_compacts() {
     if !node_available() {
         eprintln!("skipping: node is not available");
         return;

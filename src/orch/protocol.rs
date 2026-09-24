@@ -620,287 +620,276 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn builders_produce_the_exact_stdin_shapes() {
-        assert_eq!(
-            user_message("hi"),
-            json!({"type":"user","message":{"role":"user","content":"hi"},"parent_tool_use_id":null})
-        );
-        assert_eq!(
-            allow_response("r1", json!({"command":"ls"}), None),
-            json!({"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"behavior":"allow","updatedInput":{"command":"ls"}}}})
-        );
-        let perms = json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls *"}],"behavior":"allow","destination":"session"}]);
-        assert_eq!(
-            allow_response(
-                "r2",
-                json!({"command":"ls"}),
-                Some(perms.as_array().unwrap())
-            ),
-            json!({"type":"control_response","response":{"subtype":"success","request_id":"r2","response":{"behavior":"allow","updatedInput":{"command":"ls"},"updatedPermissions":perms}}})
-        );
-        assert_eq!(
-            allow_response("r3", json!({}), Some(&[])),
-            json!({"type":"control_response","response":{"subtype":"success","request_id":"r3","response":{"behavior":"allow","updatedInput":{}}}})
-        );
-        assert_eq!(
-            deny_response("r4", "no"),
-            json!({"type":"control_response","response":{"subtype":"success","request_id":"r4","response":{"behavior":"deny","message":"no"}}})
-        );
-        assert_eq!(
-            interrupt_request("i1", false),
-            json!({"type":"control_request","request_id":"i1","request":{"subtype":"interrupt"}})
-        );
-        assert_eq!(
-            interrupt_request("i2", true).get("request"),
-            Some(&json!({"subtype":"interrupt","cancel_queued":true}))
-        );
-        assert_eq!(
-            set_permission_mode_request("p1", "acceptEdits").get("request"),
-            Some(&json!({"subtype":"set_permission_mode","mode":"acceptEdits"}))
-        );
-        assert_eq!(
-            initialize_request("n1", json!({})).get("request"),
-            Some(&json!({"subtype":"initialize"}))
-        );
-        assert_eq!(
-            initialize_request("n2", json!({"appendSystemPrompt":"x"})).get("request"),
-            Some(&json!({"subtype":"initialize","appendSystemPrompt":"x"}))
-        );
-        assert_eq!(
-            set_model_request("m1", "fable").get("request"),
-            Some(&json!({"subtype":"set_model","model":"fable"}))
-        );
+    fn stdin_shapes() {
+        {
+            assert_eq!(
+                user_message("hi"),
+                json!({"type":"user","message":{"role":"user","content":"hi"},"parent_tool_use_id":null})
+            );
+            assert_eq!(
+                allow_response("r1", json!({"command":"ls"}), None),
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"r1","response":{"behavior":"allow","updatedInput":{"command":"ls"}}}})
+            );
+            let perms = json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"ls *"}],"behavior":"allow","destination":"session"}]);
+            assert_eq!(
+                allow_response(
+                    "r2",
+                    json!({"command":"ls"}),
+                    Some(perms.as_array().unwrap())
+                ),
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"r2","response":{"behavior":"allow","updatedInput":{"command":"ls"},"updatedPermissions":perms}}})
+            );
+            assert_eq!(
+                allow_response("r3", json!({}), Some(&[])),
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"r3","response":{"behavior":"allow","updatedInput":{}}}})
+            );
+            assert_eq!(
+                deny_response("r4", "no"),
+                json!({"type":"control_response","response":{"subtype":"success","request_id":"r4","response":{"behavior":"deny","message":"no"}}})
+            );
+            assert_eq!(
+                interrupt_request("i1", false),
+                json!({"type":"control_request","request_id":"i1","request":{"subtype":"interrupt"}})
+            );
+            assert_eq!(
+                interrupt_request("i2", true).get("request"),
+                Some(&json!({"subtype":"interrupt","cancel_queued":true}))
+            );
+            assert_eq!(
+                set_permission_mode_request("p1", "acceptEdits").get("request"),
+                Some(&json!({"subtype":"set_permission_mode","mode":"acceptEdits"}))
+            );
+            assert_eq!(
+                initialize_request("n1", json!({})).get("request"),
+                Some(&json!({"subtype":"initialize"}))
+            );
+            assert_eq!(
+                initialize_request("n2", json!({"appendSystemPrompt":"x"})).get("request"),
+                Some(&json!({"subtype":"initialize","appendSystemPrompt":"x"}))
+            );
+            assert_eq!(
+                set_model_request("m1", "fable").get("request"),
+                Some(&json!({"subtype":"set_model","model":"fable"}))
+            );
+        }
+        {
+            let input = json!({
+                "questions": [{"question":"Which style?","header":"Style","options":[{"label":"A","description":""},{"label":"B","description":""}],"multiSelect":false}],
+            });
+            let msg = ask_user_question_response("q1", input.clone(), json!({"Which style?":"B"}));
+            assert_eq!(msg["response"]["subtype"], "success");
+            assert_eq!(msg["response"]["response"]["behavior"], "allow");
+            assert_eq!(
+                msg["response"]["response"]["updatedInput"],
+                json!({"questions": input["questions"], "answers": {"Which style?": "B"}})
+            );
+        }
+        {
+            let line = serialize(&user_message("x"));
+            assert!(line.ends_with('\n'));
+            assert_eq!(line.find('\n'), Some(line.len() - 1));
+            assert_ne!(new_request_id(), new_request_id());
+            assert!(new_request_id().starts_with("req_"));
+        }
     }
 
     #[test]
-    fn ask_user_question_answers_echo_the_questions_and_add_answers_by_question_text() {
-        let input = json!({
-            "questions": [{"question":"Which style?","header":"Style","options":[{"label":"A","description":""},{"label":"B","description":""}],"multiSelect":false}],
-        });
-        let msg = ask_user_question_response("q1", input.clone(), json!({"Which style?":"B"}));
-        assert_eq!(msg["response"]["subtype"], "success");
-        assert_eq!(msg["response"]["response"]["behavior"], "allow");
-        assert_eq!(
-            msg["response"]["response"]["updatedInput"],
-            json!({"questions": input["questions"], "answers": {"Which style?": "B"}})
-        );
-    }
+    fn parse_claude_output() {
+        {
+            assert_eq!(parse_claude_line("not json"), None);
+            assert_eq!(parse_claude_line("[1,2]"), None);
+            assert_eq!(parse_claude_line(r#"{"foo":1}"#), None);
+            assert_eq!(
+                parse_claude_line(r#"{"type":"mystery","x":1}"#),
+                Some(json!({"type":"mystery","x":1}))
+            );
+            assert!(decode_message("not json").is_err());
+        }
+        {
+            let a = split_json_lines(
+                "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\r\n{\"type\":\"assis",
+                "",
+            );
+            assert_eq!(a.lines.len(), 1);
+            let msg = parse_claude_line(&a.lines[0]).unwrap();
+            assert!(is_system_init(&msg));
+            let b = split_json_lines(
+                "tant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"parent_tool_use_id\":null}\n",
+                &a.rest,
+            );
+            assert_eq!(b.lines.len(), 1);
+            assert!(is_assistant(&parse_claude_line(&b.lines[0]).unwrap()));
+        }
+        {
+            let init = parse_claude_line(
+                r#"{"type":"system","subtype":"init","session_id":"s","cwd":"/repo","model":"claude-fable-5",
+                    "tools":["Bash"],"mcp_servers":[{"name":"fleet","status":"connected"}],
+                    "capabilities":["interrupt_receipt_v1"],"permissionMode":"default",
+                    "claude_code_version":"2.1.251","uuid":"u","futureField":{"x":1}}"#,
+            )
+            .unwrap();
+            let view = try_system_init(&init).unwrap();
+            assert_eq!(view.session_id, "s");
+            assert_eq!(view.model.as_deref(), Some("claude-fable-5"));
+            assert_eq!(view.capabilities, vec!["interrupt_receipt_v1".to_string()]);
+            assert_eq!(view.mcp_servers.len(), 1);
+            assert_eq!(view.mcp_servers[0].name, "fleet");
 
-    #[test]
-    fn serialize_emits_one_json_line_and_request_ids_are_unique() {
-        let line = serialize(&user_message("x"));
-        assert!(line.ends_with('\n'));
-        assert_eq!(line.find('\n'), Some(line.len() - 1));
-        assert_ne!(new_request_id(), new_request_id());
-        assert!(new_request_id().starts_with("req_"));
-    }
+            let result = parse_claude_line(
+                r#"{"type":"result","subtype":"success","result":"done","is_error":false,"num_turns":2,
+                    "total_cost_usd":0.01,"duration_ms":900,"session_id":"s","stop_reason":null}"#,
+            )
+            .unwrap();
+            let view = try_result(&result).unwrap();
+            assert_eq!(view.subtype, "success");
+            assert_eq!(view.result.as_deref(), Some("done"));
+            assert_eq!(view.total_cost_usd, Some(0.01));
+            assert_eq!(view.num_turns, Some(2));
+            assert_eq!(view.stop_reason, None);
+        }
+        {
+            let req = parse_claude_line(
+                r#"{"type":"control_request","request_id":"abc","request":{"subtype":"can_use_tool",
+                    "tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1","title":"Run ls"}}"#,
+            )
+            .unwrap();
+            assert!(is_can_use_tool(&req));
+            let body = try_can_use_tool(&req).unwrap();
+            assert_eq!(body.tool_name, "Bash");
+            assert_eq!(body.input["command"], "ls");
+            assert_eq!(body.title.as_deref(), Some("Run ls"));
+            assert!(!is_ask_user_question(&body));
+            let as_ask = CanUseToolRequest {
+                tool_name: "AskUserQuestion".into(),
+                ..body
+            };
+            assert!(is_ask_user_question(&as_ask));
 
-    #[test]
-    fn parse_claude_line_is_tolerant() {
-        assert_eq!(parse_claude_line("not json"), None);
-        assert_eq!(parse_claude_line("[1,2]"), None);
-        assert_eq!(parse_claude_line(r#"{"foo":1}"#), None);
-        assert_eq!(
-            parse_claude_line(r#"{"type":"mystery","x":1}"#),
-            Some(json!({"type":"mystery","x":1}))
-        );
-        assert!(decode_message("not json").is_err());
-    }
-
-    #[test]
-    fn framing_handles_crlf_and_split_chunks() {
-        let a = split_json_lines(
-            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\r\n{\"type\":\"assis",
-            "",
-        );
-        assert_eq!(a.lines.len(), 1);
-        let msg = parse_claude_line(&a.lines[0]).unwrap();
-        assert!(is_system_init(&msg));
-        let b = split_json_lines(
-            "tant\",\"message\":{\"role\":\"assistant\",\"content\":[]},\"parent_tool_use_id\":null}\n",
-            &a.rest,
-        );
-        assert_eq!(b.lines.len(), 1);
-        assert!(is_assistant(&parse_claude_line(&b.lines[0]).unwrap()));
-    }
-
-    #[test]
-    fn captured_init_and_result_lines_round_trip_through_the_typed_views() {
-        let init = parse_claude_line(
-            r#"{"type":"system","subtype":"init","session_id":"s","cwd":"/repo","model":"claude-fable-5",
-                "tools":["Bash"],"mcp_servers":[{"name":"fleet","status":"connected"}],
-                "capabilities":["interrupt_receipt_v1"],"permissionMode":"default",
-                "claude_code_version":"2.1.251","uuid":"u","futureField":{"x":1}}"#,
-        )
-        .unwrap();
-        let view = try_system_init(&init).unwrap();
-        assert_eq!(view.session_id, "s");
-        assert_eq!(view.model.as_deref(), Some("claude-fable-5"));
-        assert_eq!(view.capabilities, vec!["interrupt_receipt_v1".to_string()]);
-        assert_eq!(view.mcp_servers.len(), 1);
-        assert_eq!(view.mcp_servers[0].name, "fleet");
-
-        let result = parse_claude_line(
-            r#"{"type":"result","subtype":"success","result":"done","is_error":false,"num_turns":2,
-                "total_cost_usd":0.01,"duration_ms":900,"session_id":"s","stop_reason":null}"#,
-        )
-        .unwrap();
-        let view = try_result(&result).unwrap();
-        assert_eq!(view.subtype, "success");
-        assert_eq!(view.result.as_deref(), Some("done"));
-        assert_eq!(view.total_cost_usd, Some(0.01));
-        assert_eq!(view.num_turns, Some(2));
-        assert_eq!(view.stop_reason, None);
-    }
-
-    #[test]
-    fn control_requests_detect_can_use_tool_and_ask_user_question() {
-        let req = parse_claude_line(
-            r#"{"type":"control_request","request_id":"abc","request":{"subtype":"can_use_tool",
-                "tool_name":"Bash","input":{"command":"ls"},"tool_use_id":"t1","title":"Run ls"}}"#,
-        )
-        .unwrap();
-        assert!(is_can_use_tool(&req));
-        let body = try_can_use_tool(&req).unwrap();
-        assert_eq!(body.tool_name, "Bash");
-        assert_eq!(body.input["command"], "ls");
-        assert_eq!(body.title.as_deref(), Some("Run ls"));
-        assert!(!is_ask_user_question(&body));
-        let as_ask = CanUseToolRequest {
-            tool_name: "AskUserQuestion".into(),
-            ..body
-        };
-        assert!(is_ask_user_question(&as_ask));
-
-        let other = parse_claude_line(
-            r#"{"type":"control_request","request_id":"x","request":{"subtype":"hook_callback"}}"#,
-        )
-        .unwrap();
-        assert!(!is_can_use_tool(&other));
-        assert_eq!(try_can_use_tool(&other), None);
-    }
-
-    #[test]
-    fn assistant_helpers_extract_text_and_tool_uses() {
-        let msg = json!({
-            "type":"assistant",
-            "message":{"role":"assistant","content":[
-                {"type":"text","text":"Hello "},
-                {"type":"tool_use","id":"t1","name":"mcp__fleet__fleet_status","input":{}},
-                {"type":"text","text":"world"},
-            ]},
-            "parent_tool_use_id":null,
-        });
-        assert_eq!(text_of_assistant(&msg), "Hello world");
-        let uses = tool_uses_of(&msg);
-        assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].name, "mcp__fleet__fleet_status");
-        assert_eq!(uses[0].id, "t1");
-        assert_eq!(
-            thinking_of_assistant(&json!({
+            let other = parse_claude_line(
+                r#"{"type":"control_request","request_id":"x","request":{"subtype":"hook_callback"}}"#,
+            )
+            .unwrap();
+            assert!(!is_can_use_tool(&other));
+            assert_eq!(try_can_use_tool(&other), None);
+        }
+        {
+            let msg = json!({
                 "type":"assistant",
                 "message":{"role":"assistant","content":[
-                    {"type":"thinking","thinking":"hmm"},
-                    {"type":"thinking","thinking":"ok"},
+                    {"type":"text","text":"Hello "},
+                    {"type":"tool_use","id":"t1","name":"mcp__fleet__fleet_status","input":{}},
+                    {"type":"text","text":"world"},
                 ]},
-            })),
-            "hmm\nok"
-        );
-    }
+                "parent_tool_use_id":null,
+            });
+            assert_eq!(text_of_assistant(&msg), "Hello world");
+            let uses = tool_uses_of(&msg);
+            assert_eq!(uses.len(), 1);
+            assert_eq!(uses[0].name, "mcp__fleet__fleet_status");
+            assert_eq!(uses[0].id, "t1");
+            assert_eq!(
+                thinking_of_assistant(&json!({
+                    "type":"assistant",
+                    "message":{"role":"assistant","content":[
+                        {"type":"thinking","thinking":"hmm"},
+                        {"type":"thinking","thinking":"ok"},
+                    ]},
+                })),
+                "hmm\nok"
+            );
+        }
+        {
+            let replay = json!({"type":"user","message":{"role":"user","content":"hi there"},"parent_tool_use_id":null});
+            assert!(is_replayed_user_message(&replay));
+            assert_eq!(user_text(&replay).as_deref(), Some("hi there"));
 
-    #[test]
-    fn user_helpers_separate_replayed_text_from_tool_results() {
-        let replay = json!({"type":"user","message":{"role":"user","content":"hi there"},"parent_tool_use_id":null});
-        assert!(is_replayed_user_message(&replay));
-        assert_eq!(user_text(&replay).as_deref(), Some("hi there"));
+            let blocks = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},"parent_tool_use_id":null});
+            assert_eq!(user_text(&blocks).as_deref(), Some("ab"));
 
-        let blocks = json!({"type":"user","message":{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},"parent_tool_use_id":null});
-        assert_eq!(user_text(&blocks).as_deref(), Some("ab"));
+            let result = json!({"type":"user","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"ok\nmore"}],"is_error":false}
+            ]},"parent_tool_use_id":null});
+            assert!(!is_replayed_user_message(&result));
+            assert_eq!(user_text(&result), None);
+            assert_eq!(
+                tool_results_of(&result),
+                vec![ToolResult {
+                    tool_use_id: "t1".into(),
+                    text: "ok\nmore".into(),
+                    is_error: false
+                }]
+            );
 
-        let result = json!({"type":"user","message":{"role":"user","content":[
-            {"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"ok\nmore"}],"is_error":false}
-        ]},"parent_tool_use_id":null});
-        assert!(!is_replayed_user_message(&result));
-        assert_eq!(user_text(&result), None);
-        assert_eq!(
-            tool_results_of(&result),
-            vec![ToolResult {
-                tool_use_id: "t1".into(),
-                text: "ok\nmore".into(),
-                is_error: false
-            }]
-        );
+            let string_result = json!({"type":"user","message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"t2","content":"plain","is_error":true}
+            ]},"parent_tool_use_id":null});
+            assert_eq!(
+                tool_results_of(&string_result),
+                vec![ToolResult {
+                    tool_use_id: "t2".into(),
+                    text: "plain".into(),
+                    is_error: true
+                }]
+            );
 
-        let string_result = json!({"type":"user","message":{"role":"user","content":[
-            {"type":"tool_result","tool_use_id":"t2","content":"plain","is_error":true}
-        ]},"parent_tool_use_id":null});
-        assert_eq!(
-            tool_results_of(&string_result),
-            vec![ToolResult {
-                tool_use_id: "t2".into(),
-                text: "plain".into(),
-                is_error: true
-            }]
-        );
+            let synthetic = json!({
+                "type":"user","message":{"role":"user","content":"hi there"},
+                "parent_tool_use_id":null,"isSynthetic":true,
+            });
+            assert!(!is_replayed_user_message(&synthetic));
+            // missing parent_tool_use_id is not the same as null, as in TypeScript
+            let unparented = json!({"type":"user","message":{"role":"user","content":"hi"}});
+            assert!(!is_replayed_user_message(&unparented));
+        }
+        {
+            let delta = json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"tok"}},
+                "parent_tool_use_id":null,
+            });
+            assert_eq!(text_delta_of(&delta).as_deref(), Some("tok"));
+            assert!(is_stream_event(&delta));
+            let json_delta = json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}},
+            });
+            assert_eq!(text_delta_of(&json_delta), None);
+            assert_eq!(
+                text_delta_of(&json!({"type":"stream_event","event":{"type":"message_start"}})),
+                None
+            );
+            assert!(is_thinking_event(&json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"h"}},
+            })));
+            assert!(is_thinking_event(&json!({
+                "type":"stream_event",
+                "event":{"type":"content_block_start","content_block":{"type":"thinking"}},
+            })));
+            assert!(!is_thinking_event(&delta));
 
-        let synthetic = json!({
-            "type":"user","message":{"role":"user","content":"hi there"},
-            "parent_tool_use_id":null,"isSynthetic":true,
-        });
-        assert!(!is_replayed_user_message(&synthetic));
-        // missing parent_tool_use_id is not the same as null, as in TypeScript
-        let unparented = json!({"type":"user","message":{"role":"user","content":"hi"}});
-        assert!(!is_replayed_user_message(&unparented));
-    }
-
-    #[test]
-    fn stream_events_yield_text_deltas_only() {
-        let delta = json!({
-            "type":"stream_event",
-            "event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"tok"}},
-            "parent_tool_use_id":null,
-        });
-        assert_eq!(text_delta_of(&delta).as_deref(), Some("tok"));
-        assert!(is_stream_event(&delta));
-        let json_delta = json!({
-            "type":"stream_event",
-            "event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{"}},
-        });
-        assert_eq!(text_delta_of(&json_delta), None);
-        assert_eq!(
-            text_delta_of(&json!({"type":"stream_event","event":{"type":"message_start"}})),
-            None
-        );
-        assert!(is_thinking_event(&json!({
-            "type":"stream_event",
-            "event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"h"}},
-        })));
-        assert!(is_thinking_event(&json!({
-            "type":"stream_event",
-            "event":{"type":"content_block_start","content_block":{"type":"thinking"}},
-        })));
-        assert!(!is_thinking_event(&delta));
-
-        let result = parse_claude_line(
-            r#"{"type":"result","subtype":"success","result":"done","session_id":"s","total_cost_usd":0.01}"#,
-        )
-        .unwrap();
-        assert!(is_result(&result));
-        assert!(is_user(
-            &parse_claude_line(r#"{"type":"user","message":{"role":"user","content":"x"},"parent_tool_use_id":null}"#)
-                .unwrap()
-        ));
-        assert!(is_control_cancel_request(
-            &parse_claude_line(r#"{"type":"control_cancel_request","request_id":"r"}"#).unwrap()
-        ));
-        let response = try_control_response(
-            &parse_claude_line(
-                r#"{"type":"control_response","response":{"subtype":"error","request_id":"r","error":"no"}}"#,
+            let result = parse_claude_line(
+                r#"{"type":"result","subtype":"success","result":"done","session_id":"s","total_cost_usd":0.01}"#,
             )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(response.response.error.as_deref(), Some("no"));
-        assert_eq!(response.response.subtype, "error");
+            .unwrap();
+            assert!(is_result(&result));
+            assert!(is_user(
+                &parse_claude_line(r#"{"type":"user","message":{"role":"user","content":"x"},"parent_tool_use_id":null}"#)
+                    .unwrap()
+            ));
+            assert!(is_control_cancel_request(
+                &parse_claude_line(r#"{"type":"control_cancel_request","request_id":"r"}"#)
+                    .unwrap()
+            ));
+            let response = try_control_response(
+                &parse_claude_line(
+                    r#"{"type":"control_response","response":{"subtype":"error","request_id":"r","error":"no"}}"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response.response.error.as_deref(), Some("no"));
+            assert_eq!(response.response.subtype, "error");
+        }
     }
 }

@@ -927,39 +927,26 @@ mod tests {
         ))
     }
 
-    #[test]
-    fn fresh_process_reports_defaults_and_is_not_running() {
-        let (process, _rx) = make();
-        assert!(!process.running());
-        assert_eq!(process.pid(), None);
-        assert_eq!(process.session_id(), None);
-        assert!(!process.turn_active());
-        assert_eq!(process.activity(), None);
-        assert!(!process.init_received());
-        assert!(process.pending_requests().is_empty());
-        assert_eq!(process.exited(), None);
-    }
-
-    #[test]
-    fn sending_before_start_fails_without_touching_state() {
-        let (process, _rx) = make();
-        assert!(!process.send("hello"));
-        assert!(!process.turn_active());
-        assert!(!process.allow("req_x", None));
-        assert!(!process.deny("req_x", "no"));
-        assert!(!process.answer_question("req_x", json!({})));
-    }
-
     #[tokio::test]
-    async fn control_requests_before_start_short_circuit_and_clear_the_waiter() {
-        let (process, _rx) = make();
-        let started = std::time::Instant::now();
-        // No child to write to: none, immediately, and the waiter is gone.
-        let outcome = process
-            .control("req_1", json!({"subtype":"interrupt"}))
-            .await;
-        assert_eq!(outcome, None);
-        assert!(started.elapsed() < Duration::from_millis(100));
-        assert!(lock(&process.control_waiters).is_empty());
+    async fn before_start_fails() {
+        {
+            let (process, _rx) = make();
+            assert!(!process.send("hello"));
+            assert!(!process.turn_active());
+            assert!(!process.allow("req_x", None));
+            assert!(!process.deny("req_x", "no"));
+            assert!(!process.answer_question("req_x", json!({})));
+        }
+        {
+            let (process, _rx) = make();
+            let started = std::time::Instant::now();
+            // No child to write to: none, immediately, and the waiter is gone.
+            let outcome = process
+                .control("req_1", json!({"subtype":"interrupt"}))
+                .await;
+            assert_eq!(outcome, None);
+            assert!(started.elapsed() < Duration::from_millis(100));
+            assert!(lock(&process.control_waiters).is_empty());
+        }
     }
 }

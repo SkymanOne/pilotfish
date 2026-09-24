@@ -92,17 +92,60 @@ mod tests {
     use crate::fleet::run::{PendingQuestion, RunState, RunStatus};
 
     #[test]
-    fn the_frame_scrub_leaves_no_control_character_for_the_terminal() {
-        use ratatui::buffer::Buffer;
-        use ratatui::layout::Rect;
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
-        for (x, ch) in "a\rb\u{1b}c\t".chars().enumerate() {
-            buffer[(x as u16, 0)].set_symbol(&ch.to_string());
+    fn conversation_view() {
+        {
+            use ratatui::buffer::Buffer;
+            use ratatui::layout::Rect;
+            let mut buffer = Buffer::empty(Rect::new(0, 0, 6, 1));
+            for (x, ch) in "a\rb\u{1b}c\t".chars().enumerate() {
+                buffer[(x as u16, 0)].set_symbol(&ch.to_string());
+            }
+            scrub_controls(&mut buffer);
+            let row: String = (0..6).map(|x| buffer[(x, 0)].symbol()).collect();
+            assert_eq!(row, "a b c ", "controls became spaces, the width held");
+            assert!(!row.chars().any(char::is_control));
         }
-        scrub_controls(&mut buffer);
-        let row: String = (0..6).map(|x| buffer[(x, 0)].symbol()).collect();
-        assert_eq!(row, "a b c ", "controls became spaces, the width held");
-        assert!(!row.chars().any(char::is_control));
+        {
+            let (mut console, runs, orch) = fleet();
+            console.ingest_orchestrator_record(&notice_record("· halfway there"));
+            for c in "fix the tests".chars() {
+                console.handle_key(ch(c));
+            }
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
+
+            // the transcript shows the fed block
+            assert_visible(&buf, "· halfway there");
+            // the composer is aimed at the orchestrator and holds the message
+            assert_visible(&buf, "orchestrator > ");
+            assert_visible(&buf, "fix the tests");
+            // the way into the fleet is always on screen
+            assert_visible(&buf, "ctrl+f fleet");
+            // no rail: the other sessions are not listed beside the transcript
+            let drawn = (0..buf.area.height)
+                .map(|y| row_text(&buf, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !drawn.contains("● db"),
+                "the fleet is an overlay, not a column: {drawn}"
+            );
+        }
+        {
+            let (mut console, runs, orch) = fleet();
+            // a sent prompt lands as a cyan user block
+            console.submit("hello there");
+            // a fleet batch lands as a yellow event block
+            let events = vec![crate::fleet::event::FleetEvent::new(
+                crate::fleet::event::FleetEventKind::Settled,
+                "db-20260829120000",
+                "db",
+                vec![],
+            )];
+            console.ingest_fleet_events(&events, "BATCH");
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
+            assert_visible(&buf, "> hello there");
+            assert_visible(&buf, "⚑ settled db");
+        }
     }
 
     use crate::orch::protocol::{CanUseToolRequest, PermissionRequest};
@@ -240,320 +283,267 @@ mod tests {
     }
 
     #[test]
-    fn the_fleet_overlay_draws_a_fleet_of_workers_in_different_states() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(ctrl_f());
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
+    fn fleet_overlay_view() {
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(ctrl_f());
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
-        // header: the fleet summary — db running, api asking, tests done
-        assert_visible(&buf, "pilotfish");
-        assert_visible(&buf, "orchestrator + 3 workers");
-        assert_visible(&buf, "running 1");
-        assert_visible(&buf, "needs an answer 1");
-        assert_visible(&buf, "done 1");
+            // header: the fleet summary — db running, api asking, tests done
+            assert_visible(&buf, "pilotfish");
+            assert_visible(&buf, "orchestrator + 3 workers");
+            assert_visible(&buf, "running 1");
+            assert_visible(&buf, "needs an answer 1");
+            assert_visible(&buf, "done 1");
 
-        // rows, orchestrator first, glyph + name + age on the primary line
-        let orch_row = find_row(&buf, "○ orchestrator").expect("orchestrator row");
-        assert!(
-            row_text(&buf, orch_row).contains("▸"),
-            "selected by default"
-        );
-        assert!(row_text(&buf, orch_row).contains("○"), "idle glyph");
-        assert_visible(&buf, "● db");
-        assert!(row_text(&buf, find_row(&buf, "● db").unwrap()).contains("pilotfish/db-7"));
-        assert_visible(&buf, "? api");
-        assert_visible(&buf, "✓ tests");
+            // rows, orchestrator first, glyph + name + age on the primary line
+            let orch_row = find_row(&buf, "○ orchestrator").expect("orchestrator row");
+            assert!(
+                row_text(&buf, orch_row).contains("▸"),
+                "selected by default"
+            );
+            assert!(row_text(&buf, orch_row).contains("○"), "idle glyph");
+            assert_visible(&buf, "● db");
+            assert!(row_text(&buf, find_row(&buf, "● db").unwrap()).contains("pilotfish/db-7"));
+            assert_visible(&buf, "? api");
+            assert_visible(&buf, "✓ tests");
 
-        // the detail line under the blocked worker says what it needs
-        assert_visible(&buf, "needs an answer");
+            // the detail line under the blocked worker says what it needs
+            assert_visible(&buf, "needs an answer");
 
-        // the footer carries the panel's key hints
-        assert_visible(&buf, "j/k move");
-    }
+            // the footer carries the panel's key hints
+            assert_visible(&buf, "j/k move");
+        }
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(ctrl_f());
+            console.handle_key(ch('j'));
+            console.toast("! that worker is gone", true);
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
 
-    #[test]
-    fn the_fleet_overlay_marks_the_selected_worker_and_shows_the_flash() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(ctrl_f());
-        console.handle_key(ch('j'));
-        console.toast("! that worker is gone", true);
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
-
-        // the selection moved to db; its row is marked, the orchestrator is not
-        let db_row = find_row(&buf, "● db").unwrap();
-        assert!(row_text(&buf, db_row).contains("▸"));
-        let orch_row = find_row(&buf, "○ orchestrator").unwrap();
-        assert!(!row_text(&buf, orch_row).contains("▸"));
-        // the flash replaced the hints in the footer
-        assert_visible(&buf, "! that worker is gone");
+            // the selection moved to db; its row is marked, the orchestrator is not
+            let db_row = find_row(&buf, "● db").unwrap();
+            assert!(row_text(&buf, db_row).contains("▸"));
+            let orch_row = find_row(&buf, "○ orchestrator").unwrap();
+            assert!(!row_text(&buf, orch_row).contains("▸"));
+            // the flash replaced the hints in the footer
+            assert_visible(&buf, "! that worker is gone");
+        }
     }
 
     // -- session view ---------------------------------------------------------
 
-    #[test]
-    fn the_conversation_draws_the_transcript_and_the_composer_with_no_rail() {
-        let (mut console, runs, orch) = fleet();
-        console.ingest_orchestrator_record(&notice_record("· halfway there"));
-        for c in "fix the tests".chars() {
-            console.handle_key(ch(c));
-        }
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
-
-        // the transcript shows the fed block
-        assert_visible(&buf, "· halfway there");
-        // the composer is aimed at the orchestrator and holds the message
-        assert_visible(&buf, "orchestrator > ");
-        assert_visible(&buf, "fix the tests");
-        // the way into the fleet is always on screen
-        assert_visible(&buf, "ctrl+f fleet");
-        // no rail: the other sessions are not listed beside the transcript
-        let drawn = (0..buf.area.height)
-            .map(|y| row_text(&buf, y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !drawn.contains("● db"),
-            "the fleet is an overlay, not a column: {drawn}"
-        );
-    }
-
-    #[test]
-    fn the_session_view_renders_transcript_block_kinds_with_blank_separators() {
-        let (mut console, runs, orch) = fleet();
-        // a sent prompt lands as a cyan user block
-        console.submit("hello there");
-        // a fleet batch lands as a yellow event block
-        let events = vec![crate::fleet::event::FleetEvent::new(
-            crate::fleet::event::FleetEventKind::Settled,
-            "db-20260829120000",
-            "db",
-            vec![],
-        )];
-        console.ingest_fleet_events(&events, "BATCH");
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
-        assert_visible(&buf, "> hello there");
-        assert_visible(&buf, "⚑ settled db");
-    }
-
     // -- status line ----------------------------------------------------------
 
     #[test]
-    fn the_status_line_shows_the_selected_worker_facts() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(ctrl_f());
-        console.handle_key(ch('j'));
-        console.handle_key(key(KeyCode::Enter));
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
-        let status = row_text(&buf, buf.area.height - 1);
-        assert!(status.contains("db"), "{status}");
-        assert!(status.contains("running"), "{status}");
-        assert!(status.contains("default model"), "{status}");
-        assert!(status.contains("pilotfish/db-7"), "{status}");
-    }
-
-    #[test]
-    fn the_status_line_shows_the_orchestrator_spend_and_pending_approvals() {
-        let (mut console, runs, mut orch) = fleet();
-        orch.pending_requests = vec![PermissionRequest {
-            request_id: "req_1".into(),
-            request: CanUseToolRequest {
-                tool_name: "Bash".into(),
-                input: serde_json::json!({"command": "touch a.txt"}),
-                tool_use_id: "t1".into(),
-                ..CanUseToolRequest::default()
-            },
-            received_at: now_iso(),
-        }];
-        console.set_orchestrator_state(orch.clone());
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
-        let status = row_text(&buf, buf.area.height - 1);
-        // before the first message claude has said nothing: a session waiting
-        // to start reads as ready, and spend and turns wait until there are any
-        assert!(status.contains("ready"), "no session yet: {status}");
-        assert!(!status.contains("$0.000"), "{status}");
-        assert!(!status.contains("0 turns"), "{status}");
-        assert!(status.contains("1 approval pending"), "{status}");
+    fn status_line_view() {
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(ctrl_f());
+            console.handle_key(ch('j'));
+            console.handle_key(key(KeyCode::Enter));
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
+            let status = row_text(&buf, buf.area.height - 1);
+            assert!(status.contains("db"), "{status}");
+            assert!(status.contains("running"), "{status}");
+            assert!(status.contains("default model"), "{status}");
+            assert!(status.contains("pilotfish/db-7"), "{status}");
+        }
+        {
+            let (mut console, runs, mut orch) = fleet();
+            orch.pending_requests = vec![PermissionRequest {
+                request_id: "req_1".into(),
+                request: CanUseToolRequest {
+                    tool_name: "Bash".into(),
+                    input: serde_json::json!({"command": "touch a.txt"}),
+                    tool_use_id: "t1".into(),
+                    ..CanUseToolRequest::default()
+                },
+                received_at: now_iso(),
+            }];
+            console.set_orchestrator_state(orch.clone());
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 12);
+            let status = row_text(&buf, buf.area.height - 1);
+            // before the first message claude has said nothing: a session waiting
+            // to start reads as ready, and spend and turns wait until there are any
+            assert!(status.contains("ready"), "no session yet: {status}");
+            assert!(!status.contains("$0.000"), "{status}");
+            assert!(!status.contains("0 turns"), "{status}");
+            assert!(status.contains("1 approval pending"), "{status}");
+        }
     }
 
     // -- overlays -------------------------------------------------------------
 
     #[test]
-    fn the_help_overlay_lists_the_keys() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(ctrl_f());
-        console.handle_key(ch('?'));
-        // tall enough that help_lines shows every row, not a counted tail
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 50);
-        assert_visible(&buf, "keys");
-        assert_visible(&buf, "move the selection");
-        assert_visible(&buf, "the command palette");
-    }
-
-    #[test]
-    fn the_confirm_overlay_asks_before_destroying() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(ctrl_f());
-        console.handle_key(ch('j'));
-        console.handle_key(ch('x'));
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
-        assert_visible(&buf, "confirm");
-        assert_visible(&buf, "Abort it and remove");
-        assert_visible(&buf, "y confirm");
-    }
-
-    #[test]
-    fn the_routing_panel_shows_where_the_key_lives_and_never_the_key() {
-        let (mut console, runs, orch) = fleet();
-        console.submit("/routing");
-        let key = "ts_live_0123456789abcdef";
-        console.set_routing_status(crate::tui::app::RoutingStatus {
-            enabled: true,
-            key: crate::tui::app::KeyState::Config {
-                masked: crate::secrets::Secret::new(key).masked(),
-                path: "~/.pilotfish/config.toml".into(),
-            },
-            candidates: Ok(12),
-            threshold: 0.6,
-            models: vec!["anthropic:claude-opus-5".into(), "deepseek-v4-flash".into()],
-        });
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
-        assert_visible(&buf, "2 models");
-        assert_visible(&buf, "less than 60% sure");
-        assert_visible(&buf, "m shortlist");
-        for c in "s".chars().chain(key.chars()) {
-            console.handle_key(ch(c));
+    fn overlay_views() {
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(ctrl_f());
+            console.handle_key(ch('?'));
+            // tall enough that help_lines shows every row, not a counted tail
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 50);
+            assert_visible(&buf, "keys");
+            assert_visible(&buf, "move the selection");
+            assert_visible(&buf, "the command palette");
         }
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
-        assert_visible(&buf, "model routing");
-        assert_visible(&buf, "••••cdef, in ~/.pilotfish/config.toml");
-        assert_visible(&buf, "between 12 models");
-        assert_visible(&buf, &"•".repeat(key.len()));
-        let drawn = (0..buf.area.height)
-            .map(|y| row_text(&buf, y))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !drawn.contains("0123456789"),
-            "the key is never drawn: {drawn}"
-        );
-    }
-
-    #[test]
-    fn the_model_choice_shows_each_candidate_with_its_odds_and_price() {
-        let (mut console, runs, orch) = fleet();
-        let option = |key: &str, p: f64, detail: &str| crate::route::ModelOption {
-            key: key.into(),
-            probability: Some(p),
-            detail: detail.into(),
-        };
-        console.set_model_questions(vec![crate::route::ModelQuestion {
-            id: "q1".into(),
-            name: "add-auth".into(),
-            brief: "add token refresh to the auth module".into(),
-            confidence: 0.41,
-            threshold: 0.6,
-            options: vec![
-                option(
-                    "anthropic:claude-opus-5",
-                    0.38,
-                    "Opus 5 · $5.00 / $25.00 · 11.4× the cheapest option",
-                ),
-                option(
-                    "opencode-go:deepseek-v4-flash",
-                    0.31,
-                    "$0.50 / $2.00 · the cheapest option",
-                ),
-            ],
-            fallback: Some("claude-sonnet-5".into()),
-            asked_at: crate::util::now_iso(),
-            pid: std::process::id(),
-            deadline_ms: crate::util::now_ms() + 540_000,
-        }]);
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 110, 30);
-        assert_visible(&buf, "choose a model");
-        assert_visible(&buf, "should run add-auth (41% sure");
-        assert_visible(&buf, "add token refresh to the auth module");
-        assert_visible(&buf, "anthropic:claude-opus-5");
-        assert_visible(&buf, "38%");
-        assert_visible(&buf, "11.4× the cheapest option");
-        assert_visible(&buf, "d keep claude-sonnet-5");
-        let status = row_text(&buf, buf.area.height - 1);
-        assert!(status.contains("1 model choice pending"), "{status}");
-    }
-
-    #[test]
-    fn the_palette_overlay_groups_and_labels_its_results() {
-        let (mut console, runs, orch) = fleet();
-        console.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
-        assert_visible(&buf, "commands");
-        assert_visible(&buf, "console");
-        assert_visible(&buf, "sessions");
-        assert_visible(&buf, "/quit");
-        assert_visible(&buf, "enter run · esc close");
-    }
-
-    #[test]
-    fn the_permission_overlay_draws_the_request_and_its_choices() {
-        let (mut console, runs, mut orch) = fleet();
-        orch.pending_requests = vec![PermissionRequest {
-            request_id: "req_1".into(),
-            request: CanUseToolRequest {
-                tool_name: "Bash".into(),
-                input: serde_json::json!({"command": "touch a.txt"}),
-                tool_use_id: "t1".into(),
-                title: Some("Run touch a.txt".into()),
-                ..CanUseToolRequest::default()
-            },
-            received_at: now_iso(),
-        }];
-        // a blocked orchestrator raises its own prompt
-        console.set_orchestrator_state(orch.clone());
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
-        assert_visible(&buf, "Run touch a.txt");
-        assert_visible(&buf, "Bash touch a.txt");
-        assert_visible(
-            &buf,
-            "y allow once · a allow for this session · n deny with a reason",
-        );
-    }
-
-    #[test]
-    fn the_permission_overlay_picks_from_ask_user_question_options() {
-        let (mut console, runs, mut orch) = fleet();
-        orch.pending_requests = vec![PermissionRequest {
-            request_id: "req_2".into(),
-            request: CanUseToolRequest {
-                tool_name: "AskUserQuestion".into(),
-                input: serde_json::json!({"questions": [
-                    {"question": "Which hash?", "options": [{"label": "bcrypt"}, {"label": "argon2"}]},
-                ]}),
-                tool_use_id: "t2".into(),
-                ..CanUseToolRequest::default()
-            },
-            received_at: now_iso(),
-        }];
-        console.set_orchestrator_state(orch.clone());
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
-        assert_visible(&buf, "question 1/1");
-        assert_visible(&buf, "Which hash?");
-        assert_visible(&buf, "bcrypt");
-        assert_visible(&buf, "argon2");
-        assert_visible(&buf, "✎ something else…");
-    }
-
-    #[test]
-    fn the_search_overlay_counts_its_matches() {
-        let (mut console, runs, orch) = fleet();
-        console.ingest_orchestrator_record(&notice_record("the quick brown fox"));
-        console.ingest_orchestrator_record(&notice_record("another quick fox"));
-        console.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
-        for c in "quick".chars() {
-            console.handle_key(ch(c));
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(ctrl_f());
+            console.handle_key(ch('j'));
+            console.handle_key(ch('x'));
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 20);
+            assert_visible(&buf, "confirm");
+            assert_visible(&buf, "Abort it and remove");
+            assert_visible(&buf, "y confirm");
         }
-        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
-        assert_visible(&buf, "search");
-        assert_visible(&buf, "quick");
-        assert_visible(&buf, "match 1 of 2");
+        {
+            let (mut console, runs, orch) = fleet();
+            console.submit("/routing");
+            let key = "ts_live_0123456789abcdef";
+            console.set_routing_status(crate::tui::app::RoutingStatus {
+                enabled: true,
+                key: crate::tui::app::KeyState::Config {
+                    masked: crate::secrets::Secret::new(key).masked(),
+                    path: "~/.pilotfish/config.toml".into(),
+                },
+                candidates: Ok(12),
+                threshold: 0.6,
+                models: vec!["anthropic:claude-opus-5".into(), "deepseek-v4-flash".into()],
+            });
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
+            assert_visible(&buf, "2 models");
+            assert_visible(&buf, "less than 60% sure");
+            assert_visible(&buf, "m shortlist");
+            for c in "s".chars().chain(key.chars()) {
+                console.handle_key(ch(c));
+            }
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
+            assert_visible(&buf, "model routing");
+            assert_visible(&buf, "••••cdef, in ~/.pilotfish/config.toml");
+            assert_visible(&buf, "between 12 models");
+            assert_visible(&buf, &"•".repeat(key.len()));
+            let drawn = (0..buf.area.height)
+                .map(|y| row_text(&buf, y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !drawn.contains("0123456789"),
+                "the key is never drawn: {drawn}"
+            );
+        }
+        {
+            let (mut console, runs, orch) = fleet();
+            let option = |key: &str, p: f64, detail: &str| crate::route::ModelOption {
+                key: key.into(),
+                probability: Some(p),
+                detail: detail.into(),
+            };
+            console.set_model_questions(vec![crate::route::ModelQuestion {
+                id: "q1".into(),
+                name: "add-auth".into(),
+                brief: "add token refresh to the auth module".into(),
+                confidence: 0.41,
+                threshold: 0.6,
+                options: vec![
+                    option(
+                        "anthropic:claude-opus-5",
+                        0.38,
+                        "Opus 5 · $5.00 / $25.00 · 11.4× the cheapest option",
+                    ),
+                    option(
+                        "opencode-go:deepseek-v4-flash",
+                        0.31,
+                        "$0.50 / $2.00 · the cheapest option",
+                    ),
+                ],
+                fallback: Some("claude-sonnet-5".into()),
+                asked_at: crate::util::now_iso(),
+                pid: std::process::id(),
+                deadline_ms: crate::util::now_ms() + 540_000,
+            }]);
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 110, 30);
+            assert_visible(&buf, "choose a model");
+            assert_visible(&buf, "should run add-auth (41% sure");
+            assert_visible(&buf, "add token refresh to the auth module");
+            assert_visible(&buf, "anthropic:claude-opus-5");
+            assert_visible(&buf, "38%");
+            assert_visible(&buf, "11.4× the cheapest option");
+            assert_visible(&buf, "d keep claude-sonnet-5");
+            let status = row_text(&buf, buf.area.height - 1);
+            assert!(status.contains("1 model choice pending"), "{status}");
+        }
+        {
+            let (mut console, runs, orch) = fleet();
+            console.handle_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
+            assert_visible(&buf, "commands");
+            assert_visible(&buf, "console");
+            assert_visible(&buf, "sessions");
+            assert_visible(&buf, "/quit");
+            assert_visible(&buf, "enter run · esc close");
+        }
+        {
+            let (mut console, runs, orch) = fleet();
+            console.ingest_orchestrator_record(&notice_record("the quick brown fox"));
+            console.ingest_orchestrator_record(&notice_record("another quick fox"));
+            console.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+            for c in "quick".chars() {
+                console.handle_key(ch(c));
+            }
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
+            assert_visible(&buf, "search");
+            assert_visible(&buf, "quick");
+            assert_visible(&buf, "match 1 of 2");
+        }
+    }
+
+    #[test]
+    fn permission_views() {
+        {
+            let (mut console, runs, mut orch) = fleet();
+            orch.pending_requests = vec![PermissionRequest {
+                request_id: "req_1".into(),
+                request: CanUseToolRequest {
+                    tool_name: "Bash".into(),
+                    input: serde_json::json!({"command": "touch a.txt"}),
+                    tool_use_id: "t1".into(),
+                    title: Some("Run touch a.txt".into()),
+                    ..CanUseToolRequest::default()
+                },
+                received_at: now_iso(),
+            }];
+            // a blocked orchestrator raises its own prompt
+            console.set_orchestrator_state(orch.clone());
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
+            assert_visible(&buf, "Run touch a.txt");
+            assert_visible(&buf, "Bash touch a.txt");
+            assert_visible(
+                &buf,
+                "y allow once · a allow for this session · n deny with a reason",
+            );
+        }
+        {
+            let (mut console, runs, mut orch) = fleet();
+            orch.pending_requests = vec![PermissionRequest {
+                request_id: "req_2".into(),
+                request: CanUseToolRequest {
+                    tool_name: "AskUserQuestion".into(),
+                    input: serde_json::json!({"questions": [
+                        {"question": "Which hash?", "options": [{"label": "bcrypt"}, {"label": "argon2"}]},
+                    ]}),
+                    tool_use_id: "t2".into(),
+                    ..CanUseToolRequest::default()
+                },
+                received_at: now_iso(),
+            }];
+            console.set_orchestrator_state(orch.clone());
+            let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 24);
+            assert_visible(&buf, "question 1/1");
+            assert_visible(&buf, "Which hash?");
+            assert_visible(&buf, "bcrypt");
+            assert_visible(&buf, "argon2");
+            assert_visible(&buf, "✎ something else…");
+        }
     }
 }

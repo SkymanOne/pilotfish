@@ -480,317 +480,309 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn commands_serialize_to_the_pi_wire_shapes() {
-        let prompt = RpcCommand::Prompt {
-            id: Some("fleet-init".into()),
-            message: "do the thing".into(),
-            streaming_behavior: Some(StreamingBehavior::Steer),
-        };
-        assert_eq!(
-            prompt.to_line(),
-            r#"{"type":"prompt","id":"fleet-init","message":"do the thing","streamingBehavior":"steer"}"#
-        );
-        // steer/follow_up/abort carry no id, like the TypeScript monitor.
-        assert_eq!(
-            RpcCommand::Steer {
-                message: "hi".into()
-            }
-            .to_line(),
-            r#"{"type":"steer","message":"hi"}"#
-        );
-        assert_eq!(
-            RpcCommand::FollowUp {
-                message: "go on".into()
-            }
-            .to_line(),
-            r#"{"type":"follow_up","message":"go on"}"#
-        );
-        assert_eq!(RpcCommand::Abort.to_line(), r#"{"type":"abort"}"#);
-        assert_eq!(
-            RpcCommand::GetState { id: None }.to_line(),
-            r#"{"type":"get_state"}"#
-        );
-        assert_eq!(
-            RpcCommand::SetThinkingLevel {
-                id: Some("fleet-thinking".into()),
-                level: "max".into(),
-            }
-            .to_line(),
-            r#"{"type":"set_thinking_level","id":"fleet-thinking","level":"max"}"#
-        );
-        // `set_model` takes `modelId` (camelCase) per the pi docs.
-        assert_eq!(
-            RpcCommand::SetModel {
-                id: Some("fleet-model".into()),
-                provider: Some("anthropic".into()),
-                model_id: "claude-fable-5".into(),
-            }
-            .to_line(),
-            r#"{"type":"set_model","id":"fleet-model","provider":"anthropic","modelId":"claude-fable-5"}"#
-        );
-        assert_eq!(
-            RpcCommand::SetModel {
-                id: None,
-                provider: None,
-                model_id: "m".into(),
-            }
-            .to_line(),
-            r#"{"type":"set_model","modelId":"m"}"#
-        );
-        assert_eq!(
-            RpcCommand::GetAvailableModels { id: None }.to_line(),
-            r#"{"type":"get_available_models"}"#
-        );
-    }
-
-    #[test]
-    fn responses_parse_and_expose_their_data() {
-        let state = r#"{"type":"response","id":"fleet-state","command":"get_state","success":true,
-            "data":{"model":{"id":"m-1","name":"Model One","provider":"vendorco","contextWindow":200000},
-            "thinkingLevel":"high","isStreaming":false}}"#;
-        let r = match parse_line(state) {
-            Some(RpcMessage::Response(r)) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(r.command.as_deref(), Some("get_state"));
-        assert_eq!(
-            r.model(),
-            Some(ModelRef {
-                id: Some("m-1".into()),
-                name: Some("Model One".into()),
-                provider: Some("vendorco".into()),
-                // routing weighs it, so it is kept now rather than ignored
-                context_window: Some(200_000),
-                ..ModelRef::default()
-            })
-        );
-        assert_eq!(r.thinking_level().as_deref(), Some("high"));
-    }
-
-    #[test]
-    fn a_catalogue_model_carries_its_levels_context_and_cost() {
-        // shaped like a real get_available_models entry (pi 0.87)
-        let line = r#"{"type":"response","command":"get_available_models","success":true,"data":{"models":[
-            {"id":"claude-fable-5","name":"Claude Fable 5","provider":"anthropic","contextWindow":1000000,
-             "cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5},
-             "thinkingLevelMap":{"off":null,"xhigh":"xhigh","max":"max"}},
-            {"id":"claude-haiku-4-5","provider":"anthropic","thinkingLevelMap":null}]}}"#;
-        let RpcMessage::Response(r) = parse_line(line).unwrap() else {
-            panic!("a response")
-        };
-        let models = r.available_models();
-        assert_eq!(models[0].thinking_levels(), vec!["xhigh", "max"]);
-        assert_eq!(models[0].context_window, Some(1_000_000));
-        let cost = models[0].cost.unwrap();
-        assert!((cost.input - 10.0).abs() < 1e-9 && (cost.output - 50.0).abs() < 1e-9);
-        assert!(
-            models[1].thinking_levels().is_empty(),
-            "a model with no map has no level to ask for"
-        );
-    }
-
-    #[test]
-    fn available_thinking_levels_come_from_pis_own_map() {
-        // the real get_state payload from a deepseek-v4-flash worker: pi maps
-        // every level it knows and nulls the ones this model lacks
-        let line = r#"{"type":"response","command":"get_state","success":true,"data":{
-            "model":{"id":"deepseek/deepseek-v4-flash-0731","provider":"openrouter",
-            "thinkingLevelMap":{"off":"none","minimal":null,"low":null,"medium":null,
-            "high":"high","xhigh":"xhigh","max":null}},"thinkingLevel":"xhigh"}}"#;
-        let RpcMessage::Response(r) = parse_line(line).unwrap() else {
-            panic!("a response")
-        };
-        assert_eq!(
-            r.available_thinking_levels(),
-            vec!["off", "high", "xhigh"],
-            "canonical order, nulls dropped — `max` is not one of them"
-        );
-        assert_eq!(r.thinking_level().as_deref(), Some("xhigh"));
-
-        // no map at all reads as "we do not know", never as "none"
-        let line = r#"{"type":"response","command":"get_state","success":true,
-            "data":{"model":{"id":"m"},"thinkingLevel":"high"}}"#;
-        let RpcMessage::Response(r) = parse_line(line).unwrap() else {
-            panic!("a response")
-        };
-        assert!(r.available_thinking_levels().is_empty());
-
-        let commands = r#"{"type":"response","command":"get_commands","success":true,"data":{"commands":[
-            {"name":"skill:x","description":"a skill","source":"skill"},
-            {"description":"no name, skipped by the caller"},
-            {"name":"session-name","source":"extension","path":"/tmp/x.ts"}]}}"#;
-        let r = match parse_line(commands) {
-            Some(RpcMessage::Response(r)) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(r.commands().len(), 3);
-        assert_eq!(r.commands()[0].name.as_deref(), Some("skill:x"));
-
-        let models = r#"{"type":"response","command":"get_available_models","success":true,
-            "data":{"models":[{"id":"m-1","provider":"vendorco"},{"id":"m-2","name":"Two","provider":"other"}]}}"#;
-        let r = match parse_line(models) {
-            Some(RpcMessage::Response(r)) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(r.available_models().len(), 2);
-        assert_eq!(r.available_models()[1].name.as_deref(), Some("Two"));
-
-        let text = r#"{"type":"response","id":"fleet-last","command":"get_last_assistant_text","success":true,"data":{"text":"done"}}"#;
-        let r = match parse_line(text) {
-            Some(RpcMessage::Response(r)) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(r.text().as_deref(), Some("done"));
-
-        let failure = r#"{"type":"response","id":"fleet-init","command":"prompt","success":false,"error":"nope"}"#;
-        let r = match parse_line(failure) {
-            Some(RpcMessage::Response(r)) => r,
-            other => panic!("{other:?}"),
-        };
-        assert_eq!(r.success, Some(false));
-        assert_eq!(r.error.as_deref(), Some("nope"));
-    }
-
-    #[test]
-    fn message_update_phases_are_classified_and_mirrored() {
-        let thinking = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#;
-        match parse_line(thinking).unwrap() {
-            RpcMessage::Event(ev) => {
-                assert_eq!(ev.stream_phase(), Some(StreamPhase::Thinking));
-                assert_eq!(ev.mirrored_message_update(), None);
-            }
-            other => panic!("{other:?}"),
+    fn outgoing_shapes() {
+        {
+            let prompt = RpcCommand::Prompt {
+                id: Some("fleet-init".into()),
+                message: "do the thing".into(),
+                streaming_behavior: Some(StreamingBehavior::Steer),
+            };
+            assert_eq!(
+                prompt.to_line(),
+                r#"{"type":"prompt","id":"fleet-init","message":"do the thing","streamingBehavior":"steer"}"#
+            );
+            // steer/follow_up/abort carry no id, like the TypeScript monitor.
+            assert_eq!(
+                RpcCommand::Steer {
+                    message: "hi".into()
+                }
+                .to_line(),
+                r#"{"type":"steer","message":"hi"}"#
+            );
+            assert_eq!(
+                RpcCommand::FollowUp {
+                    message: "go on".into()
+                }
+                .to_line(),
+                r#"{"type":"follow_up","message":"go on"}"#
+            );
+            assert_eq!(RpcCommand::Abort.to_line(), r#"{"type":"abort"}"#);
+            assert_eq!(
+                RpcCommand::GetState { id: None }.to_line(),
+                r#"{"type":"get_state"}"#
+            );
+            assert_eq!(
+                RpcCommand::SetThinkingLevel {
+                    id: Some("fleet-thinking".into()),
+                    level: "max".into(),
+                }
+                .to_line(),
+                r#"{"type":"set_thinking_level","id":"fleet-thinking","level":"max"}"#
+            );
+            // `set_model` takes `modelId` (camelCase) per the pi docs.
+            assert_eq!(
+                RpcCommand::SetModel {
+                    id: Some("fleet-model".into()),
+                    provider: Some("anthropic".into()),
+                    model_id: "claude-fable-5".into(),
+                }
+                .to_line(),
+                r#"{"type":"set_model","id":"fleet-model","provider":"anthropic","modelId":"claude-fable-5"}"#
+            );
+            assert_eq!(
+                RpcCommand::SetModel {
+                    id: None,
+                    provider: None,
+                    model_id: "m".into(),
+                }
+                .to_line(),
+                r#"{"type":"set_model","modelId":"m"}"#
+            );
+            assert_eq!(
+                RpcCommand::GetAvailableModels { id: None }.to_line(),
+                r#"{"type":"get_available_models"}"#
+            );
         }
-        let text = r#"{"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Hi"}}"#;
-        match parse_line(text).unwrap() {
-            RpcMessage::Event(ev) => {
-                assert_eq!(ev.stream_phase(), Some(StreamPhase::Text));
-                assert_eq!(
-                    ev.mirrored_message_update(),
-                    Some(
-                        json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":1,"delta":"Hi"}})
-                    )
-                );
-            }
-            other => panic!("{other:?}"),
-        }
-        // Tool-call deltas are neither thinking nor mirrored text.
-        let toolcall = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","id":"c1","toolName":"bash"}}"#;
-        match parse_line(toolcall).unwrap() {
-            RpcMessage::Event(ev) => {
-                assert_eq!(ev.stream_phase(), Some(StreamPhase::Other));
-                assert_eq!(ev.mirrored_message_update(), None);
-            }
-            other => panic!("{other:?}"),
+        {
+            assert_eq!(
+                ExtensionUiResponse::value("u1", "Allow").to_line(),
+                r#"{"type":"extension_ui_response","id":"u1","value":"Allow"}"#
+            );
+            assert_eq!(
+                ExtensionUiResponse::confirmed("u2", true).to_line(),
+                r#"{"type":"extension_ui_response","id":"u2","confirmed":true}"#
+            );
+            assert_eq!(
+                ExtensionUiResponse::cancelled("u3").to_line(),
+                r#"{"type":"extension_ui_response","id":"u3","cancelled":true}"#
+            );
         }
     }
 
     #[test]
-    fn selected_events_match_the_ts_mirror_set() {
-        for kind in [
-            "agent_start",
-            "agent_end",
-            "agent_settled",
-            "turn_end",
-            "tool_execution_start",
-            "tool_execution_end",
-            "extension_error",
-            "auto_retry_start",
-            "auto_retry_end",
-            "compaction_start",
-            "compaction_end",
-        ] {
-            assert!(is_selected_event(kind), "{kind}");
+    fn responses() {
+        {
+            let state = r#"{"type":"response","id":"fleet-state","command":"get_state","success":true,
+                "data":{"model":{"id":"m-1","name":"Model One","provider":"vendorco","contextWindow":200000},
+                "thinkingLevel":"high","isStreaming":false}}"#;
+            let r = match parse_line(state) {
+                Some(RpcMessage::Response(r)) => r,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(r.command.as_deref(), Some("get_state"));
+            assert_eq!(
+                r.model(),
+                Some(ModelRef {
+                    id: Some("m-1".into()),
+                    name: Some("Model One".into()),
+                    provider: Some("vendorco".into()),
+                    // routing weighs it, so it is kept now rather than ignored
+                    context_window: Some(200_000),
+                    ..ModelRef::default()
+                })
+            );
+            assert_eq!(r.thinking_level().as_deref(), Some("high"));
         }
-        for kind in ["turn_start", "message_start", "message_end", "queue_update"] {
-            assert!(!is_selected_event(kind), "{kind}");
+        {
+            // shaped like a real get_available_models entry (pi 0.87)
+            let line = r#"{"type":"response","command":"get_available_models","success":true,"data":{"models":[
+                {"id":"claude-fable-5","name":"Claude Fable 5","provider":"anthropic","contextWindow":1000000,
+                 "cost":{"input":10,"output":50,"cacheRead":1,"cacheWrite":12.5},
+                 "thinkingLevelMap":{"off":null,"xhigh":"xhigh","max":"max"}},
+                {"id":"claude-haiku-4-5","provider":"anthropic","thinkingLevelMap":null}]}}"#;
+            let RpcMessage::Response(r) = parse_line(line).unwrap() else {
+                panic!("a response")
+            };
+            let models = r.available_models();
+            assert_eq!(models[0].thinking_levels(), vec!["xhigh", "max"]);
+            assert_eq!(models[0].context_window, Some(1_000_000));
+            let cost = models[0].cost.unwrap();
+            assert!((cost.input - 10.0).abs() < 1e-9 && (cost.output - 50.0).abs() < 1e-9);
+            assert!(
+                models[1].thinking_levels().is_empty(),
+                "a model with no map has no level to ask for"
+            );
+        }
+        {
+            // the real get_state payload from a deepseek-v4-flash worker: pi maps
+            // every level it knows and nulls the ones this model lacks
+            let line = r#"{"type":"response","command":"get_state","success":true,"data":{
+                "model":{"id":"deepseek/deepseek-v4-flash-0731","provider":"openrouter",
+                "thinkingLevelMap":{"off":"none","minimal":null,"low":null,"medium":null,
+                "high":"high","xhigh":"xhigh","max":null}},"thinkingLevel":"xhigh"}}"#;
+            let RpcMessage::Response(r) = parse_line(line).unwrap() else {
+                panic!("a response")
+            };
+            assert_eq!(
+                r.available_thinking_levels(),
+                vec!["off", "high", "xhigh"],
+                "canonical order, nulls dropped — `max` is not one of them"
+            );
+            assert_eq!(r.thinking_level().as_deref(), Some("xhigh"));
+
+            // no map at all reads as "we do not know", never as "none"
+            let line = r#"{"type":"response","command":"get_state","success":true,
+                "data":{"model":{"id":"m"},"thinkingLevel":"high"}}"#;
+            let RpcMessage::Response(r) = parse_line(line).unwrap() else {
+                panic!("a response")
+            };
+            assert!(r.available_thinking_levels().is_empty());
+
+            let commands = r#"{"type":"response","command":"get_commands","success":true,"data":{"commands":[
+                {"name":"skill:x","description":"a skill","source":"skill"},
+                {"description":"no name, skipped by the caller"},
+                {"name":"session-name","source":"extension","path":"/tmp/x.ts"}]}}"#;
+            let r = match parse_line(commands) {
+                Some(RpcMessage::Response(r)) => r,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(r.commands().len(), 3);
+            assert_eq!(r.commands()[0].name.as_deref(), Some("skill:x"));
+
+            let models = r#"{"type":"response","command":"get_available_models","success":true,
+                "data":{"models":[{"id":"m-1","provider":"vendorco"},{"id":"m-2","name":"Two","provider":"other"}]}}"#;
+            let r = match parse_line(models) {
+                Some(RpcMessage::Response(r)) => r,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(r.available_models().len(), 2);
+            assert_eq!(r.available_models()[1].name.as_deref(), Some("Two"));
+
+            let text = r#"{"type":"response","id":"fleet-last","command":"get_last_assistant_text","success":true,"data":{"text":"done"}}"#;
+            let r = match parse_line(text) {
+                Some(RpcMessage::Response(r)) => r,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(r.text().as_deref(), Some("done"));
+
+            let failure = r#"{"type":"response","id":"fleet-init","command":"prompt","success":false,"error":"nope"}"#;
+            let r = match parse_line(failure) {
+                Some(RpcMessage::Response(r)) => r,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(r.success, Some(false));
+            assert_eq!(r.error.as_deref(), Some("nope"));
         }
     }
 
     #[test]
-    fn events_keep_the_raw_json_and_tool_names() {
-        let tool = r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[]}}"#;
-        match parse_line(tool).unwrap() {
-            RpcMessage::Event(ev) => {
-                assert_eq!(ev.kind, "tool_execution_end");
-                assert_eq!(ev.tool_name(), Some("bash"));
-                assert_eq!(ev.raw["toolCallId"], "c1");
+    fn rpc_events() {
+        {
+            let thinking = r#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"hmm"}}"#;
+            match parse_line(thinking).unwrap() {
+                RpcMessage::Event(ev) => {
+                    assert_eq!(ev.stream_phase(), Some(StreamPhase::Thinking));
+                    assert_eq!(ev.mirrored_message_update(), None);
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn unknown_event_types_and_fields_are_tolerated() {
-        let unknown = r#"{"type":"brand_new_event","futureField":{"deep":[1]}}"#;
-        match parse_line(unknown).unwrap() {
-            RpcMessage::Event(ev) => {
-                assert_eq!(ev.kind, "brand_new_event");
-                assert_eq!(ev.raw["futureField"]["deep"], json!([1]));
+            let text = r#"{"type":"message_update","usage":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":1,"delta":"Hi"}}"#;
+            match parse_line(text).unwrap() {
+                RpcMessage::Event(ev) => {
+                    assert_eq!(ev.stream_phase(), Some(StreamPhase::Text));
+                    assert_eq!(
+                        ev.mirrored_message_update(),
+                        Some(
+                            json!({"type":"message_update","ev":{"type":"text_delta","contentIndex":1,"delta":"Hi"}})
+                        )
+                    );
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
-        }
-        // A response with unknown extra fields still parses.
-        let extra = r#"{"type":"response","command":"get_state","success":true,"future":"x"}"#;
-        assert!(matches!(
-            parse_line(extra),
-            Some(RpcMessage::Response(RpcResponse { .. }))
-        ));
-        // Not JSON at all: nothing to interpret (the raw line is still logged).
-        assert!(parse_line("garbage").is_none());
-        assert!(parse_line("").is_none());
-        // A response missing every field still parses into the shell.
-        assert!(matches!(
-            parse_line(r#"{"type":"response"}"#),
-            Some(RpcMessage::Response(_))
-        ));
-    }
-
-    #[test]
-    fn extension_ui_requests_are_typed_with_dialog_classification() {
-        let select = r#"{"type":"extension_ui_request","id":"u1","method":"select","title":"Pick",
-            "options":["a","b"],"timeout":10000,"futureField":1}"#;
-        match parse_line(select).unwrap() {
-            RpcMessage::Ui(req) => {
-                assert_eq!(req.id, "u1");
-                assert!(req.is_dialog());
-                assert_eq!(req.options, Some(vec!["a".into(), "b".into()]));
-                assert_eq!(req.timeout, Some(10_000));
-                assert_eq!(req.display_question(), "Pick");
+            // Tool-call deltas are neither thinking nor mirrored text.
+            let toolcall = r#"{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","id":"c1","toolName":"bash"}}"#;
+            match parse_line(toolcall).unwrap() {
+                RpcMessage::Event(ev) => {
+                    assert_eq!(ev.stream_phase(), Some(StreamPhase::Other));
+                    assert_eq!(ev.mirrored_message_update(), None);
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
         }
-        let confirm = r#"{"type":"extension_ui_request","id":"u2","method":"confirm","title":"Sure?","message":"All gone."}"#;
-        match parse_line(confirm).unwrap() {
-            RpcMessage::Ui(req) => {
-                assert!(req.is_dialog());
-                assert_eq!(req.display_question(), "Sure?\nAll gone.");
+        {
+            for kind in [
+                "agent_start",
+                "agent_end",
+                "agent_settled",
+                "turn_end",
+                "tool_execution_start",
+                "tool_execution_end",
+                "extension_error",
+                "auto_retry_start",
+                "auto_retry_end",
+                "compaction_start",
+                "compaction_end",
+            ] {
+                assert!(is_selected_event(kind), "{kind}");
             }
-            other => panic!("{other:?}"),
-        }
-        // Fire-and-forget methods need no reply.
-        let notify = r#"{"type":"extension_ui_request","id":"u3","method":"notify","message":"heads up","notifyType":"info"}"#;
-        match parse_line(notify).unwrap() {
-            RpcMessage::Ui(req) => {
-                assert!(!req.is_dialog());
+            for kind in ["turn_start", "message_start", "message_end", "queue_update"] {
+                assert!(!is_selected_event(kind), "{kind}");
             }
-            other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn ui_responses_serialize_to_pis_expected_shapes() {
-        assert_eq!(
-            ExtensionUiResponse::value("u1", "Allow").to_line(),
-            r#"{"type":"extension_ui_response","id":"u1","value":"Allow"}"#
-        );
-        assert_eq!(
-            ExtensionUiResponse::confirmed("u2", true).to_line(),
-            r#"{"type":"extension_ui_response","id":"u2","confirmed":true}"#
-        );
-        assert_eq!(
-            ExtensionUiResponse::cancelled("u3").to_line(),
-            r#"{"type":"extension_ui_response","id":"u3","cancelled":true}"#
-        );
+        {
+            let tool = r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{"content":[]}}"#;
+            match parse_line(tool).unwrap() {
+                RpcMessage::Event(ev) => {
+                    assert_eq!(ev.kind, "tool_execution_end");
+                    assert_eq!(ev.tool_name(), Some("bash"));
+                    assert_eq!(ev.raw["toolCallId"], "c1");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        {
+            let unknown = r#"{"type":"brand_new_event","futureField":{"deep":[1]}}"#;
+            match parse_line(unknown).unwrap() {
+                RpcMessage::Event(ev) => {
+                    assert_eq!(ev.kind, "brand_new_event");
+                    assert_eq!(ev.raw["futureField"]["deep"], json!([1]));
+                }
+                other => panic!("{other:?}"),
+            }
+            // A response with unknown extra fields still parses.
+            let extra = r#"{"type":"response","command":"get_state","success":true,"future":"x"}"#;
+            assert!(matches!(
+                parse_line(extra),
+                Some(RpcMessage::Response(RpcResponse { .. }))
+            ));
+            // Not JSON at all: nothing to interpret (the raw line is still logged).
+            assert!(parse_line("garbage").is_none());
+            assert!(parse_line("").is_none());
+            // A response missing every field still parses into the shell.
+            assert!(matches!(
+                parse_line(r#"{"type":"response"}"#),
+                Some(RpcMessage::Response(_))
+            ));
+        }
+        {
+            let select = r#"{"type":"extension_ui_request","id":"u1","method":"select","title":"Pick",
+                "options":["a","b"],"timeout":10000,"futureField":1}"#;
+            match parse_line(select).unwrap() {
+                RpcMessage::Ui(req) => {
+                    assert_eq!(req.id, "u1");
+                    assert!(req.is_dialog());
+                    assert_eq!(req.options, Some(vec!["a".into(), "b".into()]));
+                    assert_eq!(req.timeout, Some(10_000));
+                    assert_eq!(req.display_question(), "Pick");
+                }
+                other => panic!("{other:?}"),
+            }
+            let confirm = r#"{"type":"extension_ui_request","id":"u2","method":"confirm","title":"Sure?","message":"All gone."}"#;
+            match parse_line(confirm).unwrap() {
+                RpcMessage::Ui(req) => {
+                    assert!(req.is_dialog());
+                    assert_eq!(req.display_question(), "Sure?\nAll gone.");
+                }
+                other => panic!("{other:?}"),
+            }
+            // Fire-and-forget methods need no reply.
+            let notify = r#"{"type":"extension_ui_request","id":"u3","method":"notify","message":"heads up","notifyType":"info"}"#;
+            match parse_line(notify).unwrap() {
+                RpcMessage::Ui(req) => {
+                    assert!(!req.is_dialog());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
     }
 }

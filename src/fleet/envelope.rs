@@ -433,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn envelope_shape_matches_the_pinned_contract() {
+    fn pinned_wire_shape() {
         let mut env = Envelope::new(
             Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION),
             Party::worker(worker_uuid()),
@@ -450,277 +450,235 @@ mod tests {
     }
 
     #[test]
-    fn ids_and_timestamps_are_generated() {
-        let env = Envelope::abort(Party::Console, Party::worker(worker_uuid()));
-        assert!(env.id.starts_with("m_"));
-        assert!(env.ts.ends_with('Z') && env.ts.len() == 24, "{}", env.ts);
-        assert_eq!(env.to, Party::Worker(worker_uuid()));
-    }
-
-    #[test]
-    fn every_inbox_variant_round_trips_and_decodes() {
-        let from = Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION);
-        let to = Party::worker(worker_uuid());
-        let cases: Vec<Envelope> = vec![
-            Envelope::steer(from.clone(), to.clone(), "use tabs"),
-            Envelope::follow_up(from.clone(), to.clone(), "after this, run fmt"),
-            Envelope::command(from.clone(), to.clone(), "/skill:some-skill extra"),
-            Envelope::thinking(from.clone(), to.clone(), "max"),
-            Envelope::abort(from.clone(), to.clone()),
-            Envelope::answer(Party::Console, to.clone(), "argon2", Some("m_q1".into())),
-            Envelope::answer(Party::Console, to.clone(), "go with option a", None),
-            Envelope::model(from.clone(), to, "claude-fable-5", Some("anthropic".into())),
-            Envelope::model(from, Party::worker(worker_uuid()), "glm-5.3", None),
-        ];
-        for env in &cases {
-            let parsed = round_trip(env);
-            assert!(parsed.decode().is_some(), "{} did not decode", parsed.kind);
-        }
-        let steer = round_trip(&cases[0]);
-        assert_eq!(steer.decode(), Some(Decoded::Steer("use tabs")));
-        let abort = round_trip(&cases[4]);
-        assert_eq!(abort.decode(), Some(Decoded::Abort));
-        // `abort` on the wire carries an empty payload object.
-        let abort_line = serde_json::to_string(&cases[4]).unwrap();
-        assert!(
-            abort_line.contains(r#""type":"abort","payload":{}"#),
-            "{abort_line}"
-        );
-        let answer = round_trip(&cases[5]);
-        assert_eq!(
-            answer.decode(),
-            Some(Decoded::Answer {
-                message: Some("argon2"),
-                question_id: Some("m_q1")
-            })
-        );
-        let answer_no_id = round_trip(&cases[6]);
-        assert_eq!(
-            answer_no_id.decode(),
-            Some(Decoded::Answer {
-                message: Some("go with option a"),
-                question_id: None
-            })
-        );
-        let model = round_trip(&cases[7]);
-        assert_eq!(
-            model.decode(),
-            Some(Decoded::Model {
-                model_id: "claude-fable-5",
-                provider: Some("anthropic")
-            })
-        );
-        // A null provider serializes as null and decodes to None.
-        let model_line = serde_json::to_string(&cases[8]).unwrap();
-        assert!(model_line.contains(r#""provider":null"#), "{model_line}");
-        let model_null = round_trip(&cases[8]);
-        assert_eq!(
-            model_null.decode(),
-            Some(Decoded::Model {
-                model_id: "glm-5.3",
-                provider: None
-            })
-        );
-    }
-
-    #[test]
-    fn every_outbox_variant_round_trips_and_decodes() {
-        let from = Party::worker(worker_uuid());
-        let question = QuestionPayload {
-            question: "which fixture style?".to_string(),
-            options: Some(vec!["a".into(), "b".into()]),
-            context: Some("tests/helpers.ts".into()),
-        };
-        let env = Envelope::question(from.clone(), question.clone());
-        assert_eq!(env.to, Party::Fleet);
-        let parsed = round_trip(&env);
-        assert_eq!(parsed.decode(), Some(Decoded::Question(question)));
-
-        let env = Envelope::question(
-            from.clone(),
-            QuestionPayload {
-                question: "proceed?".into(),
-                options: None,
-                context: None,
-            },
-        );
-        let parsed = round_trip(&env);
-        match parsed.decode() {
-            Some(Decoded::Question(q)) => {
-                assert_eq!(q.options, None);
-                assert_eq!(q.context, None);
+    fn every_variant_round_trips() {
+        {
+            let from = Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION);
+            let to = Party::worker(worker_uuid());
+            let cases: Vec<Envelope> = vec![
+                Envelope::steer(from.clone(), to.clone(), "use tabs"),
+                Envelope::follow_up(from.clone(), to.clone(), "after this, run fmt"),
+                Envelope::command(from.clone(), to.clone(), "/skill:some-skill extra"),
+                Envelope::thinking(from.clone(), to.clone(), "max"),
+                Envelope::abort(from.clone(), to.clone()),
+                Envelope::answer(Party::Console, to.clone(), "argon2", Some("m_q1".into())),
+                Envelope::answer(Party::Console, to.clone(), "go with option a", None),
+                Envelope::model(from.clone(), to, "claude-fable-5", Some("anthropic".into())),
+                Envelope::model(from, Party::worker(worker_uuid()), "glm-5.3", None),
+            ];
+            for env in &cases {
+                let parsed = round_trip(env);
+                assert!(parsed.decode().is_some(), "{} did not decode", parsed.kind);
             }
-            other => panic!("{other:?}"),
-        }
-
-        let progress = Envelope::progress(from.clone(), "running tests");
-        let parsed = round_trip(&progress);
-        assert_eq!(
-            parsed.decode(),
-            Some(Decoded::Progress("running tests".into()))
-        );
-
-        for (how, expect) in [
-            (Resolution::Answered, "answered"),
-            (Resolution::Timeout, "timeout"),
-            (Resolution::Aborted, "aborted"),
-        ] {
-            let env = Envelope::question_resolved(from.clone(), "m_q1", how);
-            let line = serde_json::to_string(&env).unwrap();
-            assert!(line.contains(&format!(r#""how":"{expect}""#)), "{line}");
-            let parsed = round_trip(&env);
+            let steer = round_trip(&cases[0]);
+            assert_eq!(steer.decode(), Some(Decoded::Steer("use tabs")));
+            let abort = round_trip(&cases[4]);
+            assert_eq!(abort.decode(), Some(Decoded::Abort));
+            // `abort` on the wire carries an empty payload object.
+            let abort_line = serde_json::to_string(&cases[4]).unwrap();
+            assert!(
+                abort_line.contains(r#""type":"abort","payload":{}"#),
+                "{abort_line}"
+            );
+            let answer = round_trip(&cases[5]);
             assert_eq!(
-                parsed.decode(),
-                Some(Decoded::QuestionResolved {
-                    question_id: "m_q1".into(),
-                    how
+                answer.decode(),
+                Some(Decoded::Answer {
+                    message: Some("argon2"),
+                    question_id: Some("m_q1")
+                })
+            );
+            let answer_no_id = round_trip(&cases[6]);
+            assert_eq!(
+                answer_no_id.decode(),
+                Some(Decoded::Answer {
+                    message: Some("go with option a"),
+                    question_id: None
+                })
+            );
+            let model = round_trip(&cases[7]);
+            assert_eq!(
+                model.decode(),
+                Some(Decoded::Model {
+                    model_id: "claude-fable-5",
+                    provider: Some("anthropic")
+                })
+            );
+            // A null provider serializes as null and decodes to None.
+            let model_line = serde_json::to_string(&cases[8]).unwrap();
+            assert!(model_line.contains(r#""provider":null"#), "{model_line}");
+            let model_null = round_trip(&cases[8]);
+            assert_eq!(
+                model_null.decode(),
+                Some(Decoded::Model {
+                    model_id: "glm-5.3",
+                    provider: None
                 })
             );
         }
-    }
+        {
+            let from = Party::worker(worker_uuid());
+            let question = QuestionPayload {
+                question: "which fixture style?".to_string(),
+                options: Some(vec!["a".into(), "b".into()]),
+                context: Some("tests/helpers.ts".into()),
+            };
+            let env = Envelope::question(from.clone(), question.clone());
+            assert_eq!(env.to, Party::Fleet);
+            let parsed = round_trip(&env);
+            assert_eq!(parsed.decode(), Some(Decoded::Question(question)));
 
-    #[test]
-    fn unknown_type_parses_but_decodes_to_none() {
-        let line = r#"{"id":"m_x","ts":"2026-08-30T12:00:00.000Z","from":"orchestrator","to":"worker:r-1","type":"brand_new_kind","payload":{"whatever":1}}"#;
-        let env = Envelope::parse_line(line).expect("a well-shaped envelope of unknown type");
-        assert_eq!(env.kind, "brand_new_kind");
-        assert_eq!(env.decode(), None);
-    }
-
-    #[test]
-    fn unknown_payload_fields_are_tolerated() {
-        let line = r#"{"id":"m_x","ts":"t","from":"console","to":"worker:r-1","type":"steer","payload":{"message":"hi","futureField":[1,2]}}"#;
-        let env = Envelope::parse_line(line).unwrap();
-        assert_eq!(env.decode(), Some(Decoded::Steer("hi")));
-    }
-
-    #[test]
-    fn malformed_lines_are_skipped_not_errors() {
-        assert!(Envelope::parse_line("not json").is_none());
-        assert!(Envelope::parse_line(r#"{"id":"m_1"}"#).is_none());
-        assert!(Envelope::parse_line(
-            r#"{"id":"m_1","ts":"t","from":"stranger","to":"worker:r","type":"steer","payload":{}}"#
-        )
-        .is_none());
-        assert!(Envelope::parse_line(
-            r#"{"id":"m_1","ts":"t","from":"worker:","to":"worker:r","type":"steer","payload":{}}"#
-        )
-        .is_none());
-        // Known type with a payload of the wrong shape: parses, decodes to None.
-        let env = Envelope::parse_line(
-            r#"{"id":"m_1","ts":"t","from":"console","to":"worker:r","type":"steer","payload":{"oops":1}}"#,
-        )
-        .unwrap();
-        assert_eq!(env.decode(), None);
-        // `model` without a message is skipped like any other malformed payload.
-        let env = Envelope::parse_line(
-            r#"{"id":"m_1","ts":"t","from":"console","to":"worker:r","type":"model","payload":{"provider":"p"}}"#,
-        )
-        .unwrap();
-        assert_eq!(env.decode(), None);
-    }
-
-    #[test]
-    fn parties_round_trip_through_strings() {
-        for s in ["orchestrator", "console", "fleet"] {
-            let party: Party = s.parse().unwrap();
-            assert_eq!(party.to_string(), s);
-        }
-        // The default session's canonical spelling is the bare form.
-        assert_eq!(
-            Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION).to_string(),
-            "orchestrator"
-        );
-        assert!("bogus".parse::<Party>().is_err());
-        assert_eq!(Party::worker(worker_uuid()), Party::Worker(worker_uuid()));
-    }
-
-    #[test]
-    fn the_four_legacy_and_new_parse_forms_are_accepted_forever() {
-        // bare orchestrator — the default session
-        assert_eq!(
-            "orchestrator".parse::<Party>().unwrap(),
-            Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION)
-        );
-        // orchestrator:<uuid> — that session
-        assert_eq!(
-            format!("orchestrator:{}", sess_uuid())
-                .parse::<Party>()
-                .unwrap(),
-            Party::Orchestrator(sess_uuid())
-        );
-        // worker:<uuid> — that worker
-        assert_eq!(
-            format!("worker:{}", worker_uuid())
-                .parse::<Party>()
-                .unwrap(),
-            Party::Worker(worker_uuid())
-        );
-        // worker:<anything not a uuid> — a legacy run id, mapped to a
-        // stable derived uuid (same id, same party; different ids differ)
-        let legacy: Party = "worker:auth-20260828141530".parse().unwrap();
-        assert_eq!(
-            legacy,
-            Party::Worker(legacy_worker_uuid("auth-20260828141530"))
-        );
-        assert_eq!(
-            "worker:auth-20260828141530".parse::<Party>().unwrap(),
-            legacy
-        );
-        assert_eq!(
-            legacy.to_string(),
-            format!("worker:{}", legacy_worker_uuid("auth-20260828141530"))
-        );
-        assert_ne!(
-            legacy_worker_uuid("auth-20260828141530"),
-            legacy_worker_uuid("other-20990101000000")
-        );
-        // An unparseable orchestrator payload is not a party (the line is
-        // skipped by readers, exactly like the other malformed forms).
-        assert!("orchestrator:nope".parse::<Party>().is_err());
-        assert!("worker:".parse::<Party>().is_err());
-    }
-
-    #[test]
-    fn the_new_display_forms_round_trip() {
-        for uuid in [worker_uuid(), sess_uuid()] {
-            let orchestrator = format!("orchestrator:{uuid}");
-            assert_eq!(
-                orchestrator.parse::<Party>().unwrap().to_string(),
-                orchestrator
+            let env = Envelope::question(
+                from.clone(),
+                QuestionPayload {
+                    question: "proceed?".into(),
+                    options: None,
+                    context: None,
+                },
             );
-            let worker = format!("worker:{uuid}");
-            assert_eq!(worker.parse::<Party>().unwrap().to_string(), worker);
+            let parsed = round_trip(&env);
+            match parsed.decode() {
+                Some(Decoded::Question(q)) => {
+                    assert_eq!(q.options, None);
+                    assert_eq!(q.context, None);
+                }
+                other => panic!("{other:?}"),
+            }
+
+            let progress = Envelope::progress(from.clone(), "running tests");
+            let parsed = round_trip(&progress);
+            assert_eq!(
+                parsed.decode(),
+                Some(Decoded::Progress("running tests".into()))
+            );
+
+            for (how, expect) in [
+                (Resolution::Answered, "answered"),
+                (Resolution::Timeout, "timeout"),
+                (Resolution::Aborted, "aborted"),
+            ] {
+                let env = Envelope::question_resolved(from.clone(), "m_q1", how);
+                let line = serde_json::to_string(&env).unwrap();
+                assert!(line.contains(&format!(r#""how":"{expect}""#)), "{line}");
+                let parsed = round_trip(&env);
+                assert_eq!(
+                    parsed.decode(),
+                    Some(Decoded::QuestionResolved {
+                        question_id: "m_q1".into(),
+                        how
+                    })
+                );
+            }
         }
     }
 
     #[test]
-    fn append_envelope_appends_one_line_per_call() {
-        let dir = std::env::temp_dir().join(format!(
-            "pilotfish-env-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("inbox.jsonl");
-        append_envelope(
-            &path,
-            &Envelope::steer(
-                Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION),
-                Party::worker(worker_uuid()),
-                "a",
-            ),
-        )
-        .unwrap();
-        append_envelope(
-            &path,
-            &Envelope::abort(Party::Console, Party::worker(worker_uuid())),
-        )
-        .unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let lines: Vec<&str> = raw.trim_end().split('\n').collect();
-        assert_eq!(lines.len(), 2);
-        assert!(Envelope::parse_line(lines[0]).unwrap().decode().is_some());
-        assert!(Envelope::parse_line(lines[1]).unwrap().decode().is_some());
+    fn tolerant_reader() {
+        {
+            let line = r#"{"id":"m_x","ts":"2026-08-30T12:00:00.000Z","from":"orchestrator","to":"worker:r-1","type":"brand_new_kind","payload":{"whatever":1}}"#;
+            let env = Envelope::parse_line(line).expect("a well-shaped envelope of unknown type");
+            assert_eq!(env.kind, "brand_new_kind");
+            assert_eq!(env.decode(), None);
+        }
+        {
+            let line = r#"{"id":"m_x","ts":"t","from":"console","to":"worker:r-1","type":"steer","payload":{"message":"hi","futureField":[1,2]}}"#;
+            let env = Envelope::parse_line(line).unwrap();
+            assert_eq!(env.decode(), Some(Decoded::Steer("hi")));
+        }
+        {
+            assert!(Envelope::parse_line("not json").is_none());
+            assert!(Envelope::parse_line(r#"{"id":"m_1"}"#).is_none());
+            assert!(Envelope::parse_line(
+                r#"{"id":"m_1","ts":"t","from":"stranger","to":"worker:r","type":"steer","payload":{}}"#
+            )
+            .is_none());
+            assert!(Envelope::parse_line(
+                r#"{"id":"m_1","ts":"t","from":"worker:","to":"worker:r","type":"steer","payload":{}}"#
+            )
+            .is_none());
+            // Known type with a payload of the wrong shape: parses, decodes to None.
+            let env = Envelope::parse_line(
+                r#"{"id":"m_1","ts":"t","from":"console","to":"worker:r","type":"steer","payload":{"oops":1}}"#,
+            )
+            .unwrap();
+            assert_eq!(env.decode(), None);
+            // `model` without a message is skipped like any other malformed payload.
+            let env = Envelope::parse_line(
+                r#"{"id":"m_1","ts":"t","from":"console","to":"worker:r","type":"model","payload":{"provider":"p"}}"#,
+            )
+            .unwrap();
+            assert_eq!(env.decode(), None);
+        }
+    }
+
+    #[test]
+    fn party_forms() {
+        {
+            for s in ["orchestrator", "console", "fleet"] {
+                let party: Party = s.parse().unwrap();
+                assert_eq!(party.to_string(), s);
+            }
+            // The default session's canonical spelling is the bare form.
+            assert_eq!(
+                Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION).to_string(),
+                "orchestrator"
+            );
+            assert!("bogus".parse::<Party>().is_err());
+            assert_eq!(Party::worker(worker_uuid()), Party::Worker(worker_uuid()));
+        }
+        {
+            // bare orchestrator — the default session
+            assert_eq!(
+                "orchestrator".parse::<Party>().unwrap(),
+                Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION)
+            );
+            // orchestrator:<uuid> — that session
+            assert_eq!(
+                format!("orchestrator:{}", sess_uuid())
+                    .parse::<Party>()
+                    .unwrap(),
+                Party::Orchestrator(sess_uuid())
+            );
+            // worker:<uuid> — that worker
+            assert_eq!(
+                format!("worker:{}", worker_uuid())
+                    .parse::<Party>()
+                    .unwrap(),
+                Party::Worker(worker_uuid())
+            );
+            // worker:<anything not a uuid> — a legacy run id, mapped to a
+            // stable derived uuid (same id, same party; different ids differ)
+            let legacy: Party = "worker:auth-20260828141530".parse().unwrap();
+            assert_eq!(
+                legacy,
+                Party::Worker(legacy_worker_uuid("auth-20260828141530"))
+            );
+            assert_eq!(
+                "worker:auth-20260828141530".parse::<Party>().unwrap(),
+                legacy
+            );
+            assert_eq!(
+                legacy.to_string(),
+                format!("worker:{}", legacy_worker_uuid("auth-20260828141530"))
+            );
+            assert_ne!(
+                legacy_worker_uuid("auth-20260828141530"),
+                legacy_worker_uuid("other-20990101000000")
+            );
+            // An unparseable orchestrator payload is not a party (the line is
+            // skipped by readers, exactly like the other malformed forms).
+            assert!("orchestrator:nope".parse::<Party>().is_err());
+            assert!("worker:".parse::<Party>().is_err());
+        }
+        {
+            for uuid in [worker_uuid(), sess_uuid()] {
+                let orchestrator = format!("orchestrator:{uuid}");
+                assert_eq!(
+                    orchestrator.parse::<Party>().unwrap().to_string(),
+                    orchestrator
+                );
+                let worker = format!("worker:{uuid}");
+                assert_eq!(worker.parse::<Party>().unwrap().to_string(), worker);
+            }
+        }
     }
 }

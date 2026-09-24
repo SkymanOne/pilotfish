@@ -230,95 +230,93 @@ mod tests {
     use crate::tui::model::SessionTarget;
 
     #[test]
-    fn the_orchestrator_row_keeps_its_accent_when_selected() {
-        let pal = Palette::colored();
-        let orch = DashboardRow {
-            key: "orchestrator".into(),
-            glyph: "●",
-            name: "orchestrator · docs".into(),
-            detail: "idle".into(),
-            age: String::new(),
-            target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
-            attention: false,
-            branch: None,
-            diff_stat: None,
-        };
-        let worker = DashboardRow {
-            key: "auth-1f2e3d4".into(),
-            name: "auth".into(),
-            target: SessionTarget::Worker {
-                run_id: "auth-1f2e3d4".into(),
-            },
-            ..orch.clone()
-        };
-        let accent = pal.accent().fg;
-        for selected in [false, true] {
-            let line = primary_line(&orch, selected, 30, &pal);
+    fn row_styles() {
+        {
+            let pal = Palette::colored();
+            let orch = DashboardRow {
+                key: "orchestrator".into(),
+                glyph: "●",
+                name: "orchestrator · docs".into(),
+                detail: "idle".into(),
+                age: String::new(),
+                target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
+                attention: false,
+                branch: None,
+                diff_stat: None,
+            };
+            let worker = DashboardRow {
+                key: "auth-1f2e3d4".into(),
+                name: "auth".into(),
+                target: SessionTarget::Worker {
+                    run_id: "auth-1f2e3d4".into(),
+                },
+                ..orch.clone()
+            };
+            let accent = pal.accent().fg;
+            for selected in [false, true] {
+                let line = primary_line(&orch, selected, 30, &pal);
+                assert!(
+                    line.spans.iter().all(|s| s.style.fg == accent),
+                    "the session that owns the conversation keeps its colour (selected: {selected}): {line:?}"
+                );
+                let line = primary_line(&worker, selected, 30, &pal);
+                assert!(
+                    line.spans.iter().all(|s| s.style.fg != accent),
+                    "a worker never borrows it (selected: {selected}): {line:?}"
+                );
+            }
+            // selection still paints its background over both
+            let line = primary_line(&orch, true, 30, &pal);
             assert!(
-                line.spans.iter().all(|s| s.style.fg == accent),
-                "the session that owns the conversation keeps its colour (selected: {selected}): {line:?}"
-            );
-            let line = primary_line(&worker, selected, 30, &pal);
-            assert!(
-                line.spans.iter().all(|s| s.style.fg != accent),
-                "a worker never borrows it (selected: {selected}): {line:?}"
+                line.spans.iter().all(|s| s.style.bg == pal.selected().bg),
+                "{line:?}"
             );
         }
-        // selection still paints its background over both
-        let line = primary_line(&orch, true, 30, &pal);
-        assert!(
-            line.spans.iter().all(|s| s.style.bg == pal.selected().bg),
-            "{line:?}"
-        );
-    }
-
-    #[test]
-    fn a_selected_worker_that_wants_the_human_stays_yellow() {
-        let pal = Palette::colored();
-        let row = DashboardRow {
-            key: "auth-1f2e3d4".into(),
-            glyph: "●",
-            name: "auth".into(),
-            detail: "blocked".into(),
-            age: "2m".into(),
-            target: SessionTarget::Worker {
-                run_id: "auth-1f2e3d4".into(),
-            },
-            attention: true,
-            branch: None,
-            diff_stat: None,
-        };
-        let line = primary_line(&row, true, 30, &pal);
-        assert!(
-            line.spans.iter().all(|s| s.style.fg == pal.attention().fg),
-            "selection must not hide a pending question: {line:?}"
-        );
-    }
-
-    #[test]
-    fn the_selected_rows_detail_stays_readable() {
-        let pal = Palette::colored();
-        let row = DashboardRow {
-            key: "orchestrator".into(),
-            glyph: "○",
-            name: "orchestrator".into(),
-            detail: "idle".into(),
-            age: String::new(),
-            target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
-            attention: false,
-            branch: None,
-            diff_stat: None,
-        };
-        let line = secondary_line(&row, true, &pal);
-        assert!(
-            line.spans
-                .iter()
-                .all(|s| s.style.fg.is_none() || s.style.fg != s.style.bg),
-            "text drawn in its own background colour is invisible: {line:?}"
-        );
-        assert_ne!(
-            line.spans[1].style,
-            secondary_line(&row, false, &pal).spans[1].style
-        );
+        {
+            let pal = Palette::colored();
+            let row = DashboardRow {
+                key: "auth-1f2e3d4".into(),
+                glyph: "●",
+                name: "auth".into(),
+                detail: "blocked".into(),
+                age: "2m".into(),
+                target: SessionTarget::Worker {
+                    run_id: "auth-1f2e3d4".into(),
+                },
+                attention: true,
+                branch: None,
+                diff_stat: None,
+            };
+            let line = primary_line(&row, true, 30, &pal);
+            assert!(
+                line.spans.iter().all(|s| s.style.fg == pal.attention().fg),
+                "selection must not hide a pending question: {line:?}"
+            );
+        }
+        {
+            let pal = Palette::colored();
+            let row = DashboardRow {
+                key: "orchestrator".into(),
+                glyph: "○",
+                name: "orchestrator".into(),
+                detail: "idle".into(),
+                age: String::new(),
+                target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
+                attention: false,
+                branch: None,
+                diff_stat: None,
+            };
+            let line = secondary_line(&row, true, &pal);
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|s| s.style.fg.is_none() || s.style.fg != s.style.bg),
+                "text drawn in its own background colour is invisible: {line:?}"
+            );
+            assert_ne!(
+                line.spans[1].style,
+                secondary_line(&row, false, &pal).spans[1].style
+            );
+        }
     }
 }

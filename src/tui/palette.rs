@@ -347,208 +347,194 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_command_a_console_command_shadows_is_listed_once() {
-        // claude offers /model, and so does the console, whose version runs
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let models: Vec<&PaletteItem> = items.iter().filter(|i| i.label == "/model").collect();
-        assert_eq!(models.len(), 1, "{models:?}");
-        assert!(matches!(models[0].action, PaletteAction::ConsoleCommand(_)));
-        assert!(
-            items.iter().any(|i| i.label == "/usage"),
-            "an agent command nothing shadows still rides along"
-        );
+    fn palette_items() {
+        {
+            // claude offers /model, and so does the console, whose version runs
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let models: Vec<&PaletteItem> = items.iter().filter(|i| i.label == "/model").collect();
+            assert_eq!(models.len(), 1, "{models:?}");
+            assert!(matches!(models[0].action, PaletteAction::ConsoleCommand(_)));
+            assert!(
+                items.iter().any(|i| i.label == "/usage"),
+                "an agent command nothing shadows still rides along"
+            );
+        }
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let console: Vec<&str> = items
+                .iter()
+                .filter(|i| i.group == PaletteGroup::Console)
+                .map(|i| i.label.as_str())
+                .collect();
+            assert!(!console.contains(&"/stop"), "{console:?}");
+            assert!(console.contains(&"/help"));
+            assert!(
+                console.contains(&"/model"),
+                "/model is a console command now"
+            );
+
+            let items = build_items(&worker_ctx(), PaletteScope::All);
+            let console: Vec<&str> = items
+                .iter()
+                .filter(|i| i.group == PaletteGroup::Console)
+                .map(|i| i.label.as_str())
+                .collect();
+            assert!(console.contains(&"/answer"));
+            assert!(console.contains(&"/stop"));
+        }
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let groups = groups_of(&items);
+            let first = |g: &PaletteGroup| groups.iter().position(|x| x == g).unwrap();
+            assert!(first(&PaletteGroup::Console) < first(&PaletteGroup::Agent { source: None }));
+            assert!(first(&PaletteGroup::Agent { source: None }) < first(&PaletteGroup::Servers));
+            assert!(first(&PaletteGroup::Servers) < first(&PaletteGroup::Models));
+            assert!(first(&PaletteGroup::Models) < first(&PaletteGroup::Sessions));
+        }
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let usage = items.iter().find(|i| i.label == "/usage").unwrap();
+            assert_eq!(
+                usage.group,
+                PaletteGroup::Agent { source: None },
+                "claude's commands have no source"
+            );
+            assert_eq!(
+                usage.action,
+                PaletteAction::AgentCommand {
+                    name: "usage".into(),
+                    takes_argument: false
+                }
+            );
+
+            let items = build_items(&worker_ctx(), PaletteScope::All);
+            let skill = items.iter().find(|i| i.label == "/skill:review").unwrap();
+            assert_eq!(
+                skill.group,
+                PaletteGroup::Agent {
+                    source: Some("skill".into())
+                }
+            );
+            assert!(skill.detail.contains("[skill]"));
+            // pi command names are whatever the worker reports, odd or not
+            assert!(items.iter().any(|i| i.label == "/list-todos"));
+        }
+        {
+            let items = build_items(&worker_ctx(), PaletteScope::Models);
+            assert_eq!(items.len(), 2, "{items:?}");
+            let opus = items.iter().find(|i| i.label == "Opus").unwrap();
+            assert_eq!(
+                opus.action,
+                PaletteAction::Model {
+                    model_id: "claude-opus-5".into(),
+                    provider: Some("anthropic".into())
+                }
+            );
+            // unnamed models fall back to their id
+            assert!(items.iter().any(|i| i.label == "gpt-5.6"));
+
+            let items = build_items(&orchestrator_ctx(), PaletteScope::Models);
+            let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                vec!["opus", "sonnet", "haiku", "fable", "opusplan"],
+                "the known aliases, nothing else invented"
+            );
+            assert_eq!(
+                items[0].action,
+                PaletteAction::Model {
+                    model_id: "opus".into(),
+                    provider: None
+                }
+            );
+        }
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let server = items.iter().find(|i| i.label == "fleet").unwrap();
+            assert_eq!(server.group, PaletteGroup::Servers);
+            assert_eq!(server.action, PaletteAction::Reference);
+            assert!(server.detail.contains("connected"));
+            assert!(server.detail.contains("2 tools"));
+            let tool = items
+                .iter()
+                .find(|i| i.label == "mcp__fleet__fleet_spawn")
+                .unwrap();
+            assert_eq!(tool.action, PaletteAction::Reference);
+            assert!(tool.detail.contains("fleet"));
+        }
+        {
+            let items = build_items(&worker_ctx(), PaletteScope::All);
+            let jump = items.iter().find(|i| i.label == "db").unwrap();
+            assert_eq!(jump.group, PaletteGroup::Sessions);
+            assert_eq!(
+                jump.action,
+                PaletteAction::JumpTo(1),
+                "row index, orchestrator at 0"
+            );
+        }
+        {
+            assert_eq!(PaletteGroup::Console.label(), "console");
+            assert_eq!(PaletteGroup::Agent { source: None }.label(), "agent");
+            assert_eq!(
+                PaletteGroup::Agent {
+                    source: Some("skill".into())
+                }
+                .label(),
+                "agent · skill"
+            );
+            assert_eq!(PaletteGroup::Servers.label(), "mcp");
+            assert_eq!(PaletteGroup::Models.label(), "models");
+            assert_eq!(PaletteGroup::Sessions.label(), "sessions");
+        }
     }
 
     #[test]
-    fn console_group_hides_worker_only_commands_on_the_orchestrator() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let console: Vec<&str> = items
-            .iter()
-            .filter(|i| i.group == PaletteGroup::Console)
-            .map(|i| i.label.as_str())
-            .collect();
-        assert!(!console.contains(&"/stop"), "{console:?}");
-        assert!(console.contains(&"/help"));
-        assert!(
-            console.contains(&"/model"),
-            "/model is a console command now"
-        );
+    fn palette_ranking() {
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let ranked = ranked("", &items);
+            assert_eq!(ranked.len(), items.len());
+            assert!(ranked.windows(2).all(|w| w[0].index < w[1].index));
+        }
+        {
+            let items = vec![
+                PaletteItem {
+                    label: "/followup".into(),
+                    detail: String::new(),
+                    group: PaletteGroup::Console,
+                    action: PaletteAction::ConsoleCommand("/followup".into()),
+                },
+                PaletteItem {
+                    label: "/stop".into(),
+                    detail: String::new(),
+                    group: PaletteGroup::Console,
+                    action: PaletteAction::ConsoleCommand("/stop".into()),
+                },
+                PaletteItem {
+                    label: "mcp__x__stop_tool".into(),
+                    detail: String::new(),
+                    group: PaletteGroup::Servers,
+                    action: PaletteAction::Reference,
+                },
+            ];
+            let matches = ranked("stop", &items);
+            assert_eq!(matches.len(), 2, "followup does not match");
+            // "/stop" starts with the query and outranks a mid-string match
+            assert_eq!(items[matches[0].index].label, "/stop");
+            assert!(matches[0].score > matches[1].score);
 
-        let items = build_items(&worker_ctx(), PaletteScope::All);
-        let console: Vec<&str> = items
-            .iter()
-            .filter(|i| i.group == PaletteGroup::Console)
-            .map(|i| i.label.as_str())
-            .collect();
-        assert!(console.contains(&"/answer"));
-        assert!(console.contains(&"/stop"));
-    }
-
-    #[test]
-    fn groups_come_in_display_order() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let groups = groups_of(&items);
-        let first = |g: &PaletteGroup| groups.iter().position(|x| x == g).unwrap();
-        assert!(first(&PaletteGroup::Console) < first(&PaletteGroup::Agent { source: None }));
-        assert!(first(&PaletteGroup::Agent { source: None }) < first(&PaletteGroup::Servers));
-        assert!(first(&PaletteGroup::Servers) < first(&PaletteGroup::Models));
-        assert!(first(&PaletteGroup::Models) < first(&PaletteGroup::Sessions));
-    }
-
-    #[test]
-    fn agent_commands_pass_through_verbatim_for_both_targets() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let usage = items.iter().find(|i| i.label == "/usage").unwrap();
-        assert_eq!(
-            usage.group,
-            PaletteGroup::Agent { source: None },
-            "claude's commands have no source"
-        );
-        assert_eq!(
-            usage.action,
-            PaletteAction::AgentCommand {
-                name: "usage".into(),
-                takes_argument: false
-            }
-        );
-
-        let items = build_items(&worker_ctx(), PaletteScope::All);
-        let skill = items.iter().find(|i| i.label == "/skill:review").unwrap();
-        assert_eq!(
-            skill.group,
-            PaletteGroup::Agent {
-                source: Some("skill".into())
-            }
-        );
-        assert!(skill.detail.contains("[skill]"));
-        // pi command names are whatever the worker reports, odd or not
-        assert!(items.iter().any(|i| i.label == "/list-todos"));
-    }
-
-    #[test]
-    fn models_come_from_the_worker_list_or_the_orchestrator_aliases() {
-        let items = build_items(&worker_ctx(), PaletteScope::Models);
-        assert_eq!(items.len(), 2, "{items:?}");
-        let opus = items.iter().find(|i| i.label == "Opus").unwrap();
-        assert_eq!(
-            opus.action,
-            PaletteAction::Model {
-                model_id: "claude-opus-5".into(),
-                provider: Some("anthropic".into())
-            }
-        );
-        // unnamed models fall back to their id
-        assert!(items.iter().any(|i| i.label == "gpt-5.6"));
-
-        let items = build_items(&orchestrator_ctx(), PaletteScope::Models);
-        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["opus", "sonnet", "haiku", "fable", "opusplan"],
-            "the known aliases, nothing else invented"
-        );
-        assert_eq!(
-            items[0].action,
-            PaletteAction::Model {
-                model_id: "opus".into(),
-                provider: None
-            }
-        );
-    }
-
-    #[test]
-    fn servers_show_status_and_their_tools_for_reference() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let server = items.iter().find(|i| i.label == "fleet").unwrap();
-        assert_eq!(server.group, PaletteGroup::Servers);
-        assert_eq!(server.action, PaletteAction::Reference);
-        assert!(server.detail.contains("connected"));
-        assert!(server.detail.contains("2 tools"));
-        let tool = items
-            .iter()
-            .find(|i| i.label == "mcp__fleet__fleet_spawn")
-            .unwrap();
-        assert_eq!(tool.action, PaletteAction::Reference);
-        assert!(tool.detail.contains("fleet"));
-    }
-
-    #[test]
-    fn sessions_offer_a_jump_to_their_dashboard_row() {
-        let items = build_items(&worker_ctx(), PaletteScope::All);
-        let jump = items.iter().find(|i| i.label == "db").unwrap();
-        assert_eq!(jump.group, PaletteGroup::Sessions);
-        assert_eq!(
-            jump.action,
-            PaletteAction::JumpTo(1),
-            "row index, orchestrator at 0"
-        );
-    }
-
-    #[test]
-    fn empty_query_keeps_the_grouped_build_order() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let ranked = ranked("", &items);
-        assert_eq!(ranked.len(), items.len());
-        assert!(ranked.windows(2).all(|w| w[0].index < w[1].index));
-    }
-
-    #[test]
-    fn fuzzy_ranking_prefers_prefix_matches_and_drops_the_rest() {
-        let items = vec![
-            PaletteItem {
-                label: "/followup".into(),
-                detail: String::new(),
-                group: PaletteGroup::Console,
-                action: PaletteAction::ConsoleCommand("/followup".into()),
-            },
-            PaletteItem {
-                label: "/stop".into(),
-                detail: String::new(),
-                group: PaletteGroup::Console,
-                action: PaletteAction::ConsoleCommand("/stop".into()),
-            },
-            PaletteItem {
-                label: "mcp__x__stop_tool".into(),
-                detail: String::new(),
-                group: PaletteGroup::Servers,
-                action: PaletteAction::Reference,
-            },
-        ];
-        let matches = ranked("stop", &items);
-        assert_eq!(matches.len(), 2, "followup does not match");
-        // "/stop" starts with the query and outranks a mid-string match
-        assert_eq!(items[matches[0].index].label, "/stop");
-        assert!(matches[0].score > matches[1].score);
-
-        // a scattered query still finds its target: mdl → /model
-        let items = build_items(&orchestrator_ctx(), PaletteScope::All);
-        let matches = ranked("mdl", &items);
-        assert_eq!(items[matches[0].index].label, "/model");
-    }
-
-    #[test]
-    fn scope_models_hides_everything_but_models() {
-        let items = build_items(&orchestrator_ctx(), PaletteScope::Models);
-        assert!(items.iter().all(|i| i.group == PaletteGroup::Models));
-        // and `m` on a worker shows pi's models, not console commands
-        let items = build_items(&worker_ctx(), PaletteScope::Models);
-        assert!(items.iter().all(|i| i.group == PaletteGroup::Models));
-        assert_eq!(items.len(), 2);
-    }
-
-    #[test]
-    fn group_labels_name_their_source() {
-        assert_eq!(PaletteGroup::Console.label(), "console");
-        assert_eq!(PaletteGroup::Agent { source: None }.label(), "agent");
-        assert_eq!(
-            PaletteGroup::Agent {
-                source: Some("skill".into())
-            }
-            .label(),
-            "agent · skill"
-        );
-        assert_eq!(PaletteGroup::Servers.label(), "mcp");
-        assert_eq!(PaletteGroup::Models.label(), "models");
-        assert_eq!(PaletteGroup::Sessions.label(), "sessions");
+            // a scattered query still finds its target: mdl → /model
+            let items = build_items(&orchestrator_ctx(), PaletteScope::All);
+            let matches = ranked("mdl", &items);
+            assert_eq!(items[matches[0].index].label, "/model");
+        }
+        {
+            let items = build_items(&orchestrator_ctx(), PaletteScope::Models);
+            assert!(items.iter().all(|i| i.group == PaletteGroup::Models));
+            // and `m` on a worker shows pi's models, not console commands
+            let items = build_items(&worker_ctx(), PaletteScope::Models);
+            assert!(items.iter().all(|i| i.group == PaletteGroup::Models));
+            assert_eq!(items.len(), 2);
+        }
     }
 }

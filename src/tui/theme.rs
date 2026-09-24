@@ -190,40 +190,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn block_kinds_carry_the_old_console_color_language() {
-        let pal = Palette::colored();
-        assert_eq!(pal.block(BlockKind::User).fg, Some(Color::Cyan));
-        assert!(
-            pal.block(BlockKind::User)
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert_eq!(pal.block(BlockKind::Fleet).fg, Some(Color::Yellow));
-        assert_eq!(pal.block(BlockKind::Tool).fg, Some(Color::Blue));
-        assert_eq!(pal.block(BlockKind::Error).fg, Some(Color::Red));
-        // notices and tool output are dim: DarkGray in color, DIM without it
-        assert_eq!(pal.block(BlockKind::System).fg, Some(Color::DarkGray));
-        assert_eq!(pal.block(BlockKind::ToolResult).fg, Some(Color::DarkGray));
-        assert_eq!(pal.block(BlockKind::Text), Style::default());
-    }
-
-    #[test]
-    fn no_color_folds_to_attributes_and_dim() {
-        let pal = Palette::plain();
-        assert_eq!(pal.block(BlockKind::User).fg, None);
-        // bold survives: emphasis is not color
-        assert!(
-            pal.block(BlockKind::User)
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        // yellow-on-nothing becomes DIM so "attention" still reads
-        assert!(
-            pal.plain_fg(Color::Yellow)
-                .add_modifier
-                .contains(Modifier::DIM)
-        );
-        // selected folds to reversed instead of a background
-        assert!(pal.selected().add_modifier.contains(Modifier::REVERSED));
+    fn palette_styles() {
+        {
+            let pal = Palette::colored();
+            assert_eq!(pal.block(BlockKind::User).fg, Some(Color::Cyan));
+            assert!(
+                pal.block(BlockKind::User)
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            assert_eq!(pal.block(BlockKind::Fleet).fg, Some(Color::Yellow));
+            assert_eq!(pal.block(BlockKind::Tool).fg, Some(Color::Blue));
+            assert_eq!(pal.block(BlockKind::Error).fg, Some(Color::Red));
+            // notices and tool output are dim: DarkGray in color, DIM without it
+            assert_eq!(pal.block(BlockKind::System).fg, Some(Color::DarkGray));
+            assert_eq!(pal.block(BlockKind::ToolResult).fg, Some(Color::DarkGray));
+            assert_eq!(pal.block(BlockKind::Text), Style::default());
+        }
+        {
+            let pal = Palette::plain();
+            assert_eq!(pal.block(BlockKind::User).fg, None);
+            // bold survives: emphasis is not color
+            assert!(
+                pal.block(BlockKind::User)
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            // yellow-on-nothing becomes DIM so "attention" still reads
+            assert!(
+                pal.plain_fg(Color::Yellow)
+                    .add_modifier
+                    .contains(Modifier::DIM)
+            );
+            // selected folds to reversed instead of a background
+            assert!(pal.selected().add_modifier.contains(Modifier::REVERSED));
+        }
     }
 }

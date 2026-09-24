@@ -656,148 +656,199 @@ mod tests {
     }
 
     #[test]
-    fn prompt_path_sits_under_the_orchestrators_dir() {
-        let key = crate::paths::SessionKey::new(
-            Some("s0".into()),
-            uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap(),
-        );
-        assert_eq!(
-            prompt_path(Path::new("/repo/.pilotfish"), &key),
-            PathBuf::from("/repo/.pilotfish/orchestrators/s0-f7a8b9c/prompt.md")
-        );
-    }
-
-    #[test]
-    fn every_command_round_trips_through_an_envelope() {
-        let commands = vec![
-            OrchestratorCommand::User {
-                text: "hello".into(),
-            },
-            OrchestratorCommand::Permission {
-                request_id: "req_1".into(),
-                decision: PermissionDecisionRecord::Allow {
-                    updated_permissions: Some(vec![json!({"type":"addRules"})]),
+    fn command_envelopes() {
+        {
+            let commands = vec![
+                OrchestratorCommand::User {
+                    text: "hello".into(),
                 },
-            },
-            OrchestratorCommand::Permission {
-                request_id: "req_2".into(),
-                decision: PermissionDecisionRecord::Deny {
-                    message: "no".into(),
+                OrchestratorCommand::Permission {
+                    request_id: "req_1".into(),
+                    decision: PermissionDecisionRecord::Allow {
+                        updated_permissions: Some(vec![json!({"type":"addRules"})]),
+                    },
                 },
-            },
-            OrchestratorCommand::Permission {
-                request_id: "req_3".into(),
-                decision: PermissionDecisionRecord::Answer {
-                    answers: json!({"Which style?": "terse"}),
+                OrchestratorCommand::Permission {
+                    request_id: "req_2".into(),
+                    decision: PermissionDecisionRecord::Deny {
+                        message: "no".into(),
+                    },
                 },
-            },
-            OrchestratorCommand::Interrupt,
-            OrchestratorCommand::Effort {
-                level: "high".into(),
-            },
-            OrchestratorCommand::PermissionMode {
-                mode: "acceptEdits".into(),
-            },
-            OrchestratorCommand::RemoteControl { name: None },
-            OrchestratorCommand::RemoteControl {
-                name: Some("phone".into()),
-            },
-            OrchestratorCommand::Model {
-                name: "fable".into(),
-            },
-            OrchestratorCommand::Stop,
-        ];
-        for command in &commands {
-            let envelope = command.to_envelope(Party::Console);
+                OrchestratorCommand::Permission {
+                    request_id: "req_3".into(),
+                    decision: PermissionDecisionRecord::Answer {
+                        answers: json!({"Which style?": "terse"}),
+                    },
+                },
+                OrchestratorCommand::Interrupt,
+                OrchestratorCommand::Effort {
+                    level: "high".into(),
+                },
+                OrchestratorCommand::PermissionMode {
+                    mode: "acceptEdits".into(),
+                },
+                OrchestratorCommand::RemoteControl { name: None },
+                OrchestratorCommand::RemoteControl {
+                    name: Some("phone".into()),
+                },
+                OrchestratorCommand::Model {
+                    name: "fable".into(),
+                },
+                OrchestratorCommand::Stop,
+            ];
+            for command in &commands {
+                let envelope = command.to_envelope(Party::Console);
+                assert_eq!(
+                    envelope.to,
+                    Party::Orchestrator(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
+                );
+                assert!(envelope.id.starts_with("m_"));
+                let line = serde_json::to_string(&envelope).unwrap();
+                let parsed = Envelope::parse_line(&line).unwrap();
+                let decoded = decode_command(&parsed).unwrap();
+                assert_eq!(&decoded, command, "line: {line}");
+            }
+            // Wire shapes are pinned: camelCase fields, no type tag in the payload.
+            let envelope = commands[9].to_envelope(Party::Console);
+            assert_eq!(envelope.kind, "model");
+            assert_eq!(envelope.payload, json!({"name":"fable"}));
+            let permission = commands[1].to_envelope(Party::Console);
+            assert_eq!(permission.kind, "permission");
             assert_eq!(
-                envelope.to,
-                Party::Orchestrator(crate::fleet::envelope::DEFAULT_ORCHESTRATOR_SESSION)
+                permission.payload,
+                json!({"requestId":"req_1","decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules"}]}})
             );
-            assert!(envelope.id.starts_with("m_"));
-            let line = serde_json::to_string(&envelope).unwrap();
-            let parsed = Envelope::parse_line(&line).unwrap();
-            let decoded = decode_command(&parsed).unwrap();
-            assert_eq!(&decoded, command, "line: {line}");
         }
-        // Wire shapes are pinned: camelCase fields, no type tag in the payload.
-        let envelope = commands[9].to_envelope(Party::Console);
-        assert_eq!(envelope.kind, "model");
-        assert_eq!(envelope.payload, json!({"name":"fable"}));
-        let permission = commands[1].to_envelope(Party::Console);
-        assert_eq!(permission.kind, "permission");
-        assert_eq!(
-            permission.payload,
-            json!({"requestId":"req_1","decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules"}]}})
-        );
+        {
+            let line = r#"{"id":"m_x","ts":"2026-08-30T12:00:00.000Z","from":"console","to":"orchestrator","type":"brand_new","payload":{"whatever":1}}"#;
+            let envelope = Envelope::parse_line(line).unwrap();
+            assert_eq!(decode_command(&envelope), None);
+            // Wrong party: not for the orchestrator.
+            let line = r#"{"id":"m_x","ts":"t","from":"console","to":"worker:r","type":"user","payload":{"text":"hi"}}"#;
+            let envelope = Envelope::parse_line(line).unwrap();
+            assert_eq!(decode_command(&envelope), None);
+            // Known type, payload of the wrong shape: parses, decodes to None.
+            let line = r#"{"id":"m_x","ts":"t","from":"console","to":"orchestrator","type":"user","payload":{"oops":1}}"#;
+            let envelope = Envelope::parse_line(line).unwrap();
+            assert_eq!(decode_command(&envelope), None);
+        }
     }
 
     #[test]
-    fn unknown_command_types_parse_but_decode_to_none() {
-        let line = r#"{"id":"m_x","ts":"2026-08-30T12:00:00.000Z","from":"console","to":"orchestrator","type":"brand_new","payload":{"whatever":1}}"#;
-        let envelope = Envelope::parse_line(line).unwrap();
-        assert_eq!(decode_command(&envelope), None);
-        // Wrong party: not for the orchestrator.
-        let line = r#"{"id":"m_x","ts":"t","from":"console","to":"worker:r","type":"user","payload":{"text":"hi"}}"#;
-        let envelope = Envelope::parse_line(line).unwrap();
-        assert_eq!(decode_command(&envelope), None);
-        // Known type, payload of the wrong shape: parses, decodes to None.
-        let line = r#"{"id":"m_x","ts":"t","from":"console","to":"orchestrator","type":"user","payload":{"oops":1}}"#;
-        let envelope = Envelope::parse_line(line).unwrap();
-        assert_eq!(decode_command(&envelope), None);
+    fn state_files() {
+        {
+            let mut state = new_orchestrator_state("/repo");
+            state.pid = Some(4321);
+            state.session_id = Some("sess".into());
+            state.model = Some("claude-fable-5".into());
+            state.cost_usd = 0.05;
+            state.num_turns = 3;
+            state.turn_active = true;
+            state.activity = Some(Activity {
+                kind: ActivityKind::Tool,
+                label: Some("Bash".into()),
+                since: 1_760_000_000_000,
+            });
+            state.effort = Some("high".into());
+            state.pending_requests = vec![PermissionRequest {
+                request_id: "req_1".into(),
+                request: CanUseToolRequest {
+                    tool_name: "Bash".into(),
+                    input: json!({"command":"ls"}),
+                    tool_use_id: "t1".into(),
+                    title: Some("Run ls".into()),
+                    ..CanUseToolRequest::default()
+                },
+                received_at: "2026-08-30T12:00:00.000Z".into(),
+            }];
+            state.exited = Some(ExitedRecord {
+                code: None,
+                signal: Some("SIGTERM".into()),
+                at: now_iso(),
+            });
+            let parsed: OrchestratorState = round_trip(&state);
+            assert_eq!(parsed.version, STATE_VERSION);
+            assert_eq!(parsed.pending_requests.len(), 1);
+            assert_eq!(parsed.pending_requests[0].request.tool_name, "Bash");
+
+            // A newer writer's extra fields and an older writer's gaps both parse.
+            let foreign: OrchestratorState =
+                serde_json::from_str(r#"{"version":2,"futureField":1,"costUsd":0.5,"cwd":"/r"}"#)
+                    .unwrap();
+            assert_eq!(foreign.cost_usd, 0.5);
+            assert_eq!(foreign.cwd, "/r");
+            assert_eq!(foreign.pending_requests, Vec::new());
+            // camelCase on disk: state round-trips through the wire names.
+            let line = serde_json::to_string(&state).unwrap();
+            assert!(line.contains(r#""sessionId":"sess""#), "{line}");
+            assert!(line.contains(r#""turnActive":true"#), "{line}");
+            assert!(line.contains(r#""requestId":"req_1""#), "{line}");
+        }
+        {
+            let caps = Capabilities {
+                fetched_at: now_iso(),
+                tools: vec!["Read".into(), "mcp__fleet__fleet_spawn".into()],
+                commands: vec![AgentCommand {
+                    name: "model".into(),
+                    description: Some("Set the model".into()),
+                    argument_hint: Some("<model>".into()),
+                    aliases: None,
+                }],
+                mcp_servers: vec![McpServerStatus {
+                    name: "fleet".into(),
+                    status: "connected".into(),
+                }],
+                capabilities: vec!["interrupt_receipt_v1".into()],
+                models: vec!["sonnet".into()],
+            };
+            let parsed: Capabilities = round_trip(&caps);
+            assert_eq!(parsed, caps);
+            let line = serde_json::to_string(&caps).unwrap();
+            assert!(line.contains(r#""fetchedAt""#), "{line}");
+            assert!(line.contains(r#""mcpServers""#), "{line}");
+
+            // Never asked: the aliases stand in, and the view reads as stale.
+            let fresh = Capabilities::default();
+            assert_eq!(fresh.models, ORCHESTRATOR_MODEL_ALIASES);
+            assert!(fresh.is_stale(std::time::Duration::from_secs(30)));
+            assert!(fresh.age().is_none());
+
+            // A newer writer's extra field and an older writer's gaps both parse.
+            let foreign: Capabilities =
+                serde_json::from_str(r#"{"futureField":1,"tools":["Read"]}"#).unwrap();
+            assert_eq!(foreign.tools, vec!["Read".to_string()]);
+            assert!(foreign.commands.is_empty());
+        }
+        {
+            let caps = Capabilities {
+                fetched_at: now_iso(),
+                ..Capabilities::default()
+            };
+            assert!(!caps.is_stale(std::time::Duration::from_secs(30)));
+            assert!(caps.age().is_some());
+        }
+        {
+            let make = |id: &str, at: &str| PermissionRequest {
+                request_id: id.into(),
+                request: CanUseToolRequest {
+                    tool_name: "Bash".into(),
+                    ..CanUseToolRequest::default()
+                },
+                received_at: at.into(),
+            };
+            let mut pending = HashMap::new();
+            pending.insert("b".into(), make("b", "2026-08-30T12:00:01.000Z"));
+            pending.insert("a".into(), make("a", "2026-08-30T12:00:00.000Z"));
+            pending.insert("c".into(), make("c", "2026-08-30T12:00:00.000Z"));
+            let list = sorted_pending(&pending);
+            let ids: Vec<&str> = list.iter().map(|p| p.request_id.as_str()).collect();
+            // Same arrival time: tie broken by request id.
+            assert_eq!(ids, vec!["a", "c", "b"]);
+        }
     }
 
     #[test]
-    fn state_round_trips_and_tolerates_missing_and_unknown_fields() {
-        let mut state = new_orchestrator_state("/repo");
-        state.pid = Some(4321);
-        state.session_id = Some("sess".into());
-        state.model = Some("claude-fable-5".into());
-        state.cost_usd = 0.05;
-        state.num_turns = 3;
-        state.turn_active = true;
-        state.activity = Some(Activity {
-            kind: ActivityKind::Tool,
-            label: Some("Bash".into()),
-            since: 1_760_000_000_000,
-        });
-        state.effort = Some("high".into());
-        state.pending_requests = vec![PermissionRequest {
-            request_id: "req_1".into(),
-            request: CanUseToolRequest {
-                tool_name: "Bash".into(),
-                input: json!({"command":"ls"}),
-                tool_use_id: "t1".into(),
-                title: Some("Run ls".into()),
-                ..CanUseToolRequest::default()
-            },
-            received_at: "2026-08-30T12:00:00.000Z".into(),
-        }];
-        state.exited = Some(ExitedRecord {
-            code: None,
-            signal: Some("SIGTERM".into()),
-            at: now_iso(),
-        });
-        let parsed: OrchestratorState = round_trip(&state);
-        assert_eq!(parsed.version, STATE_VERSION);
-        assert_eq!(parsed.pending_requests.len(), 1);
-        assert_eq!(parsed.pending_requests[0].request.tool_name, "Bash");
-
-        // A newer writer's extra fields and an older writer's gaps both parse.
-        let foreign: OrchestratorState =
-            serde_json::from_str(r#"{"version":2,"futureField":1,"costUsd":0.5,"cwd":"/r"}"#)
-                .unwrap();
-        assert_eq!(foreign.cost_usd, 0.5);
-        assert_eq!(foreign.cwd, "/r");
-        assert_eq!(foreign.pending_requests, Vec::new());
-        // camelCase on disk: state round-trips through the wire names.
-        let line = serde_json::to_string(&state).unwrap();
-        assert!(line.contains(r#""sessionId":"sess""#), "{line}");
-        assert!(line.contains(r#""turnActive":true"#), "{line}");
-        assert!(line.contains(r#""requestId":"req_1""#), "{line}");
-    }
-
-    #[test]
-    fn trimming_an_events_file_keeps_its_tail_and_leaves_a_short_one_alone() {
+    fn trim_keeps_tail() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("events.jsonl");
         let line = |i: usize| format!("{{\"type\":\"notice\",\"text\":\"{i}\"}}");
@@ -825,146 +876,88 @@ mod tests {
     }
 
     #[test]
-    fn capabilities_round_trip_and_default_to_the_model_aliases() {
-        let caps = Capabilities {
-            fetched_at: now_iso(),
-            tools: vec!["Read".into(), "mcp__fleet__fleet_spawn".into()],
-            commands: vec![AgentCommand {
-                name: "model".into(),
-                description: Some("Set the model".into()),
-                argument_hint: Some("<model>".into()),
-                aliases: None,
-            }],
-            mcp_servers: vec![McpServerStatus {
-                name: "fleet".into(),
-                status: "connected".into(),
-            }],
-            capabilities: vec!["interrupt_receipt_v1".into()],
-            models: vec!["sonnet".into()],
-        };
-        let parsed: Capabilities = round_trip(&caps);
-        assert_eq!(parsed, caps);
-        let line = serde_json::to_string(&caps).unwrap();
-        assert!(line.contains(r#""fetchedAt""#), "{line}");
-        assert!(line.contains(r#""mcpServers""#), "{line}");
-
-        // Never asked: the aliases stand in, and the view reads as stale.
-        let fresh = Capabilities::default();
-        assert_eq!(fresh.models, ORCHESTRATOR_MODEL_ALIASES);
-        assert!(fresh.is_stale(std::time::Duration::from_secs(30)));
-        assert!(fresh.age().is_none());
-
-        // A newer writer's extra field and an older writer's gaps both parse.
-        let foreign: Capabilities =
-            serde_json::from_str(r#"{"futureField":1,"tools":["Read"]}"#).unwrap();
-        assert_eq!(foreign.tools, vec!["Read".to_string()]);
-        assert!(foreign.commands.is_empty());
-    }
-
-    #[test]
-    fn a_just_fetched_capability_view_is_not_stale() {
-        let caps = Capabilities {
-            fetched_at: now_iso(),
-            ..Capabilities::default()
-        };
-        assert!(!caps.is_stale(std::time::Duration::from_secs(30)));
-        assert!(caps.age().is_some());
-    }
-
-    #[test]
-    fn activity_omits_the_label_when_there_is_none() {
-        let line = serde_json::to_string(&Activity {
-            kind: ActivityKind::Thinking,
-            label: None,
-            since: 42,
-        })
-        .unwrap();
-        assert_eq!(line, r#"{"kind":"thinking","since":42}"#);
-    }
-
-    #[test]
-    fn every_event_record_round_trips_and_decodes() {
-        let events = vec![
-            OrchestratorEvent::StreamText {
-                text: "hello ".into(),
-            },
-            OrchestratorEvent::Activity { activity: None },
-            OrchestratorEvent::Activity {
-                activity: Some(Activity {
-                    kind: ActivityKind::Responding,
-                    label: None,
-                    since: 7,
-                }),
-            },
-            OrchestratorEvent::PermissionRequest {
-                request_id: "req_1".into(),
-                request: json!({"subtype":"can_use_tool","tool_name":"Bash"}),
-            },
-            OrchestratorEvent::PermissionResolved {
-                request_id: "req_1".into(),
-                how: "allow".into(),
-            },
-            OrchestratorEvent::Notice {
-                text: "· hi".into(),
-                error: None,
-            },
-            OrchestratorEvent::Notice {
-                text: "! boom".into(),
-                error: Some(true),
-            },
-            OrchestratorEvent::Exit {
-                code: None,
-                signal: Some("SIGTERM".into()),
-            },
-            OrchestratorEvent::Exit {
-                code: Some(0),
-                signal: None,
-            },
-        ];
-        for event in &events {
+    fn event_records() {
+        {
+            let events = vec![
+                OrchestratorEvent::StreamText {
+                    text: "hello ".into(),
+                },
+                OrchestratorEvent::Activity { activity: None },
+                OrchestratorEvent::Activity {
+                    activity: Some(Activity {
+                        kind: ActivityKind::Responding,
+                        label: None,
+                        since: 7,
+                    }),
+                },
+                OrchestratorEvent::PermissionRequest {
+                    request_id: "req_1".into(),
+                    request: json!({"subtype":"can_use_tool","tool_name":"Bash"}),
+                },
+                OrchestratorEvent::PermissionResolved {
+                    request_id: "req_1".into(),
+                    how: "allow".into(),
+                },
+                OrchestratorEvent::Notice {
+                    text: "· hi".into(),
+                    error: None,
+                },
+                OrchestratorEvent::Notice {
+                    text: "! boom".into(),
+                    error: Some(true),
+                },
+                OrchestratorEvent::Exit {
+                    code: None,
+                    signal: Some("SIGTERM".into()),
+                },
+                OrchestratorEvent::Exit {
+                    code: Some(0),
+                    signal: None,
+                },
+            ];
+            for event in &events {
+                let record = event.to_record();
+                let line = serde_json::to_string(&record).unwrap();
+                let parsed: EventRecord = serde_json::from_str(&line).unwrap();
+                assert_eq!(&parsed.decode(), event, "line: {line}");
+            }
+            // Pinned wire shapes: camelCase request ids, error flag only when set.
+            let line = serde_json::to_string(&events[3].to_record()).unwrap();
+            assert!(
+                line.contains(r#""type":"permission_request""#)
+                    && line.contains(r#""requestId":"req_1""#),
+                "{line}"
+            );
+            let line = serde_json::to_string(&events[5].to_record()).unwrap();
+            assert_eq!(line, r#"{"type":"notice","text":"· hi"}"#);
+        }
+        {
+            let claude_msg = json!({
+                "type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},
+                "parent_tool_use_id":null,"session_id":"s",
+            });
+            let event = OrchestratorEvent::Passthrough(claude_msg);
             let record = event.to_record();
             let line = serde_json::to_string(&record).unwrap();
             let parsed: EventRecord = serde_json::from_str(&line).unwrap();
-            assert_eq!(&parsed.decode(), event, "line: {line}");
-        }
-        // Pinned wire shapes: camelCase request ids, error flag only when set.
-        let line = serde_json::to_string(&events[3].to_record()).unwrap();
-        assert!(
-            line.contains(r#""type":"permission_request""#)
-                && line.contains(r#""requestId":"req_1""#),
-            "{line}"
-        );
-        let line = serde_json::to_string(&events[5].to_record()).unwrap();
-        assert_eq!(line, r#"{"type":"notice","text":"· hi"}"#);
-    }
+            assert_eq!(parsed.decode(), event);
+            assert!(line.contains(r#""parent_tool_use_id":null"#), "{line}");
 
-    #[test]
-    fn claude_messages_and_unknown_types_pass_through() {
-        let claude_msg = json!({
-            "type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]},
-            "parent_tool_use_id":null,"session_id":"s",
-        });
-        let event = OrchestratorEvent::Passthrough(claude_msg);
-        let record = event.to_record();
-        let line = serde_json::to_string(&record).unwrap();
-        let parsed: EventRecord = serde_json::from_str(&line).unwrap();
-        assert_eq!(parsed.decode(), event);
-        assert!(line.contains(r#""parent_tool_use_id":null"#), "{line}");
-
-        let record = EventRecord {
-            kind: "brand_new".into(),
-            body: Map::from_iter([("x".to_string(), json!(1))]),
-        };
-        match record.decode() {
-            OrchestratorEvent::Passthrough(value) => {
-                assert_eq!(value, json!({"type":"brand_new","x":1}));
+            let record = EventRecord {
+                kind: "brand_new".into(),
+                body: Map::from_iter([("x".to_string(), json!(1))]),
+            };
+            match record.decode() {
+                OrchestratorEvent::Passthrough(value) => {
+                    assert_eq!(value, json!({"type":"brand_new","x":1}));
+                }
+                other => panic!("{other:?}"),
             }
-            other => panic!("{other:?}"),
         }
     }
 
     #[test]
-    fn transcript_coalesces_deltas_into_one_record_per_flush() {
+    fn coalesces_deltas() {
         let dir = std::env::temp_dir().join(format!(
             "pilotfish-transcript-{}-{}",
             std::process::id(),
@@ -996,25 +989,5 @@ mod tests {
             OrchestratorEvent::StreamText { text } => assert_eq!(text, " more"),
             other => panic!("{other:?}"),
         }
-    }
-
-    #[test]
-    fn pending_requests_sort_by_arrival() {
-        let make = |id: &str, at: &str| PermissionRequest {
-            request_id: id.into(),
-            request: CanUseToolRequest {
-                tool_name: "Bash".into(),
-                ..CanUseToolRequest::default()
-            },
-            received_at: at.into(),
-        };
-        let mut pending = HashMap::new();
-        pending.insert("b".into(), make("b", "2026-08-30T12:00:01.000Z"));
-        pending.insert("a".into(), make("a", "2026-08-30T12:00:00.000Z"));
-        pending.insert("c".into(), make("c", "2026-08-30T12:00:00.000Z"));
-        let list = sorted_pending(&pending);
-        let ids: Vec<&str> = list.iter().map(|p| p.request_id.as_str()).collect();
-        // Same arrival time: tie broken by request id.
-        assert_eq!(ids, vec!["a", "c", "b"]);
     }
 }

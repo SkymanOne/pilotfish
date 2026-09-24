@@ -247,935 +247,895 @@ fn spawn_slow(prefix: &str, extra_env: &[(&str, &str)]) -> Fleet {
 // monitor.test.ts
 
 #[test]
-fn full_run_settles_and_captures_report_events_and_exits() {
-    let mut fleet = Fleet::new("pf-mon-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "300"), ("FAKE_PI_WRITE_HELLO", "1")]);
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Settled);
-    // `last_assistant_text` is fetched after the settle flush: the monitor
-    // writes the terminal status first and the text lands with a later
-    // flush, so wait for the flush that carries it instead of racing it.
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.last_assistant_text.is_some()
-    });
-    assert_eq!(
-        state.last_assistant_text.as_deref(),
-        Some("Working: wrote hello.txt")
-    );
-    assert_eq!(state.last_tool.as_deref(), Some("bash"));
-    assert!(state.last_activity.is_some(), "last activity was recorded");
-    assert!(state.settled_at.is_some(), "the settle time was recorded");
-    assert_eq!(state.error, None);
-    assert!(state.pid.is_some(), "the monitor pid is recorded");
-
-    // The report lives in the new layout: runs/<id>/report.md.
-    assert!(
-        fleet.run_dir.join("report.md").is_file(),
-        "the report lives at runs/<id>/report.md"
-    );
-
-    let events = fleet.read("events.jsonl");
-    assert!(events.contains("\"task_prompt\""), "{events}");
-    assert!(events.contains("\"tool_execution_end\""), "{events}");
-    assert!(events.contains("\"text_end\""), "{events}");
-    assert!(
-        !events.contains("\"turn_start\""),
-        "unselected events are not captured"
-    );
-
-    // pi.log keeps every raw line, monitor diagnostics included.
-    let pi_log = fleet.read("pi.log");
-    assert!(pi_log.contains("\"agent_settled\""), "{pi_log}");
-    assert!(pi_log.contains("\"turn_start\""), "{pi_log}");
-    assert!(pi_log.contains("[monitor] supervising run"), "{pi_log}");
-
-    // The monitor shuts pi down and exits after settling.
-    let code = fleet.wait_monitor_exit(Duration::from_secs(15));
-    assert_eq!(code, Some(0), "monitor exits cleanly");
-}
-
-/// The pi catalogue is a fleet property: the monitor writes it to
-/// `pi-cache.json` at boot; run.json never carries it (`load_state` merges
-/// the cache back in, which is what the waits below observe).
-#[test]
-fn records_commands_and_forwards_a_command_as_a_prompt() {
-    let mut fleet = spawn_slow("pf-cmds-", &[("FAKE_PI_DELAY_MS", "20000")]);
-    let state = fleet.wait_state(Duration::from_secs(20), |state| !state.commands.is_empty());
-    let names: Vec<&str> = state.commands.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["skill:fleet-worker-report", "compact-notes", "session-name"]
-    );
-    assert_eq!(state.commands[0].source, "skill");
-    // The fleet cache carries them, and the per-run file does not.
-    let cache = read_cache(&fleet.pilotfish_dir);
-    let names: Vec<&str> = cache.commands.iter().map(|c| c.name.as_str()).collect();
-    assert_eq!(
-        names,
-        vec!["skill:fleet-worker-report", "compact-notes", "session-name"]
-    );
-    let run_raw = fleet.read("run.json");
-    assert!(!run_raw.contains("\"commands\""), "{run_raw}");
-
-    // Asked for, not snapshotted: a skill installed after boot shows up on
-    // the next refresh, and the catalogue records when pi last answered.
-    assert!(!cache.fetched_at.is_empty(), "the answer is stamped");
-    fleet.append_inbox(&Envelope::refresh_capabilities(
-        Party::Console,
-        fleet.worker_party(),
-    ));
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let refreshed = read_cache(&fleet.pilotfish_dir);
-        if refreshed.commands.iter().any(|c| c.name == "late-skill") {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the refreshed catalogue never arrived: {:?}",
-            refreshed.commands
+fn run_lifecycle() {
+    {
+        let mut fleet = Fleet::new("pf-mon-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "300"), ("FAKE_PI_WRITE_HELLO", "1")]);
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Settled);
+        // `last_assistant_text` is fetched after the settle flush: the monitor
+        // writes the terminal status first and the text lands with a later
+        // flush, so wait for the flush that carries it instead of racing it.
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.last_assistant_text.is_some()
+        });
+        assert_eq!(
+            state.last_assistant_text.as_deref(),
+            Some("Working: wrote hello.txt")
         );
-        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(state.last_tool.as_deref(), Some("bash"));
+        assert!(state.last_activity.is_some(), "last activity was recorded");
+        assert!(state.settled_at.is_some(), "the settle time was recorded");
+        assert_eq!(state.error, None);
+        assert!(state.pid.is_some(), "the monitor pid is recorded");
+
+        // The report lives in the new layout: runs/<id>/report.md.
+        assert!(
+            fleet.run_dir.join("report.md").is_file(),
+            "the report lives at runs/<id>/report.md"
+        );
+
+        let events = fleet.read("events.jsonl");
+        assert!(events.contains("\"task_prompt\""), "{events}");
+        assert!(events.contains("\"tool_execution_end\""), "{events}");
+        assert!(events.contains("\"text_end\""), "{events}");
+        assert!(
+            !events.contains("\"turn_start\""),
+            "unselected events are not captured"
+        );
+
+        // pi.log keeps every raw line, monitor diagnostics included.
+        let pi_log = fleet.read("pi.log");
+        assert!(pi_log.contains("\"agent_settled\""), "{pi_log}");
+        assert!(pi_log.contains("\"turn_start\""), "{pi_log}");
+        assert!(pi_log.contains("[monitor] supervising run"), "{pi_log}");
+
+        // The monitor shuts pi down and exits after settling.
+        let code = fleet.wait_monitor_exit(Duration::from_secs(15));
+        assert_eq!(code, Some(0), "monitor exits cleanly");
     }
-
-    fleet.append_inbox(&Envelope::command(
-        Party::Console,
-        fleet.worker_party(),
-        "/session-name mine",
-    ));
-    // The `command_delivered` event is written before the steering record is
-    // flushed to run.json (the monitor flushes state on a timer), so wait for
-    // the state — once it shows the steering, the event is already on disk.
-    fleet.wait_state(Duration::from_secs(15), |state| {
-        state.steer_count == 1
-            && state
-                .steering_log
-                .first()
-                .is_some_and(|s| s.message == "command: /session-name mine")
-    });
-    assert!(
-        fleet.has_event(|ev| ev["type"] == "command_delivered"),
-        "a command_delivered event was written"
-    );
-
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-    assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
-}
-
-#[test]
-fn records_activity_including_a_thinking_phase() {
-    let mut fleet = Fleet::new("pf-activity-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[("FAKE_PI_THINK_MS", "1500"), ("FAKE_PI_DELAY_MS", "1500")]);
-    let mut seen = std::collections::HashSet::new();
-    let deadline = Instant::now() + Duration::from_secs(25);
-    while Instant::now() < deadline {
-        let state = fleet.state();
-        seen.insert(format!(
-            "{}:{}",
-            state.status,
+    {
+        let mut fleet = Fleet::new("pf-err-");
+        fleet.write_state();
+        let fail_pi = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fail-pi.mjs");
+        let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
+        command
+            .args(["monitor", "--fleet-dir"])
+            .arg(&fleet.pilotfish_dir)
+            .args(["--run", &fleet.run_id])
+            .env("PILOTFISH_PI_BIN", format!("node {}", fail_pi.display()))
+            .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
+            .stdin(Stdio::null());
+        fleet.monitor = Some(command.spawn().unwrap());
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Error);
+        let error = state.error.unwrap_or_default();
+        assert!(error.contains("exited with code 1"), "{error}");
+        assert!(
+            error.contains("model provider unreachable"),
+            "stderr tail captured: {error}"
+        );
+        assert!(
+            state.settled_at.is_some(),
+            "the failure was recorded as settled"
+        );
+        let failure = fleet.wait_event(Duration::from_secs(10), |ev| ev["type"] == "run_failed");
+        assert!(
+            failure["error"]
+                .as_str()
+                .unwrap()
+                .contains("model provider unreachable")
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-nopi-");
+        fleet.write_state();
+        let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
+        command
+            .args(["monitor", "--fleet-dir"])
+            .arg(&fleet.pilotfish_dir)
+            .args(["--run", &fleet.run_id])
+            .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
+            .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
+            .stdin(Stdio::null());
+        fleet.monitor = Some(command.spawn().unwrap());
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Error);
+        assert!(
             state
-                .activity
-                .map(|a| format!("{a:?}").to_lowercase())
+                .error
                 .unwrap_or_default()
-        ));
-        if TERMINAL.contains(&state.status) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(POLL_MS));
+                .contains("failed to start pi"),
+            "{:?}",
+            fleet.state().error
+        );
     }
-    assert!(
-        seen.contains("running:thinking"),
-        "expected a thinking phase, saw {seen:?}"
-    );
-    assert!(
-        seen.contains("running:tool") || seen.contains("running:text"),
-        "and then work, saw {seen:?}"
-    );
-    assert_eq!(
-        fleet.state().activity,
-        None,
-        "a finished worker is doing nothing"
-    );
-}
-
-#[test]
-fn reports_and_changes_the_thinking_level() {
-    let mut fleet = Fleet::new("pf-think-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "20000"), ("FAKE_PI_THINKING", "low")]);
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.thinking_level.is_some()
-    });
-    assert_eq!(state.thinking_level.as_deref(), Some("low"));
-
-    fleet.append_inbox(&Envelope::thinking(
-        Party::Console,
-        fleet.worker_party(),
-        "xhigh",
-    ));
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.thinking_level.as_deref() == Some("xhigh")
-    });
-    assert_eq!(state.thinking_level.as_deref(), Some("xhigh"));
-    assert!(
-        fleet.has_event(|ev| ev["type"] == "thinking_requested"),
-        "a thinking_requested event was written"
-    );
-
-    fleet.append_inbox(&Envelope::thinking(
-        Party::Console,
-        fleet.worker_party(),
-        "ludicrous",
-    ));
-    fleet.wait_event(Duration::from_secs(20), |ev| {
-        ev["type"] == "thinking_rejected"
-    });
-    let state = fleet.state();
-    assert_eq!(
-        state.thinking_level.as_deref(),
-        Some("xhigh"),
-        "a rejected level does not stick"
-    );
-
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-    assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
-}
-
-/// pi answers `success: true` to a level its model does not have and keeps
-/// running at the old one (verified against a real deepseek-v4-flash worker,
-/// whose `thinkingLevelMap` nulls `max`). The monitor must report what pi
-/// came back with, not what the console wished for.
-#[test]
-fn a_level_the_model_lacks_is_reported_not_silently_swallowed() {
-    let mut fleet = Fleet::new("pf-think-gap-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_DELAY_MS", "20000"),
-        ("FAKE_PI_THINKING", "xhigh"),
-        ("FAKE_PI_THINKING_LEVELS", "off,high,xhigh"),
-    ]);
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        !state.available_thinking_levels.is_empty()
-    });
-    assert_eq!(
-        state.available_thinking_levels,
-        vec!["off", "high", "xhigh"],
-        "what pi says the model has, so the console stops offering the rest"
-    );
-
-    fleet.append_inbox(&Envelope::thinking(
-        Party::Console,
-        fleet.worker_party(),
-        "max",
-    ));
-    fleet.wait_event(Duration::from_secs(20), |ev| {
-        ev["type"] == "thinking_unavailable"
-    });
-    let state = fleet.state();
-    assert_eq!(
-        state.thinking_level.as_deref(),
-        Some("xhigh"),
-        "the level pi is actually running at, not the one we asked for"
-    );
-
-    // a level it does have still lands, and says nothing extra
-    fleet.append_inbox(&Envelope::thinking(
-        Party::Console,
-        fleet.worker_party(),
-        "high",
-    ));
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.thinking_level.as_deref() == Some("high")
-    });
-    assert_eq!(state.thinking_level.as_deref(), Some("high"));
-
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-    assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
-}
-
-#[test]
-fn records_the_model_pi_resolved_and_the_available_models() {
-    let mut fleet = Fleet::new("pf-model-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_MODEL_ID", "vendor/model-9"),
-        ("FAKE_PI_PROVIDER", "vendorco"),
-    ]);
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.active_model.is_some()
-    });
-    assert_eq!(state.active_model.as_deref(), Some("vendor/model-9"));
-    assert_eq!(state.active_provider.as_deref(), Some("vendorco"));
-    // The available-model list is a fleet property now: it lands in
-    // pi-cache.json (with the fake's provider), not in run.json — the state
-    // only reflects it through the load-time cache merge.
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        !state.available_models.is_empty()
-    });
-    assert!(
-        state
-            .available_models
-            .iter()
-            .any(|m| m.id == "glm-5.3-flash" && m.provider == "vendorco")
-    );
-    let cache = read_cache(&fleet.pilotfish_dir);
-    assert!(
-        cache
-            .available_models
-            .iter()
-            .any(|m| m.id == "glm-5.3-flash" && m.provider == "vendorco")
-    );
-    let run_raw = fleet.read("run.json");
-    assert!(!run_raw.contains("availableModels"), "{run_raw}");
-}
-
-#[test]
-fn child_exit_without_settling_is_an_error_with_the_stderr_tail() {
-    let mut fleet = Fleet::new("pf-err-");
-    fleet.write_state();
-    let fail_pi = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fail-pi.mjs");
-    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
-    command
-        .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.pilotfish_dir)
-        .args(["--run", &fleet.run_id])
-        .env("PILOTFISH_PI_BIN", format!("node {}", fail_pi.display()))
-        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
-        .stdin(Stdio::null());
-    fleet.monitor = Some(command.spawn().unwrap());
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Error);
-    let error = state.error.unwrap_or_default();
-    assert!(error.contains("exited with code 1"), "{error}");
-    assert!(
-        error.contains("model provider unreachable"),
-        "stderr tail captured: {error}"
-    );
-    assert!(
-        state.settled_at.is_some(),
-        "the failure was recorded as settled"
-    );
-    let failure = fleet.wait_event(Duration::from_secs(10), |ev| ev["type"] == "run_failed");
-    assert!(
-        failure["error"]
-            .as_str()
-            .unwrap()
-            .contains("model provider unreachable")
-    );
-}
-
-#[test]
-fn missing_pi_binary_is_a_spawn_error() {
-    let mut fleet = Fleet::new("pf-nopi-");
-    fleet.write_state();
-    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
-    command
-        .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.pilotfish_dir)
-        .args(["--run", &fleet.run_id])
-        .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
-        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
-        .stdin(Stdio::null());
-    fleet.monitor = Some(command.spawn().unwrap());
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Error);
-    assert!(
-        state
-            .error
-            .unwrap_or_default()
-            .contains("failed to start pi"),
-        "{:?}",
-        fleet.state().error
-    );
-}
-
-// ---------------------------------------------------------------------------
-// monitor-control.test.ts
-
-#[test]
-fn console_steering_mid_run_is_delivered_logged_and_reflected_in_the_report() {
-    let fleet = spawn_slow("pf-steer-", &[("FAKE_PI_DELAY_MS", "4000")]);
-    fleet.append_inbox(&Envelope::steer(
-        Party::Console,
-        fleet.worker_party(),
-        "use tabs not spaces",
-    ));
-    fleet.append_inbox(&Envelope::follow_up(
-        fleet.orch_party(),
-        fleet.worker_party(),
-        "then summarize",
-    ));
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Settled);
-    assert_eq!(state.steer_count, 2);
-    let log: Vec<(&str, &str)> = state
-        .steering_log
-        .iter()
-        .map(|s| (s.source.as_str(), s.message.as_str()))
-        .collect();
-    assert_eq!(
-        log,
-        vec![
-            ("console", "use tabs not spaces"),
-            ("orchestrator", "then summarize")
-        ]
-    );
-    assert!(
-        state.steering_log.iter().all(|s| !s.ts.is_empty()),
-        "every steering record is timestamped"
-    );
-    let events = fleet.read("events.jsonl");
-    assert!(events.contains("\"steering_delivered\""), "{events}");
-    assert!(events.contains("use tabs not spaces"), "{events}");
-    let report = fleet.read("report.md");
-    assert!(
-        report.contains("## Steering received\n- use tabs not spaces"),
-        "{report}"
-    );
-}
-
-#[test]
-fn abort_via_the_inbox_stops_the_run() {
-    let fleet = spawn_slow("pf-abort-", &[("FAKE_PI_DELAY_MS", "4000")]);
-    fleet.append_inbox(&Envelope::abort(fleet.orch_party(), fleet.worker_party()));
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Stopped);
-    assert!(state.settled_at.is_some(), "the stop was recorded");
-    assert!(
-        fleet.has_event(|ev| ev["type"] == "abort_requested"),
-        "an abort_requested event was written"
-    );
-}
-
-#[test]
-fn steering_after_settle_is_dropped_not_forwarded() {
-    let mut fleet = Fleet::new("pf-late-");
-    fleet.write_state();
-    // pi lingers after settle so the monitor is still polling when the late steer lands
-    fleet.spawn_monitor(&[("FAKE_PI_EXIT_DELAY_MS", "3000")]);
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Settled);
-    fleet.append_inbox(&Envelope::steer(
-        Party::Console,
-        fleet.worker_party(),
-        "too late",
-    ));
-    let dropped = fleet.wait_event(Duration::from_secs(10), |ev| {
-        ev["type"] == "control_dropped" && ev["reason"] == "run already settled"
-    });
-    assert_eq!(dropped["control"], "steer");
-    let events = fleet.read("events.jsonl");
-    assert!(!events.contains("steering_delivered"), "{events}");
-    assert_eq!(fleet.state().steer_count, 0);
-}
-
-#[test]
-fn a_steer_sent_before_the_monitor_boots_is_still_delivered() {
-    let mut fleet = Fleet::new("pf-early-");
-    fleet.write_state();
-    // Written before the monitor starts; the inbox is read from byte 0.
-    fleet.append_inbox(&Envelope::steer(
-        fleet.orch_party(),
-        fleet.worker_party(),
-        "early bird",
-    ));
-    fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "3000")]);
-    let state = settled_or(&fleet, Duration::from_secs(30));
-    assert_eq!(state.status, RunStatus::Settled);
-    assert_eq!(state.steer_count, 1);
-    assert_eq!(state.steering_log[0].message, "early bird");
-    let report = fleet.read("report.md");
-    assert!(report.contains("- early bird"), "{report}");
-}
-
-// ---------------------------------------------------------------------------
-// monitor-outbox.test.ts
-
-#[test]
-fn outbox_questions_and_progress_mirror_into_state_and_events_and_answers_resolve() {
-    let mut fleet = Fleet::new("pf-outbox-1-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_ASK", "1"),
-        ("FAKE_PI_PROGRESS", "1"),
-        ("FAKE_PI_DELAY_MS", "200"),
-    ]);
-    let state = fleet.wait_state(Duration::from_secs(15), |state| {
-        state.pending_question.is_some()
-    });
-    let pending = state.pending_question.unwrap();
-    assert_eq!(pending.question, "bcrypt or argon2?");
-    assert_eq!(
-        pending.options,
-        Some(vec!["bcrypt".into(), "argon2".into()])
-    );
-    assert_eq!(pending.context, None);
-    assert!(
-        pending.id.starts_with("q_fake_"),
-        "the question carries the fake's id: {}",
-        pending.id
-    );
-    assert!(
-        pending.asked_at.starts_with('2'),
-        "asked_at is an RFC3339 timestamp: {}",
-        pending.asked_at
-    );
-    assert_eq!(state.last_progress.as_deref(), Some("starting the work"));
-
-    // A running worker waiting on its question reads as blocked.
-    let view = derive_view(&fleet.state(), |_| true, now_ms());
-    assert_eq!(view, DerivedView::Blocked);
-
-    let events = fleet.events();
-    let question = events
-        .iter()
-        .find(|ev| ev["type"] == "worker_question")
-        .expect("worker_question mirrored");
-    assert_eq!(question["questionId"], pending.id.as_str());
-    assert_eq!(question["question"], "bcrypt or argon2?");
-    assert!(
-        events.iter().any(|ev| ev["type"] == "worker_progress"),
-        "a worker_progress event was mirrored"
-    );
-
-    fleet.append_inbox(&Envelope::answer(
-        fleet.orch_party(),
-        fleet.worker_party(),
-        "argon2",
-        Some(pending.id.clone()),
-    ));
-    fleet.wait_event(Duration::from_secs(10), |ev| {
-        ev["type"] == "answer_delivered"
-    });
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        TERMINAL.contains(&state.status)
-    });
-    assert_eq!(state.status, RunStatus::Settled);
-    assert_eq!(state.pending_question, None);
-    assert_eq!(state.steer_count, 1);
-    assert_eq!(state.steering_log[0].source, "orchestrator");
-    assert_eq!(
-        state.steering_log[0].message,
-        format!("answer({}): argon2", pending.id)
-    );
-    let events = fleet.events();
-    let delivered = events
-        .iter()
-        .find(|ev| ev["type"] == "answer_delivered")
-        .unwrap();
-    assert_eq!(delivered["questionId"], pending.id.as_str());
-    assert_eq!(delivered["source"], "orchestrator");
-    assert_eq!(delivered["message"], "argon2");
-    let resolved = events
-        .iter()
-        .find(|ev| ev["type"] == "worker_question_resolved")
-        .unwrap();
-    assert_eq!(resolved["questionId"], pending.id.as_str());
-    assert_eq!(resolved["how"], "answered");
-    let report = fleet.read("report.md");
-    assert!(report.contains("Answer received: argon2"), "{report}");
-}
-
-#[test]
-fn an_unanswered_question_times_out_and_the_run_still_settles() {
-    let mut fleet = Fleet::new("pf-outbox-2-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_ASK", "1"),
-        ("FAKE_PI_ASK_TIMEOUT_MS", "600"),
-        ("FAKE_PI_DELAY_MS", "100"),
-    ]);
-    fleet.wait_state(Duration::from_secs(15), |state| {
-        state.pending_question.is_some()
-    });
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        TERMINAL.contains(&state.status)
-    });
-    assert_eq!(state.status, RunStatus::Settled);
-    assert_eq!(state.pending_question, None);
-    assert_eq!(state.steer_count, 0);
-    let resolved = fleet
-        .events()
-        .into_iter()
-        .find(|ev| ev["type"] == "worker_question_resolved")
-        .expect("resolved event");
-    assert_eq!(resolved["how"], "timeout");
-    assert!(
-        !fleet.has_event(|ev| ev["type"] == "answer_delivered"),
-        "no answer was delivered"
-    );
-}
-
-// ---------------------------------------------------------------------------
-// fleet-extension.test.ts (monitor-facing parts) + the new dialog/model work
-
-#[test]
-fn the_monitor_passes_the_materialized_extension_and_skill_to_pi() {
-    let mut fleet = Fleet::new("pf-ext-");
-    // The spawn flags ride on run.json; set the user-facing ones.
-    fleet.write_state_with(|state| {
-        state.model = Some("glm-5.3".into());
-        state.thinking = Some("high".into());
-        state.skill = Some("/extra/skill".into());
-        state.session_arg = Some("abc123".into());
-    });
-    let argv_file = fleet.root().join("argv.json");
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_ARGV_FILE", argv_file.to_str().unwrap()),
-        ("FAKE_PI_DELAY_MS", "300"),
-    ]);
-    settled_or(&fleet, Duration::from_secs(30));
-    let argv: Vec<String> =
-        serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
-    assert_eq!(&argv[..2], &["--mode".to_string(), "rpc".to_string()]);
-    let paths = FleetPaths::new(&fleet.pilotfish_dir);
-    // The extension and skill were materialized into the fleet dir.
-    let extension = paths.pi_extension();
-    let skill = paths.pi_skill();
-    assert!(extension.is_file(), "{extension:?}");
-    assert!(skill.is_file(), "{skill:?}");
-    assert_eq!(
-        argv.iter()
-            .position(|a| a == "--extension")
-            .map(|at| argv[at + 1].as_str()),
-        Some(extension.to_str().unwrap())
-    );
-    assert_eq!(
-        argv.iter()
-            .position(|a| a == "--skill")
-            .map(|at| argv[at + 1].as_str()),
-        Some(skill.to_str().unwrap())
-    );
-    // The user's extra --skill still arrives, after the worker skill.
-    let last_skill_flag = argv.iter().rposition(|a| a == "--skill").unwrap();
-    assert_eq!(argv[last_skill_flag + 1], "/extra/skill");
-    let pair = |flag: &str| {
-        let at = argv.iter().rposition(|a| a == flag).unwrap();
-        argv[at + 1].as_str()
-    };
-    assert_eq!(pair("--session"), "abc123");
-    assert_eq!(pair("--model"), "glm-5.3");
-    assert_eq!(pair("--thinking"), "high");
-    // The materialized skill keeps the report-skill frontmatter and the template.
-    let skill_md = std::fs::read_to_string(&skill).unwrap();
-    assert!(
-        skill_md.starts_with("---\nname: fleet-worker-report\n"),
-        "the skill keeps its frontmatter"
-    );
-    assert!(
-        skill_md.contains("## Steering received"),
-        "the skill keeps the report template"
-    );
-    assert!(
-        skill_md.contains("$PILOTFISH_DIR/runs/$PILOTFISH_RUN/report.md"),
-        "the skill targets the PILOTFISH layout"
-    );
-    // The extension speaks the PILOTFISH layout.
-    let extension_ts = std::fs::read_to_string(&extension).unwrap();
-    assert!(extension_ts.contains("PILOTFISH_RUN"), "env names");
-    assert!(!extension_ts.contains("PI_FLEET"), "old env names are gone");
-    assert!(
-        extension_ts.contains("runs/${runId}/report.md"),
-        "{extension_ts}"
-    );
-    assert!(!extension_ts.contains("progress.md"), "progress.md is gone");
-}
-
-#[test]
-fn the_model_envelope_switches_the_worker_model() {
-    let mut fleet = spawn_slow(
-        "pf-model-set-",
-        &[
-            ("FAKE_PI_DELAY_MS", "20000"),
-            ("FAKE_PI_ACCEPTS_MODEL", "1"),
-        ],
-    );
-    // Wait for the cached model list, then switch with an explicit provider.
-    fleet.wait_state(Duration::from_secs(20), |state| {
-        !state.available_models.is_empty()
-    });
-    fleet.append_inbox(&Envelope::model(
-        Party::Console,
-        fleet.worker_party(),
-        "glm-5.3-flash",
-        Some("fakeprovider".into()),
-    ));
-    fleet.wait_event(Duration::from_secs(15), |ev| {
-        ev["type"] == "model_requested"
-    });
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.active_model.as_deref() == Some("glm-5.3-flash")
-    });
-    assert_eq!(state.active_provider.as_deref(), Some("fakeprovider"));
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-    assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
-}
-
-#[test]
-fn the_model_envelope_resolves_a_null_provider_from_pis_model_list() {
-    let fleet = spawn_slow(
-        "pf-model-res-",
-        &[
-            ("FAKE_PI_DELAY_MS", "20000"),
-            ("FAKE_PI_ACCEPTS_MODEL", "1"),
-        ],
-    );
-    fleet.wait_state(Duration::from_secs(20), |state| {
-        !state.available_models.is_empty()
-    });
-    fleet.append_inbox(&Envelope::model(
-        Party::Console,
-        fleet.worker_party(),
-        "glm-5.3-flash",
-        None,
-    ));
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        state.active_model.as_deref() == Some("glm-5.3-flash")
-    });
-    // The provider came from the cached list, not from the envelope.
-    assert_eq!(state.active_provider.as_deref(), Some("fakeprovider"));
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-}
-
-#[test]
-fn an_unresolvable_model_is_reported_not_guessed() {
-    let fleet = spawn_slow(
-        "pf-model-bad-",
-        &[
-            ("FAKE_PI_DELAY_MS", "20000"),
-            ("FAKE_PI_ACCEPTS_MODEL", "1"),
-        ],
-    );
-    fleet.wait_state(Duration::from_secs(20), |state| {
-        !state.available_models.is_empty()
-    });
-    fleet.append_inbox(&Envelope::model(
-        Party::Console,
-        fleet.worker_party(),
-        "ghost-model",
-        None,
-    ));
-    let unresolved = fleet.wait_event(Duration::from_secs(15), |ev| {
-        ev["type"] == "model_unresolved"
-    });
-    assert_eq!(unresolved["model"], "ghost-model");
-    assert!(
-        unresolved["reason"]
-            .as_str()
-            .unwrap()
-            .contains("not in pi's available models")
-    );
-    // pi was never asked to switch: the resolved model is unchanged.
-    assert_eq!(fleet.state().active_model.as_deref(), Some("fake/model-1"));
-    assert!(
-        !fleet.has_event(|ev| ev["type"] == "model_rejected"),
-        "pi was never told to switch"
-    );
-    fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
-    settled_or(&fleet, Duration::from_secs(20));
-}
-
-#[test]
-fn a_dialog_request_is_recorded_and_an_answer_reaches_pi() {
-    let mut fleet = Fleet::new("pf-dialog-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[("FAKE_PI_DIALOG", "1"), ("FAKE_PI_DELAY_MS", "300")]);
-    let state = fleet.wait_state(Duration::from_secs(15), |state| {
-        state.pending_dialog.is_some()
-    });
-    let dialog = state.pending_dialog.unwrap();
-    assert_eq!(dialog.id, "dlg_fake_1");
-    assert_eq!(dialog.method, "select");
-    assert_eq!(dialog.question, "Pick one");
-    assert_eq!(dialog.options, Some(vec!["a".into(), "b".into()]));
-    // Rendered like a pending question.
-    assert_eq!(
-        derive_view(&fleet.state(), |_| true, now_ms()),
-        DerivedView::Blocked
-    );
-    let request = fleet.wait_event(Duration::from_secs(10), |ev| ev["type"] == "worker_dialog");
-    assert_eq!(request["questionId"], "dlg_fake_1");
-
-    fleet.append_inbox(&Envelope::answer(
-        fleet.orch_party(),
-        fleet.worker_party(),
-        "b",
-        Some("dlg_fake_1".into()),
-    ));
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        TERMINAL.contains(&state.status)
-    });
-    assert_eq!(
-        state.status,
-        RunStatus::Settled,
-        "the dialog never stalls the worker"
-    );
-    assert_eq!(state.pending_dialog, None, "answered dialog is cleared");
-    // The value reply reached pi and was recorded.
-    let report = fleet.read("report.md");
-    assert!(report.contains(r#""value":"b""#), "{report}");
-    assert!(
-        fleet.has_event(|ev| ev["type"] == "answer_delivered"),
-        "the answer reached pi"
-    );
-}
-
-#[test]
-fn an_unanswered_dialog_is_cancelled_before_pis_own_timeout() {
-    let mut fleet = Fleet::new("pf-dialog-t-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_DIALOG", "1"),
-        ("FAKE_PI_DIALOG_TIMEOUT", "1500"),
-        ("FAKE_PI_DELAY_MS", "100"),
-    ]);
-    fleet.wait_state(Duration::from_secs(15), |state| {
-        state.pending_dialog.is_some()
-    });
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        TERMINAL.contains(&state.status)
-    });
-    assert_eq!(
-        state.status,
-        settled_status(),
-        "the monitor cancelled instead of hanging"
-    );
-    assert_eq!(state.pending_dialog, None);
-    let report = fleet.read("report.md");
-    // pi got the cancellation, not its own timeout resolution.
-    assert!(report.contains(r#""cancelled":true"#), "{report}");
-    assert!(!report.contains("(pi timeout)"), "{report}");
-    assert!(
-        fleet.has_event(|ev| ev["type"] == "dialog_cancelled"),
-        "a dialog_cancelled event was written"
-    );
-}
-
-const fn settled_status() -> RunStatus {
-    RunStatus::Settled
-}
-
-#[test]
-fn fire_and_forget_ui_requests_are_recorded_without_replies() {
-    let mut fleet = Fleet::new("pf-notify-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[("FAKE_PI_NOTIFY", "1"), ("FAKE_PI_DELAY_MS", "200")]);
-    let state = settled_or(&fleet, Duration::from_secs(20));
-    assert_eq!(state.status, settled_status());
-    assert_eq!(state.pending_dialog, None, "no reply was expected");
-    let events = fleet.read("events.jsonl");
-    assert!(events.contains("\"notify\""), "{events}");
-    assert!(events.contains("\"setTitle\""), "{events}");
-    assert!(
-        !fleet.has_event(|ev| ev["type"] == "dialog_cancelled"),
-        "no cancellation was needed"
-    );
-}
-
-/// A dialog answered as a `confirm` maps the text to confirmed true/false.
-#[test]
-fn a_confirm_dialog_answer_maps_to_confirmed() {
-    let mut fleet = Fleet::new("pf-dialog-c-");
-    fleet.write_state();
-    fleet.spawn_monitor(&[
-        ("FAKE_PI_DIALOG", "1"),
-        ("FAKE_PI_DIALOG_METHOD", "confirm"),
-        ("FAKE_PI_DELAY_MS", "300"),
-    ]);
-    fleet.wait_state(Duration::from_secs(15), |state| {
-        state.pending_dialog.is_some()
-    });
-    fleet.append_inbox(&Envelope::answer(
-        Party::Console,
-        fleet.worker_party(),
-        "yes",
-        Some("dlg_fake_1".into()),
-    ));
-    let state = fleet.wait_state(Duration::from_secs(20), |state| {
-        TERMINAL.contains(&state.status)
-    });
-    assert_eq!(state.status, settled_status());
-    let report = fleet.read("report.md");
-    assert!(report.contains(r#""confirmed":true"#), "{report}");
-}
-
-/// The pi.log carries the monitor's own diagnostics next to the raw stream.
-#[test]
-fn spawn_failures_are_diagnosed_in_pi_log() {
-    let mut fleet = Fleet::new("pf-pilog-");
-    fleet.write_state();
-    let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
-    command
-        .args(["monitor", "--fleet-dir"])
-        .arg(&fleet.pilotfish_dir)
-        .args(["--run", &fleet.run_id])
-        .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
-        .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
-        .stdin(Stdio::null());
-    fleet.monitor = Some(command.spawn().unwrap());
-    settled_or(&fleet, Duration::from_secs(30));
-    let pi_log = fleet.read("pi.log");
-    assert!(pi_log.contains("[monitor] failed to start pi"), "{pi_log}");
-}
-
-/// The console-facing summary of a settled run's JSON state keeps the run
-/// facts (a smoke check for later steps reading run.json) and never picks up
-/// the pi catalogue: that lives in the fleet cache and is merged at load.
-#[test]
-fn run_json_keeps_run_facts_and_strips_the_pi_catalogue() {
-    let fleet = Fleet::new("pf-json-");
-    fleet.write_state();
-    let mut state = fleet.state();
-    state.available_models = vec![pilotfish::fleet::run::WorkerModel {
-        provider: "fakeprovider".into(),
-        id: "glm-5.3".into(),
-        name: Some("GLM 5.3".into()),
-        thinking_levels: Vec::new(),
-        context_window: None,
-        cost: None,
-    }];
-    state.pending_dialog = Some(pilotfish::fleet::run::PendingDialog {
-        id: "u1".into(),
-        method: "select".into(),
-        question: "Pick one".into(),
-        options: Some(vec!["a".into()]),
-        context: None,
-        asked_at: pilotfish::util::now_iso(),
-    });
-    run::save_state(&fleet.run_dir, &state).unwrap();
-    let raw: Value =
-        serde_json::from_str(&std::fs::read_to_string(fleet.run_dir.join("run.json")).unwrap())
-            .unwrap();
-    // The catalogue never lands in run.json; run facts still do.
-    assert!(raw.get("availableModels").is_none(), "{raw}");
-    assert_eq!(raw["pendingDialog"]["method"], "select");
-    // Round-trips through the tolerant reader; without a fleet cache the
-    // catalogue reads empty.
-    let loaded = run::load_state(&fleet.run_dir).unwrap();
-    assert!(loaded.available_models.is_empty());
-    assert_eq!(loaded.pending_dialog.unwrap().method, "select");
-    // With the fleet cache present, loading sources the catalogue from it.
-    let cache = pilotfish::fleet::run::PiCache {
-        available_models: vec![pilotfish::fleet::run::WorkerModel {
+    {
+        let mut fleet = Fleet::new("pf-pilog-");
+        fleet.write_state();
+        let mut command = Command::new(assert_cmd::cargo_bin!("pilotfish"));
+        command
+            .args(["monitor", "--fleet-dir"])
+            .arg(&fleet.pilotfish_dir)
+            .args(["--run", &fleet.run_id])
+            .env("PILOTFISH_PI_BIN", "/nonexistent/pi-binary")
+            .env("PILOTFISH_DIR", &fleet.pilotfish_dir)
+            .stdin(Stdio::null());
+        fleet.monitor = Some(command.spawn().unwrap());
+        settled_or(&fleet, Duration::from_secs(30));
+        let pi_log = fleet.read("pi.log");
+        assert!(pi_log.contains("[monitor] failed to start pi"), "{pi_log}");
+    }
+    {
+        let fleet = Fleet::new("pf-json-");
+        fleet.write_state();
+        let mut state = fleet.state();
+        state.available_models = vec![pilotfish::fleet::run::WorkerModel {
             provider: "fakeprovider".into(),
             id: "glm-5.3".into(),
             name: Some("GLM 5.3".into()),
             thinking_levels: Vec::new(),
             context_window: None,
             cost: None,
-        }],
-        commands: Vec::new(),
-        ..pilotfish::fleet::run::PiCache::default()
-    };
-    run::write_pi_cache(&fleet.pilotfish_dir, &cache).unwrap();
-    let loaded = run::load_state(&fleet.run_dir).unwrap();
-    assert_eq!(loaded.available_models.len(), 1);
-    assert_eq!(loaded.available_models[0].id, "glm-5.3");
+        }];
+        state.pending_dialog = Some(pilotfish::fleet::run::PendingDialog {
+            id: "u1".into(),
+            method: "select".into(),
+            question: "Pick one".into(),
+            options: Some(vec!["a".into()]),
+            context: None,
+            asked_at: pilotfish::util::now_iso(),
+        });
+        run::save_state(&fleet.run_dir, &state).unwrap();
+        let raw: Value =
+            serde_json::from_str(&std::fs::read_to_string(fleet.run_dir.join("run.json")).unwrap())
+                .unwrap();
+        // The catalogue never lands in run.json; run facts still do.
+        assert!(raw.get("availableModels").is_none(), "{raw}");
+        assert_eq!(raw["pendingDialog"]["method"], "select");
+        // Round-trips through the tolerant reader; without a fleet cache the
+        // catalogue reads empty.
+        let loaded = run::load_state(&fleet.run_dir).unwrap();
+        assert!(loaded.available_models.is_empty());
+        assert_eq!(loaded.pending_dialog.unwrap().method, "select");
+        // With the fleet cache present, loading sources the catalogue from it.
+        let cache = pilotfish::fleet::run::PiCache {
+            available_models: vec![pilotfish::fleet::run::WorkerModel {
+                provider: "fakeprovider".into(),
+                id: "glm-5.3".into(),
+                name: Some("GLM 5.3".into()),
+                thinking_levels: Vec::new(),
+                context_window: None,
+                cost: None,
+            }],
+            commands: Vec::new(),
+            ..pilotfish::fleet::run::PiCache::default()
+        };
+        run::write_pi_cache(&fleet.pilotfish_dir, &cache).unwrap();
+        let loaded = run::load_state(&fleet.run_dir).unwrap();
+        assert_eq!(loaded.available_models.len(), 1);
+        assert_eq!(loaded.available_models[0].id, "glm-5.3");
+    }
+}
+
+#[test]
+fn commands_and_activity() {
+    {
+        let mut fleet = spawn_slow("pf-cmds-", &[("FAKE_PI_DELAY_MS", "20000")]);
+        let state = fleet.wait_state(Duration::from_secs(20), |state| !state.commands.is_empty());
+        let names: Vec<&str> = state.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["skill:fleet-worker-report", "compact-notes", "session-name"]
+        );
+        assert_eq!(state.commands[0].source, "skill");
+        // The fleet cache carries them, and the per-run file does not.
+        let cache = read_cache(&fleet.pilotfish_dir);
+        let names: Vec<&str> = cache.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["skill:fleet-worker-report", "compact-notes", "session-name"]
+        );
+        let run_raw = fleet.read("run.json");
+        assert!(!run_raw.contains("\"commands\""), "{run_raw}");
+
+        // Asked for, not snapshotted: a skill installed after boot shows up on
+        // the next refresh, and the catalogue records when pi last answered.
+        assert!(!cache.fetched_at.is_empty(), "the answer is stamped");
+        fleet.append_inbox(&Envelope::refresh_capabilities(
+            Party::Console,
+            fleet.worker_party(),
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let refreshed = read_cache(&fleet.pilotfish_dir);
+            if refreshed.commands.iter().any(|c| c.name == "late-skill") {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the refreshed catalogue never arrived: {:?}",
+                refreshed.commands
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        fleet.append_inbox(&Envelope::command(
+            Party::Console,
+            fleet.worker_party(),
+            "/session-name mine",
+        ));
+        // The `command_delivered` event is written before the steering record is
+        // flushed to run.json (the monitor flushes state on a timer), so wait for
+        // the state — once it shows the steering, the event is already on disk.
+        fleet.wait_state(Duration::from_secs(15), |state| {
+            state.steer_count == 1
+                && state
+                    .steering_log
+                    .first()
+                    .is_some_and(|s| s.message == "command: /session-name mine")
+        });
+        assert!(
+            fleet.has_event(|ev| ev["type"] == "command_delivered"),
+            "a command_delivered event was written"
+        );
+
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+        assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
+    }
+    {
+        let mut fleet = Fleet::new("pf-activity-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_THINK_MS", "1500"), ("FAKE_PI_DELAY_MS", "1500")]);
+        let mut seen = std::collections::HashSet::new();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while Instant::now() < deadline {
+            let state = fleet.state();
+            seen.insert(format!(
+                "{}:{}",
+                state.status,
+                state
+                    .activity
+                    .map(|a| format!("{a:?}").to_lowercase())
+                    .unwrap_or_default()
+            ));
+            if TERMINAL.contains(&state.status) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(POLL_MS));
+        }
+        assert!(
+            seen.contains("running:thinking"),
+            "expected a thinking phase, saw {seen:?}"
+        );
+        assert!(
+            seen.contains("running:tool") || seen.contains("running:text"),
+            "and then work, saw {seen:?}"
+        );
+        assert_eq!(
+            fleet.state().activity,
+            None,
+            "a finished worker is doing nothing"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-ext-");
+        // The spawn flags ride on run.json; set the user-facing ones.
+        fleet.write_state_with(|state| {
+            state.model = Some("glm-5.3".into());
+            state.thinking = Some("high".into());
+            state.skill = Some("/extra/skill".into());
+            state.session_arg = Some("abc123".into());
+        });
+        let argv_file = fleet.root().join("argv.json");
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_ARGV_FILE", argv_file.to_str().unwrap()),
+            ("FAKE_PI_DELAY_MS", "300"),
+        ]);
+        settled_or(&fleet, Duration::from_secs(30));
+        let argv: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
+        assert_eq!(&argv[..2], &["--mode".to_string(), "rpc".to_string()]);
+        let paths = FleetPaths::new(&fleet.pilotfish_dir);
+        // The extension and skill were materialized into the fleet dir.
+        let extension = paths.pi_extension();
+        let skill = paths.pi_skill();
+        assert!(extension.is_file(), "{extension:?}");
+        assert!(skill.is_file(), "{skill:?}");
+        assert_eq!(
+            argv.iter()
+                .position(|a| a == "--extension")
+                .map(|at| argv[at + 1].as_str()),
+            Some(extension.to_str().unwrap())
+        );
+        assert_eq!(
+            argv.iter()
+                .position(|a| a == "--skill")
+                .map(|at| argv[at + 1].as_str()),
+            Some(skill.to_str().unwrap())
+        );
+        // The user's extra --skill still arrives, after the worker skill.
+        let last_skill_flag = argv.iter().rposition(|a| a == "--skill").unwrap();
+        assert_eq!(argv[last_skill_flag + 1], "/extra/skill");
+        let pair = |flag: &str| {
+            let at = argv.iter().rposition(|a| a == flag).unwrap();
+            argv[at + 1].as_str()
+        };
+        assert_eq!(pair("--session"), "abc123");
+        assert_eq!(pair("--model"), "glm-5.3");
+        assert_eq!(pair("--thinking"), "high");
+        // The materialized skill keeps the report-skill frontmatter and the template.
+        let skill_md = std::fs::read_to_string(&skill).unwrap();
+        assert!(
+            skill_md.starts_with("---\nname: fleet-worker-report\n"),
+            "the skill keeps its frontmatter"
+        );
+        assert!(
+            skill_md.contains("## Steering received"),
+            "the skill keeps the report template"
+        );
+        assert!(
+            skill_md.contains("$PILOTFISH_DIR/runs/$PILOTFISH_RUN/report.md"),
+            "the skill targets the PILOTFISH layout"
+        );
+        // The extension speaks the PILOTFISH layout.
+        let extension_ts = std::fs::read_to_string(&extension).unwrap();
+        assert!(extension_ts.contains("PILOTFISH_RUN"), "env names");
+        assert!(!extension_ts.contains("PI_FLEET"), "old env names are gone");
+        assert!(
+            extension_ts.contains("runs/${runId}/report.md"),
+            "{extension_ts}"
+        );
+        assert!(!extension_ts.contains("progress.md"), "progress.md is gone");
+    }
+}
+
+#[test]
+fn thinking_and_models() {
+    {
+        let mut fleet = Fleet::new("pf-think-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "20000"), ("FAKE_PI_THINKING", "low")]);
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.thinking_level.is_some()
+        });
+        assert_eq!(state.thinking_level.as_deref(), Some("low"));
+
+        fleet.append_inbox(&Envelope::thinking(
+            Party::Console,
+            fleet.worker_party(),
+            "xhigh",
+        ));
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.thinking_level.as_deref() == Some("xhigh")
+        });
+        assert_eq!(state.thinking_level.as_deref(), Some("xhigh"));
+        assert!(
+            fleet.has_event(|ev| ev["type"] == "thinking_requested"),
+            "a thinking_requested event was written"
+        );
+
+        fleet.append_inbox(&Envelope::thinking(
+            Party::Console,
+            fleet.worker_party(),
+            "ludicrous",
+        ));
+        fleet.wait_event(Duration::from_secs(20), |ev| {
+            ev["type"] == "thinking_rejected"
+        });
+        let state = fleet.state();
+        assert_eq!(
+            state.thinking_level.as_deref(),
+            Some("xhigh"),
+            "a rejected level does not stick"
+        );
+
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+        assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
+    }
+    {
+        let mut fleet = Fleet::new("pf-think-gap-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_DELAY_MS", "20000"),
+            ("FAKE_PI_THINKING", "xhigh"),
+            ("FAKE_PI_THINKING_LEVELS", "off,high,xhigh"),
+        ]);
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            !state.available_thinking_levels.is_empty()
+        });
+        assert_eq!(
+            state.available_thinking_levels,
+            vec!["off", "high", "xhigh"],
+            "what pi says the model has, so the console stops offering the rest"
+        );
+
+        fleet.append_inbox(&Envelope::thinking(
+            Party::Console,
+            fleet.worker_party(),
+            "max",
+        ));
+        fleet.wait_event(Duration::from_secs(20), |ev| {
+            ev["type"] == "thinking_unavailable"
+        });
+        let state = fleet.state();
+        assert_eq!(
+            state.thinking_level.as_deref(),
+            Some("xhigh"),
+            "the level pi is actually running at, not the one we asked for"
+        );
+
+        // a level it does have still lands, and says nothing extra
+        fleet.append_inbox(&Envelope::thinking(
+            Party::Console,
+            fleet.worker_party(),
+            "high",
+        ));
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.thinking_level.as_deref() == Some("high")
+        });
+        assert_eq!(state.thinking_level.as_deref(), Some("high"));
+
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+        assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
+    }
+    {
+        let mut fleet = Fleet::new("pf-model-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_MODEL_ID", "vendor/model-9"),
+            ("FAKE_PI_PROVIDER", "vendorco"),
+        ]);
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.active_model.is_some()
+        });
+        assert_eq!(state.active_model.as_deref(), Some("vendor/model-9"));
+        assert_eq!(state.active_provider.as_deref(), Some("vendorco"));
+        // The available-model list is a fleet property now: it lands in
+        // pi-cache.json (with the fake's provider), not in run.json — the state
+        // only reflects it through the load-time cache merge.
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            !state.available_models.is_empty()
+        });
+        assert!(
+            state
+                .available_models
+                .iter()
+                .any(|m| m.id == "glm-5.3-flash" && m.provider == "vendorco")
+        );
+        let cache = read_cache(&fleet.pilotfish_dir);
+        assert!(
+            cache
+                .available_models
+                .iter()
+                .any(|m| m.id == "glm-5.3-flash" && m.provider == "vendorco")
+        );
+        let run_raw = fleet.read("run.json");
+        assert!(!run_raw.contains("availableModels"), "{run_raw}");
+    }
+    {
+        let mut fleet = spawn_slow(
+            "pf-model-set-",
+            &[
+                ("FAKE_PI_DELAY_MS", "20000"),
+                ("FAKE_PI_ACCEPTS_MODEL", "1"),
+            ],
+        );
+        // Wait for the cached model list, then switch with an explicit provider.
+        fleet.wait_state(Duration::from_secs(20), |state| {
+            !state.available_models.is_empty()
+        });
+        fleet.append_inbox(&Envelope::model(
+            Party::Console,
+            fleet.worker_party(),
+            "glm-5.3-flash",
+            Some("fakeprovider".into()),
+        ));
+        fleet.wait_event(Duration::from_secs(15), |ev| {
+            ev["type"] == "model_requested"
+        });
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.active_model.as_deref() == Some("glm-5.3-flash")
+        });
+        assert_eq!(state.active_provider.as_deref(), Some("fakeprovider"));
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+        assert_eq!(fleet.wait_monitor_exit(Duration::from_secs(15)), Some(0));
+    }
+    {
+        let fleet = spawn_slow(
+            "pf-model-res-",
+            &[
+                ("FAKE_PI_DELAY_MS", "20000"),
+                ("FAKE_PI_ACCEPTS_MODEL", "1"),
+            ],
+        );
+        fleet.wait_state(Duration::from_secs(20), |state| {
+            !state.available_models.is_empty()
+        });
+        fleet.append_inbox(&Envelope::model(
+            Party::Console,
+            fleet.worker_party(),
+            "glm-5.3-flash",
+            None,
+        ));
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            state.active_model.as_deref() == Some("glm-5.3-flash")
+        });
+        // The provider came from the cached list, not from the envelope.
+        assert_eq!(state.active_provider.as_deref(), Some("fakeprovider"));
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+    }
+    {
+        let fleet = spawn_slow(
+            "pf-model-bad-",
+            &[
+                ("FAKE_PI_DELAY_MS", "20000"),
+                ("FAKE_PI_ACCEPTS_MODEL", "1"),
+            ],
+        );
+        fleet.wait_state(Duration::from_secs(20), |state| {
+            !state.available_models.is_empty()
+        });
+        fleet.append_inbox(&Envelope::model(
+            Party::Console,
+            fleet.worker_party(),
+            "ghost-model",
+            None,
+        ));
+        let unresolved = fleet.wait_event(Duration::from_secs(15), |ev| {
+            ev["type"] == "model_unresolved"
+        });
+        assert_eq!(unresolved["model"], "ghost-model");
+        assert!(
+            unresolved["reason"]
+                .as_str()
+                .unwrap()
+                .contains("not in pi's available models")
+        );
+        // pi was never asked to switch: the resolved model is unchanged.
+        assert_eq!(fleet.state().active_model.as_deref(), Some("fake/model-1"));
+        assert!(
+            !fleet.has_event(|ev| ev["type"] == "model_rejected"),
+            "pi was never told to switch"
+        );
+        fleet.append_inbox(&Envelope::abort(Party::Console, fleet.worker_party()));
+        settled_or(&fleet, Duration::from_secs(20));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// monitor-control.test.ts
+
+#[test]
+fn steering() {
+    {
+        let fleet = spawn_slow("pf-steer-", &[("FAKE_PI_DELAY_MS", "4000")]);
+        fleet.append_inbox(&Envelope::steer(
+            Party::Console,
+            fleet.worker_party(),
+            "use tabs not spaces",
+        ));
+        fleet.append_inbox(&Envelope::follow_up(
+            fleet.orch_party(),
+            fleet.worker_party(),
+            "then summarize",
+        ));
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Settled);
+        assert_eq!(state.steer_count, 2);
+        let log: Vec<(&str, &str)> = state
+            .steering_log
+            .iter()
+            .map(|s| (s.source.as_str(), s.message.as_str()))
+            .collect();
+        assert_eq!(
+            log,
+            vec![
+                ("console", "use tabs not spaces"),
+                ("orchestrator", "then summarize")
+            ]
+        );
+        assert!(
+            state.steering_log.iter().all(|s| !s.ts.is_empty()),
+            "every steering record is timestamped"
+        );
+        let events = fleet.read("events.jsonl");
+        assert!(events.contains("\"steering_delivered\""), "{events}");
+        assert!(events.contains("use tabs not spaces"), "{events}");
+        let report = fleet.read("report.md");
+        assert!(
+            report.contains("## Steering received\n- use tabs not spaces"),
+            "{report}"
+        );
+    }
+    {
+        let fleet = spawn_slow("pf-abort-", &[("FAKE_PI_DELAY_MS", "4000")]);
+        fleet.append_inbox(&Envelope::abort(fleet.orch_party(), fleet.worker_party()));
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Stopped);
+        assert!(state.settled_at.is_some(), "the stop was recorded");
+        assert!(
+            fleet.has_event(|ev| ev["type"] == "abort_requested"),
+            "an abort_requested event was written"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-late-");
+        fleet.write_state();
+        // pi lingers after settle so the monitor is still polling when the late steer lands
+        fleet.spawn_monitor(&[("FAKE_PI_EXIT_DELAY_MS", "3000")]);
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Settled);
+        fleet.append_inbox(&Envelope::steer(
+            Party::Console,
+            fleet.worker_party(),
+            "too late",
+        ));
+        let dropped = fleet.wait_event(Duration::from_secs(10), |ev| {
+            ev["type"] == "control_dropped" && ev["reason"] == "run already settled"
+        });
+        assert_eq!(dropped["control"], "steer");
+        let events = fleet.read("events.jsonl");
+        assert!(!events.contains("steering_delivered"), "{events}");
+        assert_eq!(fleet.state().steer_count, 0);
+    }
+    {
+        let mut fleet = Fleet::new("pf-early-");
+        fleet.write_state();
+        // Written before the monitor starts; the inbox is read from byte 0.
+        fleet.append_inbox(&Envelope::steer(
+            fleet.orch_party(),
+            fleet.worker_party(),
+            "early bird",
+        ));
+        fleet.spawn_monitor(&[("FAKE_PI_DELAY_MS", "3000")]);
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Settled);
+        assert_eq!(state.steer_count, 1);
+        assert_eq!(state.steering_log[0].message, "early bird");
+        let report = fleet.read("report.md");
+        assert!(report.contains("- early bird"), "{report}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// monitor-outbox.test.ts
+
+#[test]
+fn questions_and_dialogs() {
+    {
+        let mut fleet = Fleet::new("pf-outbox-1-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_ASK", "1"),
+            ("FAKE_PI_PROGRESS", "1"),
+            ("FAKE_PI_DELAY_MS", "200"),
+        ]);
+        let state = fleet.wait_state(Duration::from_secs(15), |state| {
+            state.pending_question.is_some()
+        });
+        let pending = state.pending_question.unwrap();
+        assert_eq!(pending.question, "bcrypt or argon2?");
+        assert_eq!(
+            pending.options,
+            Some(vec!["bcrypt".into(), "argon2".into()])
+        );
+        assert_eq!(pending.context, None);
+        assert!(
+            pending.id.starts_with("q_fake_"),
+            "the question carries the fake's id: {}",
+            pending.id
+        );
+        assert!(
+            pending.asked_at.starts_with('2'),
+            "asked_at is an RFC3339 timestamp: {}",
+            pending.asked_at
+        );
+        assert_eq!(state.last_progress.as_deref(), Some("starting the work"));
+
+        // A running worker waiting on its question reads as blocked.
+        let view = derive_view(&fleet.state(), |_| true, now_ms());
+        assert_eq!(view, DerivedView::Blocked);
+
+        let events = fleet.events();
+        let question = events
+            .iter()
+            .find(|ev| ev["type"] == "worker_question")
+            .expect("worker_question mirrored");
+        assert_eq!(question["questionId"], pending.id.as_str());
+        assert_eq!(question["question"], "bcrypt or argon2?");
+        assert!(
+            events.iter().any(|ev| ev["type"] == "worker_progress"),
+            "a worker_progress event was mirrored"
+        );
+
+        fleet.append_inbox(&Envelope::answer(
+            fleet.orch_party(),
+            fleet.worker_party(),
+            "argon2",
+            Some(pending.id.clone()),
+        ));
+        fleet.wait_event(Duration::from_secs(10), |ev| {
+            ev["type"] == "answer_delivered"
+        });
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            TERMINAL.contains(&state.status)
+        });
+        assert_eq!(state.status, RunStatus::Settled);
+        assert_eq!(state.pending_question, None);
+        assert_eq!(state.steer_count, 1);
+        assert_eq!(state.steering_log[0].source, "orchestrator");
+        assert_eq!(
+            state.steering_log[0].message,
+            format!("answer({}): argon2", pending.id)
+        );
+        let events = fleet.events();
+        let delivered = events
+            .iter()
+            .find(|ev| ev["type"] == "answer_delivered")
+            .unwrap();
+        assert_eq!(delivered["questionId"], pending.id.as_str());
+        assert_eq!(delivered["source"], "orchestrator");
+        assert_eq!(delivered["message"], "argon2");
+        let resolved = events
+            .iter()
+            .find(|ev| ev["type"] == "worker_question_resolved")
+            .unwrap();
+        assert_eq!(resolved["questionId"], pending.id.as_str());
+        assert_eq!(resolved["how"], "answered");
+        let report = fleet.read("report.md");
+        assert!(report.contains("Answer received: argon2"), "{report}");
+    }
+    {
+        let mut fleet = Fleet::new("pf-outbox-2-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_ASK", "1"),
+            ("FAKE_PI_ASK_TIMEOUT_MS", "600"),
+            ("FAKE_PI_DELAY_MS", "100"),
+        ]);
+        fleet.wait_state(Duration::from_secs(15), |state| {
+            state.pending_question.is_some()
+        });
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            TERMINAL.contains(&state.status)
+        });
+        assert_eq!(state.status, RunStatus::Settled);
+        assert_eq!(state.pending_question, None);
+        assert_eq!(state.steer_count, 0);
+        let resolved = fleet
+            .events()
+            .into_iter()
+            .find(|ev| ev["type"] == "worker_question_resolved")
+            .expect("resolved event");
+        assert_eq!(resolved["how"], "timeout");
+        assert!(
+            !fleet.has_event(|ev| ev["type"] == "answer_delivered"),
+            "no answer was delivered"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-dialog-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_DIALOG", "1"), ("FAKE_PI_DELAY_MS", "300")]);
+        let state = fleet.wait_state(Duration::from_secs(15), |state| {
+            state.pending_dialog.is_some()
+        });
+        let dialog = state.pending_dialog.unwrap();
+        assert_eq!(dialog.id, "dlg_fake_1");
+        assert_eq!(dialog.method, "select");
+        assert_eq!(dialog.question, "Pick one");
+        assert_eq!(dialog.options, Some(vec!["a".into(), "b".into()]));
+        // Rendered like a pending question.
+        assert_eq!(
+            derive_view(&fleet.state(), |_| true, now_ms()),
+            DerivedView::Blocked
+        );
+        let request = fleet.wait_event(Duration::from_secs(10), |ev| ev["type"] == "worker_dialog");
+        assert_eq!(request["questionId"], "dlg_fake_1");
+
+        fleet.append_inbox(&Envelope::answer(
+            fleet.orch_party(),
+            fleet.worker_party(),
+            "b",
+            Some("dlg_fake_1".into()),
+        ));
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            TERMINAL.contains(&state.status)
+        });
+        assert_eq!(
+            state.status,
+            RunStatus::Settled,
+            "the dialog never stalls the worker"
+        );
+        assert_eq!(state.pending_dialog, None, "answered dialog is cleared");
+        // The value reply reached pi and was recorded.
+        let report = fleet.read("report.md");
+        assert!(report.contains(r#""value":"b""#), "{report}");
+        assert!(
+            fleet.has_event(|ev| ev["type"] == "answer_delivered"),
+            "the answer reached pi"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-dialog-t-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_DIALOG", "1"),
+            ("FAKE_PI_DIALOG_TIMEOUT", "1500"),
+            ("FAKE_PI_DELAY_MS", "100"),
+        ]);
+        fleet.wait_state(Duration::from_secs(15), |state| {
+            state.pending_dialog.is_some()
+        });
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            TERMINAL.contains(&state.status)
+        });
+        assert_eq!(
+            state.status,
+            settled_status(),
+            "the monitor cancelled instead of hanging"
+        );
+        assert_eq!(state.pending_dialog, None);
+        let report = fleet.read("report.md");
+        // pi got the cancellation, not its own timeout resolution.
+        assert!(report.contains(r#""cancelled":true"#), "{report}");
+        assert!(!report.contains("(pi timeout)"), "{report}");
+        assert!(
+            fleet.has_event(|ev| ev["type"] == "dialog_cancelled"),
+            "a dialog_cancelled event was written"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-notify-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_NOTIFY", "1"), ("FAKE_PI_DELAY_MS", "200")]);
+        let state = settled_or(&fleet, Duration::from_secs(20));
+        assert_eq!(state.status, settled_status());
+        assert_eq!(state.pending_dialog, None, "no reply was expected");
+        let events = fleet.read("events.jsonl");
+        assert!(events.contains("\"notify\""), "{events}");
+        assert!(events.contains("\"setTitle\""), "{events}");
+        assert!(
+            !fleet.has_event(|ev| ev["type"] == "dialog_cancelled"),
+            "no cancellation was needed"
+        );
+    }
+    {
+        let mut fleet = Fleet::new("pf-dialog-c-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_DIALOG", "1"),
+            ("FAKE_PI_DIALOG_METHOD", "confirm"),
+            ("FAKE_PI_DELAY_MS", "300"),
+        ]);
+        fleet.wait_state(Duration::from_secs(15), |state| {
+            state.pending_dialog.is_some()
+        });
+        fleet.append_inbox(&Envelope::answer(
+            Party::Console,
+            fleet.worker_party(),
+            "yes",
+            Some("dlg_fake_1".into()),
+        ));
+        let state = fleet.wait_state(Duration::from_secs(20), |state| {
+            TERMINAL.contains(&state.status)
+        });
+        assert_eq!(state.status, settled_status());
+        let report = fleet.read("report.md");
+        assert!(report.contains(r#""confirmed":true"#), "{report}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fleet-extension.test.ts (monitor-facing parts) + the new dialog/model work
+
+const fn settled_status() -> RunStatus {
+    RunStatus::Settled
 }

@@ -135,54 +135,58 @@ mod tests {
     }
 
     #[test]
-    fn fleet_mcp_config_points_claude_at_pilotfish_mcp_with_basics_and_dev_knobs() {
-        let env = env_of(&[
-            ("PILOTFISH_DEV", "1"),
-            ("PILOTFISH_PI_BIN", "node fake.mjs"),
-            ("HOME", "/h"),
-            ("PATH", "/bin"),
-            ("ANTHROPIC_API_KEY", "secret"),
-        ]);
-        let cfg = fleet_mcp_config_with_env(
-            Path::new("/usr/local/bin/pilotfish"),
-            Path::new("/repo/.pilotfish"),
-            &env,
-        );
-        let fleet = &cfg["mcpServers"]["fleet"];
-        assert_eq!(fleet["type"], "stdio");
-        assert_eq!(fleet["command"], "/usr/local/bin/pilotfish");
-        assert_eq!(fleet["args"], json!(["mcp"]));
-        assert_eq!(
-            fleet["env"],
-            json!({
-                "PILOTFISH_DIR": "/repo/.pilotfish",
-                "PATH": "/bin",
-                "HOME": "/h",
-                "PILOTFISH_DEV": "1",
-                "PILOTFISH_PI_BIN": "node fake.mjs",
-            })
-        );
-        assert!(
-            fleet["env"].get("ANTHROPIC_API_KEY").is_none(),
-            "no secrets on claude's command line"
-        );
-        assert_eq!(fleet["timeout"], json!(FLEET_MCP_TIMEOUT_MS));
-        assert_eq!(FLEET_TOOLS_ALLOW_PATTERN, "mcp__fleet__*");
-        assert_eq!(FLEET_MCP_SERVER_NAME, "fleet");
-        // valid JSON document end to end
-        serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&cfg).unwrap()).unwrap();
-    }
-
-    #[test]
-    fn empty_and_missing_env_values_are_omitted() {
-        let env = env_of(&[("PATH", "/bin"), ("PILOTFISH_DEV", ""), ("TMPDIR", " ")]);
-        let cfg =
-            fleet_mcp_config_with_env(Path::new("/pilotfish"), Path::new("/repo/.pilotfish"), &env);
-        // TMPDIR is " " — non-empty, so it passes through verbatim; the empty
-        // PILOTFISH_DEV does not.
-        assert_eq!(
-            cfg["mcpServers"]["fleet"]["env"],
-            json!({"PILOTFISH_DIR": "/repo/.pilotfish", "PATH": "/bin", "TMPDIR": " "})
-        );
+    fn mcp_config() {
+        {
+            let env = env_of(&[
+                ("PILOTFISH_DEV", "1"),
+                ("PILOTFISH_PI_BIN", "node fake.mjs"),
+                ("HOME", "/h"),
+                ("PATH", "/bin"),
+                ("ANTHROPIC_API_KEY", "secret"),
+            ]);
+            let cfg = fleet_mcp_config_with_env(
+                Path::new("/usr/local/bin/pilotfish"),
+                Path::new("/repo/.pilotfish"),
+                &env,
+            );
+            let fleet = &cfg["mcpServers"]["fleet"];
+            assert_eq!(fleet["type"], "stdio");
+            assert_eq!(fleet["command"], "/usr/local/bin/pilotfish");
+            assert_eq!(fleet["args"], json!(["mcp"]));
+            assert_eq!(
+                fleet["env"],
+                json!({
+                    "PILOTFISH_DIR": "/repo/.pilotfish",
+                    "PATH": "/bin",
+                    "HOME": "/h",
+                    "PILOTFISH_DEV": "1",
+                    "PILOTFISH_PI_BIN": "node fake.mjs",
+                })
+            );
+            assert!(
+                fleet["env"].get("ANTHROPIC_API_KEY").is_none(),
+                "no secrets on claude's command line"
+            );
+            assert_eq!(fleet["timeout"], json!(FLEET_MCP_TIMEOUT_MS));
+            assert_eq!(FLEET_TOOLS_ALLOW_PATTERN, "mcp__fleet__*");
+            assert_eq!(FLEET_MCP_SERVER_NAME, "fleet");
+            // valid JSON document end to end
+            serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&cfg).unwrap())
+                .unwrap();
+        }
+        {
+            let env = env_of(&[("PATH", "/bin"), ("PILOTFISH_DEV", ""), ("TMPDIR", " ")]);
+            let cfg = fleet_mcp_config_with_env(
+                Path::new("/pilotfish"),
+                Path::new("/repo/.pilotfish"),
+                &env,
+            );
+            // TMPDIR is " " — non-empty, so it passes through verbatim; the empty
+            // PILOTFISH_DEV does not.
+            assert_eq!(
+                cfg["mcpServers"]["fleet"]["env"],
+                json!({"PILOTFISH_DIR": "/repo/.pilotfish", "PATH": "/bin", "TMPDIR": " "})
+            );
+        }
     }
 }

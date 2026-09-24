@@ -621,94 +621,92 @@ mod tests {
         }
     }
 
-    /// The buffering rule: records read before anything is listening are
-    /// held, not dropped — the console renders after start().
     #[test]
-    fn records_read_before_anything_subscribes_are_held_then_flushed() {
-        let tmp = tempfile::tempdir().unwrap();
-        let client = OrchestratorClient::new(OrchestratorClientOptions::new(
-            tmp.path().join(".pilotfish"),
-            tmp.path().to_path_buf(),
-        ));
-        let events = client.paths().orchestrator_events(&client.key);
-        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
-        for text in ["one", "two"] {
-            crate::util::append_json_line(&events, &record("stream_text", text)).unwrap();
+    fn replay_semantics() {
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let client = OrchestratorClient::new(OrchestratorClientOptions::new(
+                tmp.path().join(".pilotfish"),
+                tmp.path().to_path_buf(),
+            ));
+            let events = client.paths().orchestrator_events(&client.key);
+            std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+            for text in ["one", "two"] {
+                crate::util::append_json_line(&events, &record("stream_text", text)).unwrap();
+            }
+
+            client.tick();
+            // records read before anything listened are held, not dropped
+            let mut rx = client.subscribe();
+            let first = rx.try_recv().unwrap();
+            let ClientEvent::Record(first) = &first else {
+                unreachable!()
+            };
+            assert_eq!(first.body["text"], "one");
+            // the second held record follows
+            let second = rx.try_recv().unwrap();
+            let ClientEvent::Record(second) = &second else {
+                unreachable!()
+            };
+            assert_eq!(second.body["text"], "two");
+            assert!(rx.try_recv().is_err());
         }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let fleet = tmp.path().join(".pilotfish");
+            let client = OrchestratorClient::new(OrchestratorClientOptions::new(
+                fleet,
+                tmp.path().to_path_buf(),
+            ));
+            let events = client.paths().orchestrator_events(&client.key);
+            std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+            crate::util::append_json_line(
+                &events,
+                &crate::orch::records::OrchestratorEvent::Exit {
+                    code: Some(0),
+                    signal: None,
+                }
+                .to_record(),
+            )
+            .unwrap();
 
-        client.tick();
-        // records read before anything listened are held, not dropped
-        let mut rx = client.subscribe();
-        let first = rx.try_recv().unwrap();
-        let ClientEvent::Record(first) = &first else {
-            unreachable!()
-        };
-        assert_eq!(first.body["text"], "one");
-        // the second held record follows
-        let second = rx.try_recv().unwrap();
-        let ClientEvent::Record(second) = &second else {
-            unreachable!()
-        };
-        assert_eq!(second.body["text"], "two");
-        assert!(rx.try_recv().is_err());
+            let mut rx = client.subscribe();
+            client.tick();
+            // the restored record is replayed...
+            assert!(rx.try_recv().is_ok());
+            // ...but no exit is announced: the session that ended is history
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            // a live exit (after catch-up) is announced
+            crate::util::append_json_line(
+                &events,
+                &crate::orch::records::OrchestratorEvent::Exit {
+                    code: Some(0),
+                    signal: None,
+                }
+                .to_record(),
+            )
+            .unwrap();
+            client.tick();
+            // the second exit announces twice over: the record, then the exit
+            let announced = std::iter::from_fn(|| rx.try_recv().ok())
+                .find(|event| matches!(event, ClientEvent::Exit { .. }))
+                .expect("a live exit is announced after catch-up");
+            assert_eq!(
+                announced,
+                ClientEvent::Exit {
+                    code: Some(0),
+                    signal: None
+                }
+            );
+        }
     }
 
     #[test]
-    fn an_exit_in_a_restored_transcript_is_not_announced() {
-        let tmp = tempfile::tempdir().unwrap();
-        let fleet = tmp.path().join(".pilotfish");
-        let client = OrchestratorClient::new(OrchestratorClientOptions::new(
-            fleet,
-            tmp.path().to_path_buf(),
-        ));
-        let events = client.paths().orchestrator_events(&client.key);
-        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
-        crate::util::append_json_line(
-            &events,
-            &crate::orch::records::OrchestratorEvent::Exit {
-                code: Some(0),
-                signal: None,
-            }
-            .to_record(),
-        )
-        .unwrap();
-
-        let mut rx = client.subscribe();
-        client.tick();
-        // the restored record is replayed...
-        assert!(rx.try_recv().is_ok());
-        // ...but no exit is announced: the session that ended is history
-        assert!(matches!(
-            rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-
-        // a live exit (after catch-up) is announced
-        crate::util::append_json_line(
-            &events,
-            &crate::orch::records::OrchestratorEvent::Exit {
-                code: Some(0),
-                signal: None,
-            }
-            .to_record(),
-        )
-        .unwrap();
-        client.tick();
-        // the second exit announces twice over: the record, then the exit
-        let announced = std::iter::from_fn(|| rx.try_recv().ok())
-            .find(|event| matches!(event, ClientEvent::Exit { .. }))
-            .expect("a live exit is announced after catch-up");
-        assert_eq!(
-            announced,
-            ClientEvent::Exit {
-                code: Some(0),
-                signal: None
-            }
-        );
-    }
-
-    #[test]
-    fn pending_requests_are_reannounced_to_a_console_that_attaches_later() {
+    fn reannounces_pending_requests() {
         let tmp = tempfile::tempdir().unwrap();
         let fleet = tmp.path().join(".pilotfish");
         let client = OrchestratorClient::new(OrchestratorClientOptions::new(
@@ -753,7 +751,7 @@ mod tests {
     }
 
     #[test]
-    fn the_transcript_is_trimmed_to_the_restorable_tail() {
+    fn trims_to_restorable_tail() {
         let tmp = tempfile::tempdir().unwrap();
         let events_path = tmp.path().join("events.jsonl");
         let mut raw = String::new();
@@ -790,7 +788,7 @@ mod tests {
     /// exits on the unknown flags at once). The recorded launch model is the
     /// point: it is what the real monitor's boot applies.
     #[tokio::test]
-    async fn spawn_monitor_records_the_most_specific_orchestrator_model() {
+    async fn records_specific_model() {
         let tmp = tempfile::tempdir().unwrap();
         let fleet = tmp.path().join(".pilotfish");
         let user_root = tmp.path().join("user");

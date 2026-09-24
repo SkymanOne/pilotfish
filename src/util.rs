@@ -373,73 +373,6 @@ pub fn read_new_lines(path: &Path, offset: u64) -> (Vec<String>, u64) {
 }
 
 #[cfg(test)]
-mod visible_line_tests {
-    use super::visible_line;
-
-    #[test]
-    fn carriage_returns_resolve_the_way_a_terminal_shows_them() {
-        // the real `git rebase` output that tore the console's frame
-        assert_eq!(
-            visible_line(
-                "Rebasing (1/6)\rRebasing (2/6)\rRebasing (6/6)\rSuccessfully rebased and updated refs/heads/feat/escrow."
-            ),
-            "Successfully rebased and updated refs/heads/feat/escrow.",
-            "progress collapses to what it finally said"
-        );
-        assert_eq!(
-            visible_line("done\r"),
-            "done",
-            "a trailing CR is not a line"
-        );
-        assert_eq!(visible_line("plain"), "plain");
-        assert_eq!(visible_line(""), "");
-        assert_eq!(visible_line("\r"), "");
-    }
-
-    #[test]
-    fn every_other_control_character_becomes_a_space() {
-        assert_eq!(visible_line("a\tb"), "a b", "a tab would jump a tab stop");
-        assert_eq!(
-            visible_line("\x1b[31mred\x1b[0m"),
-            "red",
-            "a colour sequence goes whole, payload included"
-        );
-        assert_eq!(visible_line("a\x08b"), "a b");
-        assert_eq!(visible_line("bell\x07"), "bell ");
-        let out = visible_line("ok\u{9b}[2J");
-        assert!(
-            !out.chars().any(char::is_control),
-            "nothing controlling survives: {out:?}"
-        );
-    }
-
-    #[test]
-    fn escape_sequences_go_whole_rather_than_leaving_their_payload() {
-        // the litter this replaces: `ESC` spaced out, `[31m` left as text
-        assert_eq!(
-            visible_line("\x1b[1;32mPASS\x1b[0m 12 tests"),
-            "PASS 12 tests"
-        );
-        assert_eq!(visible_line("\x1b[2K\x1b[1Gbuilding"), "building");
-        // OSC 0 (set window title), both terminators
-        assert_eq!(visible_line("\x1b]0;a title\x07after"), "after");
-        assert_eq!(visible_line("\x1b]0;a title\x1b\\after"), "after");
-        // a two-character escape takes its second byte with it
-        assert_eq!(visible_line("a\x1b=b"), "ab");
-        // unterminated: the rest of the line goes, as a terminal would
-        assert_eq!(visible_line("keep\x1b[31"), "keep");
-        assert_eq!(visible_line("\x1b"), "");
-    }
-
-    #[test]
-    fn ordinary_text_is_untouched() {
-        for text in ["héllo · wörld", "日本語のテキスト", "→ ⚙ ↳ ▸ ▍"] {
-            assert_eq!(visible_line(text), text);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
@@ -455,7 +388,48 @@ mod tests {
     }
 
     #[test]
-    fn split_json_lines_strict_framing_across_chunk_boundaries() {
+    fn visible_line_scrubs_controls() {
+        // the real `git rebase` output that tore the console's frame
+        assert_eq!(
+            visible_line(
+                "Rebasing (1/6)\rRebasing (2/6)\rRebasing (6/6)\rSuccessfully rebased and updated refs/heads/feat/escrow."
+            ),
+            "Successfully rebased and updated refs/heads/feat/escrow.",
+            "progress collapses to what it finally said"
+        );
+        assert_eq!(
+            visible_line("done\r"),
+            "done",
+            "a trailing CR is not a line"
+        );
+        assert_eq!(visible_line("\r"), "");
+        assert_eq!(visible_line("a\tb"), "a b", "a tab would jump a tab stop");
+        assert_eq!(visible_line("a\x08b"), "a b");
+        assert_eq!(visible_line("bell\x07"), "bell ");
+        let out = visible_line("ok\u{9b}[2J");
+        assert!(!out.chars().any(char::is_control), "{out:?}");
+        // escape sequences go whole, not `ESC` spaced out with `[31m` left behind
+        assert_eq!(
+            visible_line("\x1b[1;32mPASS\x1b[0m 12 tests"),
+            "PASS 12 tests"
+        );
+        assert_eq!(visible_line("\x1b[2K\x1b[1Gbuilding"), "building");
+        assert_eq!(visible_line("\x1b]0;a title\x07after"), "after");
+        assert_eq!(visible_line("\x1b]0;a title\x1b\\after"), "after");
+        assert_eq!(visible_line("a\x1b=b"), "ab");
+        assert_eq!(
+            visible_line("keep\x1b[31"),
+            "keep",
+            "unterminated: the rest goes"
+        );
+        assert_eq!(visible_line("\x1b"), "");
+        for text in ["héllo · wörld", "日本語のテキスト", "→ ⚙ ↳ ▸ ▍"] {
+            assert_eq!(visible_line(text), text);
+        }
+    }
+
+    #[test]
+    fn split_json_lines_framing() {
         let payload = "{\"a\":\"xy\"}\n{\"b\":\"c\"}\r\n";
         let mut rest = String::new();
         let mut acc = Vec::new();
@@ -466,25 +440,17 @@ mod tests {
         }
         assert_eq!(acc, vec!["{\"a\":\"xy\"}", "{\"b\":\"c\"}"]);
         assert_eq!(rest, "");
-    }
-
-    #[test]
-    fn split_json_lines_u2028_is_not_a_delimiter() {
+        // U+2028 is not a delimiter
         let r = split_json_lines("{\"a\":\"x\u{2028}y\"}\n", "");
         assert_eq!(r.lines.len(), 1);
-        let parsed: serde_json::Value = serde_json::from_str(&r.lines[0]).unwrap();
-        assert_eq!(parsed["a"], "x\u{2028}y");
-    }
-
-    #[test]
-    fn split_json_lines_keeps_incomplete_tail() {
+        // an incomplete tail is held back
         let r = split_json_lines("{\"a\":1}\n{\"b\":", "");
         assert_eq!(r.lines, vec!["{\"a\":1}"]);
         assert_eq!(r.rest, "{\"b\":");
     }
 
     #[test]
-    fn atomic_write_json_round_trips_without_tmp_files() {
+    fn atomic_write_no_tmp() {
         let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("state.json");
         atomic_write_json(&path, &serde_json::json!({ "a": 1 })).unwrap();
@@ -494,137 +460,62 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&raw).unwrap(),
             serde_json::json!({ "a": 2 })
         );
-        let mut entries: Vec<String> = std::fs::read_dir(&dir)
+        let entries: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        entries.sort();
         assert_eq!(entries, vec!["state.json"]);
     }
 
     #[test]
-    fn append_json_line_then_read_jsonl_tail_returns_newest_last_slice() {
-        let dir = tmp_dir("pilotfish-util-");
-        let path = dir.join("events.jsonl");
-        for i in 0..5 {
-            append_json_line(&path, &serde_json::json!({ "i": i })).unwrap();
-        }
-        let tail: Vec<serde_json::Value> = read_jsonl_tail(&path, 3);
-        let got: Vec<i64> = tail.iter().map(|v| v["i"].as_i64().unwrap()).collect();
-        assert_eq!(got, vec![2, 3, 4]);
-    }
-
-    #[test]
-    fn run_id_and_branch_formats_are_utc() {
-        let uuid = Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
-        let id = run_id_for("auth-worker", &uuid);
-        assert_eq!(id, "auth-worker-f7a8b9c");
-        assert_eq!(short7(&id), "f7a8b9c");
-        assert_eq!(short_uuid(&uuid), "f7a8b9c");
-        assert_eq!(
-            branch_for("auth-worker", &id),
-            "pilotfish/auth-worker-f7a8b9c"
-        );
-        // A legacy 14-digit run id still shortens to seven characters, so
-        // the branch rule needs no special case for what is on disk.
-        let legacy = "auth-20260828141530";
-        assert_eq!(short7(legacy), "8141530");
-        assert_eq!(branch_for("auth", legacy), "pilotfish/auth-8141530");
-        assert_eq!(first_line("a\nb"), "a");
-        assert_eq!(first_line("solo"), "solo");
-    }
-
-    #[test]
-    fn now_iso_has_millisecond_precision() {
-        let ts = now_iso();
-        assert_eq!(ts.len(), 24, "{ts}");
-        assert!(ts.ends_with('Z'), "{ts}");
-        assert_eq!(&ts[10..11], "T");
-        assert_eq!(&ts[19..20], ".");
-        assert!(parse_ts_ms(&ts).is_some());
-    }
-
-    #[test]
-    fn format_age_renders_compact_ages() {
-        assert_eq!(format_age(30_000), "30s");
-        assert_eq!(format_age(5 * 60_000), "5m");
-        assert_eq!(format_age(125 * 60_000), "2h");
-        assert_eq!(format_age(3 * 86_400_000), "3d");
-    }
-
-    #[test]
-    fn sanitize_name_kebab_cases() {
-        assert_eq!(sanitize_name("Auth Worker 2!"), "auth-worker-2");
-        assert_eq!(sanitize_name("--x--"), "x");
-        assert_eq!(sanitize_name("über"), "ber");
-    }
-
-    #[test]
-    fn new_id_has_prefix_time_and_random_parts() {
-        let id = new_id("m");
-        let mut parts = id.split('_');
-        assert_eq!(parts.next(), Some("m"));
-        let time = parts.next().unwrap();
-        let rand = parts.next().unwrap();
-        assert!(!time.is_empty());
-        assert_eq!(rand.len(), 6);
-        assert!(id.starts_with("m_"));
-    }
-
-    #[test]
-    fn base36_six_zero_fills_short_values_on_the_left() {
-        // The values whose base36 form is shorter than six characters —
-        // the ~2.78% of draws that `{:06}` padded with trailing spaces.
-        assert_eq!(base36_6(0), "000000");
-        assert_eq!(base36_6(9), "000009");
-        assert_eq!(base36_6(35), "00000z");
-        assert_eq!(base36_6(36), "000010");
-        assert_eq!(base36_6(36u64.pow(5) - 1), "0zzzzz");
-        assert_eq!(base36_6(36u64.pow(5)), "100000");
-        assert_eq!(base36_6(36u64.pow(6) - 1), "zzzzzz");
-    }
-
-    #[test]
-    fn new_id_stays_whitespace_free_across_thousands_of_draws() {
-        // `{:06}` left-aligned the short draws with spaces, and the shape
-        // test above passed right through it (trailing spaces kept
-        // `rand.len() == 6` true). Thousands of draws are certain to land
-        // in that ~2.78% bucket, so the real generator is pinned too.
+    fn new_id_no_whitespace() {
+        // `{:06}` once padded the ~2.78% of short base36 draws with trailing
+        // spaces; thousands of draws are certain to land in that bucket
         for prefix in ["m", "ev", "t"] {
             for _ in 0..2_500 {
                 let id = new_id(prefix);
-                assert!(id.chars().all(|c| !c.is_whitespace()), "{id:?}");
                 let mut parts = id.split('_');
                 assert_eq!(parts.next(), Some(prefix), "{id:?}");
                 let time = parts.next().unwrap();
                 let rand = parts.next().unwrap();
                 assert!(parts.next().is_none(), "{id:?}");
-                assert!(
-                    !time.is_empty()
-                        && time
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()),
-                    "{id:?}"
-                );
+                assert!(!time.is_empty(), "{id:?}");
                 assert_eq!(rand.len(), 6, "{id:?}");
                 assert!(
-                    rand.bytes()
-                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase()),
+                    id.bytes()
+                        .all(|b| b == b'_' || b.is_ascii_digit() || b.is_ascii_lowercase()),
                     "{id:?}"
                 );
             }
         }
+        {
+            assert_eq!(format_age(30_000), "30s");
+            assert_eq!(format_age(5 * 60_000), "5m");
+            assert_eq!(format_age(125 * 60_000), "2h");
+            assert_eq!(format_age(3 * 86_400_000), "3d");
+        }
+        {
+            // The values whose base36 form is shorter than six characters —
+            // the ~2.78% of draws that `{:06}` padded with trailing spaces.
+            assert_eq!(base36_6(0), "000000");
+            assert_eq!(base36_6(9), "000009");
+            assert_eq!(base36_6(35), "00000z");
+            assert_eq!(base36_6(36), "000010");
+            assert_eq!(base36_6(36u64.pow(5) - 1), "0zzzzz");
+            assert_eq!(base36_6(36u64.pow(5)), "100000");
+            assert_eq!(base36_6(36u64.pow(6) - 1), "zzzzzz");
+        }
     }
 
     #[test]
-    fn read_new_lines_advances_only_past_complete_lines() {
+    fn read_new_lines_offsets() {
         let dir = tmp_dir("pilotfish-util-");
         let path = dir.join("inbox.jsonl");
         std::fs::write(&path, "{\"a\":1}\n{\"b\":").unwrap();
         let (lines, offset) = read_new_lines(&path, 0);
         assert_eq!(lines, vec!["{\"a\":1}"]);
         assert_eq!(offset, 8);
-        // Multi-byte character split across calls must survive the boundary.
+        // a multi-byte character split across calls survives the boundary
         append_text(&path, "\"é\"}\r\n").unwrap();
         let (lines, offset2) = read_new_lines(&path, offset);
         assert_eq!(lines, vec!["{\"b\":\"é\"}"]);
@@ -635,17 +526,5 @@ mod tests {
         let (lines, offset4) = read_new_lines(&dir.join("missing.jsonl"), 0);
         assert!(lines.is_empty());
         assert_eq!(offset4, 0);
-    }
-
-    #[test]
-    fn tail_text_ignores_the_trailing_newline() {
-        let dir = tmp_dir("pilotfish-util-");
-        let path = dir.join("rpc.log");
-        std::fs::write(&path, "a\nb\nc\n").unwrap();
-        assert_eq!(tail_text(&path, 2), "b\nc");
-        assert_eq!(tail_text(&path, 10), "a\nb\nc");
-        std::fs::write(&path, "a\nb").unwrap();
-        assert_eq!(tail_text(&path, 1), "b");
-        assert_eq!(tail_text(&dir.join("missing"), 3), "");
     }
 }

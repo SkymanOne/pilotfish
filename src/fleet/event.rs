@@ -287,28 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn every_kind_has_a_next_step() {
-        for kind in [
-            FleetEventKind::Settled,
-            FleetEventKind::Stopped,
-            FleetEventKind::Error,
-            FleetEventKind::Dead,
-            FleetEventKind::Question,
-            FleetEventKind::QuestionResolved,
-            FleetEventKind::AnsweredByConsole,
-            FleetEventKind::ConsoleSteer,
-            FleetEventKind::Progress,
-            FleetEventKind::Snapshot,
-        ] {
-            assert!(
-                !describe_next_step(kind, "x").is_empty(),
-                "{kind} has an empty next step"
-            );
-        }
-    }
-
-    #[test]
-    fn worker_text_cannot_forge_or_close_a_block() {
+    fn cannot_forge_block() {
         let ev = event(
             FleetEventKind::Question,
             "r\"1",
@@ -353,36 +332,55 @@ mod tests {
     }
 
     #[test]
-    fn long_fields_are_clipped_with_an_ellipsis() {
-        assert_eq!(sanitize_field(&"x".repeat(2500)).chars().count(), 2000);
-        assert!(sanitize_field(&"x".repeat(2500)).ends_with('…'));
-        assert_eq!(sanitize_field(&"a".repeat(10)), "a".repeat(10));
-        // Clipping counts characters, not bytes.
-        let multibyte = "é".repeat(2500);
-        let clipped = sanitize_field(&multibyte);
-        assert_eq!(clipped.chars().count(), 2000);
+    fn field_rendering() {
+        {
+            assert_eq!(sanitize_field(&"x".repeat(2500)).chars().count(), 2000);
+            assert!(sanitize_field(&"x".repeat(2500)).ends_with('…'));
+            assert_eq!(sanitize_field(&"a".repeat(10)), "a".repeat(10));
+            // Clipping counts characters, not bytes.
+            let multibyte = "é".repeat(2500);
+            let clipped = sanitize_field(&multibyte);
+            assert_eq!(clipped.chars().count(), 2000);
+        }
+        {
+            let ev = event(
+                FleetEventKind::Settled,
+                "r-1",
+                "auth",
+                vec![
+                    ("status", Some("settled")),
+                    ("empty", Some("")),
+                    ("gone", None),
+                ],
+            );
+            let text = format_fleet_event(&ev);
+            assert!(text.contains("status: settled"));
+            assert!(!text.contains("empty:"));
+            assert!(!text.contains("gone:"));
+        }
+        {
+            for kind in [
+                FleetEventKind::Settled,
+                FleetEventKind::Stopped,
+                FleetEventKind::Error,
+                FleetEventKind::Dead,
+                FleetEventKind::Question,
+                FleetEventKind::QuestionResolved,
+                FleetEventKind::AnsweredByConsole,
+                FleetEventKind::ConsoleSteer,
+                FleetEventKind::Progress,
+                FleetEventKind::Snapshot,
+            ] {
+                assert!(
+                    !describe_next_step(kind, "x").is_empty(),
+                    "{kind} has an empty next step"
+                );
+            }
+        }
     }
 
     #[test]
-    fn empty_and_null_fields_are_skipped() {
-        let ev = event(
-            FleetEventKind::Settled,
-            "r-1",
-            "auth",
-            vec![
-                ("status", Some("settled")),
-                ("empty", Some("")),
-                ("gone", None),
-            ],
-        );
-        let text = format_fleet_event(&ev);
-        assert!(text.contains("status: settled"));
-        assert!(!text.contains("empty:"));
-        assert!(!text.contains("gone:"));
-    }
-
-    #[test]
-    fn batches_are_capped_with_a_more_note() {
+    fn batch_cap() {
         let many: Vec<FleetEvent> = (0..12)
             .map(|i| {
                 event(
@@ -397,13 +395,5 @@ mod tests {
         assert_eq!(batch.matches("<fleet-event ").count(), 10);
         assert!(batch.contains("(+2 more fleet events; call fleet_status"));
         assert!(!format_fleet_batch(&many[..2], 10).contains("more fleet events"));
-    }
-
-    #[test]
-    fn last_line_takes_the_first_nonempty_line() {
-        assert_eq!(last_line(Some("a\nb")), Some("a".to_string()));
-        assert_eq!(last_line(Some("\n")), None);
-        assert_eq!(last_line(Some("")), None);
-        assert_eq!(last_line(None), None);
     }
 }

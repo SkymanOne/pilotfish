@@ -230,256 +230,251 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_shipped_template_renders_every_placeholder_and_names_every_tool_and_event() {
-        let text = render_orchestrator_prompt(&PromptVars {
-            fleet_dir: "/repo/.pilotfish".into(),
-            repo_root: "/repo".into(),
-            max_workers: None,
-            bin_name: None,
-        });
-        assert!(!text.contains("{{"), "no unrendered placeholders: {text}");
-        assert!(text.contains("`/repo/.pilotfish`"), "{text}");
-        assert!(text.contains("`/repo`"), "{text}");
-        assert!(
-            text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
-            "{text}"
-        );
-        assert!(text.contains(&format!("`{BIN_NAME}`")), "{text}");
-        for tool in [
-            "fleet_spawn",
-            "fleet_status",
-            "fleet_wait",
-            "fleet_output",
-            "fleet_logs",
-            "fleet_send",
-            "fleet_followup",
-            "fleet_answer",
-            "fleet_stop",
-            "fleet_report",
-            "fleet_diff",
-            "fleet_merge",
-            "fleet_cleanup",
-        ] {
-            assert!(text.contains(&format!("`{tool}`")), "mentions {tool}");
-        }
-        assert!(text.contains(r#"<fleet-event kind="settled""#), "{text}");
-        for kind in [
-            "settled",
-            "stopped",
-            "error",
-            "dead",
-            "question",
-            "answered_by_console",
-            "question_resolved",
-            "console_steer",
-            "progress",
-            "snapshot",
-        ] {
-            assert!(
-                text.contains(&format!("`{kind}`")),
-                "explains event kind {kind}"
-            );
-        }
-        assert!(
-            text.contains("Never merge a run that is not `settled`"),
-            "{text}"
-        );
-        assert!(text.contains("Never edit files yourself"), "{text}");
-        assert!(text.contains("AskUserQuestion"), "{text}");
-        assert!(text.contains("exit 5"), "{text}");
-        // the rewritten facts: pilotfish branch prefix and the new report layout
-        assert!(text.contains("`pilotfish/<name>-<7 chars>`"), "{text}");
-        assert!(text.contains("runs/<runId>/report.md"), "{text}");
-        assert!(!text.contains("pi-fleet"), "{text}");
-        assert!(!text.contains(".pi-fleet"), "{text}");
-    }
-
-    #[test]
-    fn overrides_honor_custom_values_and_leave_unknown_placeholders_alone() {
-        let text = render_prompt_template(
-            "{{BIN_NAME}} {{MAX_WORKERS}} {{FLEET_DIR}} {{REPO_ROOT}} {{UNKNOWN}}",
-            &PromptVars {
-                fleet_dir: "/f".into(),
-                repo_root: "/r".into(),
-                max_workers: Some(5),
-                bin_name: Some("fleetx".into()),
-            },
-        );
-        assert_eq!(text, "fleetx 5 /f /r {{UNKNOWN}}");
-    }
-
-    #[test]
-    fn malformed_and_unknown_keys_stay_verbatim() {
-        // {{Foo}} and {{UNCLOSED never match the scan; {{NOPE}} and {{A_B}} are
-        // well-shaped but unknown; the nested {{FLEET_DIR}} inside the unclosed
-        // block is well-shaped and known, so it renders — as the regex scan
-        // always did.
-        let out = render_prompt_template(
-            "a {{Foo}} b {{NOPE}} c {{A_B}} {{UNCLOSED d {{FLEET_DIR}} e",
-            &PromptVars {
-                fleet_dir: "/f".into(),
-                repo_root: "/r".into(),
+    fn render_prompt() {
+        {
+            let text = render_orchestrator_prompt(&PromptVars {
+                fleet_dir: "/repo/.pilotfish".into(),
+                repo_root: "/repo".into(),
                 max_workers: None,
                 bin_name: None,
-            },
-        );
-        assert_eq!(out, "a {{Foo}} b {{NOPE}} c {{A_B}} {{UNCLOSED d /f e");
+            });
+            assert!(!text.contains("{{"), "no unrendered placeholders: {text}");
+            assert!(text.contains("`/repo/.pilotfish`"), "{text}");
+            assert!(text.contains("`/repo`"), "{text}");
+            assert!(
+                text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
+                "{text}"
+            );
+            assert!(text.contains(&format!("`{BIN_NAME}`")), "{text}");
+            for tool in [
+                "fleet_spawn",
+                "fleet_status",
+                "fleet_wait",
+                "fleet_output",
+                "fleet_logs",
+                "fleet_send",
+                "fleet_followup",
+                "fleet_answer",
+                "fleet_stop",
+                "fleet_report",
+                "fleet_diff",
+                "fleet_merge",
+                "fleet_cleanup",
+            ] {
+                assert!(text.contains(&format!("`{tool}`")), "mentions {tool}");
+            }
+            assert!(text.contains(r#"<fleet-event kind="settled""#), "{text}");
+            for kind in [
+                "settled",
+                "stopped",
+                "error",
+                "dead",
+                "question",
+                "answered_by_console",
+                "question_resolved",
+                "console_steer",
+                "progress",
+                "snapshot",
+            ] {
+                assert!(
+                    text.contains(&format!("`{kind}`")),
+                    "explains event kind {kind}"
+                );
+            }
+            assert!(
+                text.contains("Never merge a run that is not `settled`"),
+                "{text}"
+            );
+            assert!(text.contains("Never edit files yourself"), "{text}");
+            assert!(text.contains("AskUserQuestion"), "{text}");
+            assert!(text.contains("exit 5"), "{text}");
+            // the rewritten facts: pilotfish branch prefix and the new report layout
+            assert!(text.contains("`pilotfish/<name>-<7 chars>`"), "{text}");
+            assert!(text.contains("runs/<runId>/report.md"), "{text}");
+            assert!(!text.contains("pi-fleet"), "{text}");
+            assert!(!text.contains(".pi-fleet"), "{text}");
+        }
+        {
+            let text = render_prompt_template(
+                "{{BIN_NAME}} {{MAX_WORKERS}} {{FLEET_DIR}} {{REPO_ROOT}} {{UNKNOWN}}",
+                &PromptVars {
+                    fleet_dir: "/f".into(),
+                    repo_root: "/r".into(),
+                    max_workers: Some(5),
+                    bin_name: Some("fleetx".into()),
+                },
+            );
+            assert_eq!(text, "fleetx 5 /f /r {{UNKNOWN}}");
+        }
+        {
+            // {{Foo}} and {{UNCLOSED never match the scan; {{NOPE}} and {{A_B}} are
+            // well-shaped but unknown; the nested {{FLEET_DIR}} inside the unclosed
+            // block is well-shaped and known, so it renders — as the regex scan
+            // always did.
+            let out = render_prompt_template(
+                "a {{Foo}} b {{NOPE}} c {{A_B}} {{UNCLOSED d {{FLEET_DIR}} e",
+                &PromptVars {
+                    fleet_dir: "/f".into(),
+                    repo_root: "/r".into(),
+                    max_workers: None,
+                    bin_name: None,
+                },
+            );
+            assert_eq!(out, "a {{Foo}} b {{NOPE}} c {{A_B}} {{UNCLOSED d /f e");
+        }
+        {
+            let root = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-cap-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            std::fs::create_dir_all(root.join(STATE_DIR_NAME)).unwrap();
+            std::fs::create_dir_all(root.join("user")).unwrap();
+            let fleet_dir = root.join(STATE_DIR_NAME);
+
+            // No user config anywhere: the shared default, identical to the
+            // enforcement constant.
+            let text = render_prompt_with_user_dir(&fleet_dir, &root, None).unwrap();
+            assert!(
+                text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
+                "{text}"
+            );
+
+            // A configured cap flows into the prompt instead of the default, so
+            // the agent is told exactly what spawn will refuse.
+            let user_dir = root.join("user");
+            std::fs::create_dir_all(&user_dir).unwrap();
+            std::fs::write(
+                user_dir.join("config.toml"),
+                "[limits]\nmax_workers_per_session = 5\n",
+            )
+            .unwrap();
+            let text = render_prompt_with_user_dir(&fleet_dir, &root, Some(&user_dir)).unwrap();
+            assert!(text.contains("At most 5 workers"), "{text}");
+            assert!(
+                !text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
+                "the configured cap replaces the default: {text}"
+            );
+            // The two constants are literally the same value, forever.
+            assert_eq!(
+                DEFAULT_MAX_WORKERS,
+                crate::paths::DEFAULT_MAX_WORKERS_PER_SESSION
+            );
+        }
     }
 
     #[test]
-    fn the_substituted_cap_tracks_the_enforced_limits_config() {
-        let root = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-cap-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        std::fs::create_dir_all(root.join(STATE_DIR_NAME)).unwrap();
-        std::fs::create_dir_all(root.join("user")).unwrap();
-        let fleet_dir = root.join(STATE_DIR_NAME);
+    fn prompt_resolution() {
+        {
+            let repo = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-res-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            let pilotfish = repo.join(STATE_DIR_NAME);
+            std::fs::create_dir_all(&pilotfish).unwrap();
+            // The legacy config home, and the new user-level `~/.pilotfish`.
+            let home = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-legacy-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            std::fs::create_dir_all(home.join(".config/parl")).unwrap();
+            let user_root = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-user-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            let user_dir = user_root.join(STATE_DIR_NAME);
+            std::fs::create_dir_all(&user_dir).unwrap();
 
-        // No user config anywhere: the shared default, identical to the
-        // enforcement constant.
-        let text = render_prompt_with_user_dir(&fleet_dir, &root, None).unwrap();
-        assert!(
-            text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
-            "{text}"
-        );
+            // nothing anywhere: embedded
+            assert_eq!(
+                resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+                None
+            );
+            // ~/.pilotfish next, the new user location
+            let user_override = user_dir.join("orchestrator.md");
+            std::fs::write(&user_override, "user").unwrap();
+            assert_eq!(
+                resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+                Some(user_override.clone())
+            );
+            // the legacy ~/.config/parl location is no longer consulted, even
+            // when the new one is empty
+            let legacy = home.join(".config/parl/orchestrator.md");
+            std::fs::write(&legacy, "legacy").unwrap();
+            assert_eq!(
+                resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+                Some(user_override)
+            );
+            // <repo>/.pilotfish beats the user config
+            let repo_override = pilotfish.join("orchestrator.md");
+            std::fs::write(&repo_override, "repo").unwrap();
+            assert_eq!(
+                resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+                Some(repo_override)
+            );
+            // $PILOTFISH_PROMPT beats everything
+            let env_file = repo.join("custom-prompt.md");
+            std::fs::write(&env_file, "env").unwrap();
+            assert_eq!(
+                resolve_prompt_source(env_file.to_str(), &repo, Some(&user_dir)).unwrap(),
+                Some(env_file)
+            );
+            // a dangling $PILOTFISH_PROMPT is an error, not a silent fallback
+            let err =
+                resolve_prompt_source(repo.join("missing.md").to_str(), &repo, Some(&user_dir))
+                    .expect_err("dangling override errors");
+            assert!(err.to_string().contains("not a file"), "{err}");
+        }
+        {
+            let home = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-warn-home-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            let user_root = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-warn-user-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            let user_dir = user_root.join(STATE_DIR_NAME);
+            std::fs::create_dir_all(home.join(".config/parl")).unwrap();
+            std::fs::create_dir_all(&user_dir).unwrap();
+            let legacy = home.join(".config/parl/orchestrator.md");
 
-        // A configured cap flows into the prompt instead of the default, so
-        // the agent is told exactly what spawn will refuse.
-        let user_dir = root.join("user");
-        std::fs::create_dir_all(&user_dir).unwrap();
-        std::fs::write(
-            user_dir.join("config.toml"),
-            "[limits]\nmax_workers_per_session = 5\n",
-        )
-        .unwrap();
-        let text = render_prompt_with_user_dir(&fleet_dir, &root, Some(&user_dir)).unwrap();
-        assert!(text.contains("At most 5 workers"), "{text}");
-        assert!(
-            !text.contains(&format!("At most {DEFAULT_MAX_WORKERS} workers")),
-            "the configured cap replaces the default: {text}"
-        );
-        // The two constants are literally the same value, forever.
-        assert_eq!(
-            DEFAULT_MAX_WORKERS,
-            crate::paths::DEFAULT_MAX_WORKERS_PER_SESSION
-        );
-    }
-
-    #[test]
-    fn write_prompt_lands_under_the_session_dir() {
-        let root = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let fleet_dir = root.join(STATE_DIR_NAME);
-        let key = crate::paths::SessionKey::default();
-        let path = write_prompt(&fleet_dir, &root, &key).unwrap();
-        assert_eq!(path, prompt_path(&fleet_dir, &key));
-        assert!(
-            path.starts_with(fleet_dir.join("orchestrators")),
-            "{}",
-            path.display()
-        );
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("# Fleet orchestrator"), "{text}");
-    }
-
-    #[test]
-    fn overrides_resolve_in_order_and_a_dangling_pilotfish_prompt_is_an_error() {
-        let repo = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-res-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        let pilotfish = repo.join(STATE_DIR_NAME);
-        std::fs::create_dir_all(&pilotfish).unwrap();
-        // The legacy config home, and the new user-level `~/.pilotfish`.
-        let home = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-legacy-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        std::fs::create_dir_all(home.join(".config/parl")).unwrap();
-        let user_root = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-user-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        let user_dir = user_root.join(STATE_DIR_NAME);
-        std::fs::create_dir_all(&user_dir).unwrap();
-
-        // nothing anywhere: embedded
-        assert_eq!(
-            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-            None
-        );
-        // ~/.pilotfish next, the new user location
-        let user_override = user_dir.join("orchestrator.md");
-        std::fs::write(&user_override, "user").unwrap();
-        assert_eq!(
-            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-            Some(user_override.clone())
-        );
-        // the legacy ~/.config/parl location is no longer consulted, even
-        // when the new one is empty
-        let legacy = home.join(".config/parl/orchestrator.md");
-        std::fs::write(&legacy, "legacy").unwrap();
-        assert_eq!(
-            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-            Some(user_override)
-        );
-        // <repo>/.pilotfish beats the user config
-        let repo_override = pilotfish.join("orchestrator.md");
-        std::fs::write(&repo_override, "repo").unwrap();
-        assert_eq!(
-            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-            Some(repo_override)
-        );
-        // $PILOTFISH_PROMPT beats everything
-        let env_file = repo.join("custom-prompt.md");
-        std::fs::write(&env_file, "env").unwrap();
-        assert_eq!(
-            resolve_prompt_source(env_file.to_str(), &repo, Some(&user_dir)).unwrap(),
-            Some(env_file)
-        );
-        // a dangling $PILOTFISH_PROMPT is an error, not a silent fallback
-        let err = resolve_prompt_source(repo.join("missing.md").to_str(), &repo, Some(&user_dir))
-            .expect_err("dangling override errors");
-        assert!(err.to_string().contains("not a file"), "{err}");
-    }
-
-    #[test]
-    fn the_legacy_config_prompt_warns_only_when_it_is_the_only_prompt() {
-        let home = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-warn-home-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        let user_root = std::env::temp_dir().join(format!(
-            "pilotfish-prompt-warn-user-{}-{}",
-            std::process::id(),
-            crate::util::new_id("t").replace('_', "")
-        ));
-        let user_dir = user_root.join(STATE_DIR_NAME);
-        std::fs::create_dir_all(home.join(".config/parl")).unwrap();
-        std::fs::create_dir_all(&user_dir).unwrap();
-        let legacy = home.join(".config/parl/orchestrator.md");
-
-        // no legacy file anywhere: nothing to warn about
-        assert_eq!(legacy_config_prompt(Some(&home), Some(&user_dir)), None);
-        assert_eq!(legacy_config_prompt(None, Some(&user_dir)), None);
-        // legacy exists, the new location does not: the moved file is named
-        std::fs::write(&legacy, "old").unwrap();
-        assert_eq!(
-            legacy_config_prompt(Some(&home), Some(&user_dir)),
-            Some(legacy.clone())
-        );
-        // both exist: the move happened, no warning
-        std::fs::write(user_dir.join("orchestrator.md"), "new").unwrap();
-        assert_eq!(legacy_config_prompt(Some(&home), Some(&user_dir)), None);
+            // no legacy file anywhere: nothing to warn about
+            assert_eq!(legacy_config_prompt(Some(&home), Some(&user_dir)), None);
+            assert_eq!(legacy_config_prompt(None, Some(&user_dir)), None);
+            // legacy exists, the new location does not: the moved file is named
+            std::fs::write(&legacy, "old").unwrap();
+            assert_eq!(
+                legacy_config_prompt(Some(&home), Some(&user_dir)),
+                Some(legacy.clone())
+            );
+            // both exist: the move happened, no warning
+            std::fs::write(user_dir.join("orchestrator.md"), "new").unwrap();
+            assert_eq!(legacy_config_prompt(Some(&home), Some(&user_dir)), None);
+        }
+        {
+            let root = std::env::temp_dir().join(format!(
+                "pilotfish-prompt-{}-{}",
+                std::process::id(),
+                crate::util::new_id("t").replace('_', "")
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let fleet_dir = root.join(STATE_DIR_NAME);
+            let key = crate::paths::SessionKey::default();
+            let path = write_prompt(&fleet_dir, &root, &key).unwrap();
+            assert_eq!(path, prompt_path(&fleet_dir, &key));
+            assert!(
+                path.starts_with(fleet_dir.join("orchestrators")),
+                "{}",
+                path.display()
+            );
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.starts_with("# Fleet orchestrator"), "{text}");
+        }
     }
 }

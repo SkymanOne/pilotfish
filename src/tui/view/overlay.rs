@@ -1029,74 +1029,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wrap_breaks_on_spaces_then_inside_a_word_that_cannot_fit() {
-        let lines = wrap("one two three four", 8);
-        assert_eq!(lines, vec!["one two", "three", "four"]);
-        assert_eq!(wrap("a\nb", 10), vec!["a", "b"], "explicit newlines hold");
+    fn field_wrapping() {
+        {
+            let lines = wrap("one two three four", 8);
+            assert_eq!(lines, vec!["one two", "three", "four"]);
+            assert_eq!(wrap("a\nb", 10), vec!["a", "b"], "explicit newlines hold");
 
-        // a word with no wrap point of its own is broken rather than left to
-        // run out of the panel — a url or a path is the usual culprit
-        let lines = wrap("supercalifragilistic", 4);
-        assert_eq!(lines, vec!["supe", "rcal", "ifra", "gili", "stic"]);
-        assert_eq!(lines.concat(), "supercalifragilistic", "nothing lost");
-        let lines = wrap("see https://example.com/a/very/long/path now", 12);
-        assert!(
-            lines.iter().all(|l| l.width() <= 12),
-            "every row fits: {lines:?}"
-        );
-        assert_eq!(
-            lines.join(" ").split_whitespace().collect::<Vec<_>>().len(),
-            lines.iter().filter(|l| !l.is_empty()).count(),
-            "the break points are the only new whitespace: {lines:?}"
-        );
-    }
-
-    #[test]
-    fn a_typed_field_wraps_under_its_prompt_and_keeps_the_caret() {
-        let pal = Palette::plain();
-        let rows = input_rows("answer > ", "one two three four five six", 20, &pal);
-        let text: Vec<String> = rows
-            .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert!(rows.len() > 1, "it wrapped: {text:?}");
-        assert!(text[0].starts_with("answer > "), "{text:?}");
-        assert!(
-            text[1..].iter().all(|r| r.starts_with("         ")),
-            "continuations hang under the prompt: {text:?}"
-        );
-        assert!(
-            text.iter().all(|r| r.width() <= 21),
-            "no row leaves the panel (the caret is the 21st): {text:?}"
-        );
-        assert!(
-            text.last().is_some_and(|r| r.ends_with('▍')),
-            "the caret rides the last row: {text:?}"
-        );
-    }
-
-    #[test]
-    fn a_long_field_keeps_its_tail_so_the_caret_stays_on_screen() {
-        let pal = Palette::plain();
-        let long = "word ".repeat(200);
-        let rows = input_rows("answer > ", &long, 20, &pal);
-        assert_eq!(rows.len(), INPUT_ROWS, "it stops growing");
-        let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(first.trim_start().starts_with('…'), "{first:?}");
-        let last: String = rows[INPUT_ROWS - 1]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect();
-        assert!(last.ends_with('▍'), "{last:?}");
-    }
-
-    #[test]
-    fn an_empty_field_is_still_one_row_with_a_caret() {
-        let pal = Palette::plain();
-        let rows = input_rows("/ ", "", 20, &pal);
-        assert_eq!(rows.len(), 1);
-        let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, "/ ▍");
+            // a word with no wrap point of its own is broken rather than left to
+            // run out of the panel — a url or a path is the usual culprit
+            let lines = wrap("supercalifragilistic", 4);
+            assert_eq!(lines, vec!["supe", "rcal", "ifra", "gili", "stic"]);
+            assert_eq!(lines.concat(), "supercalifragilistic", "nothing lost");
+            let lines = wrap("see https://example.com/a/very/long/path now", 12);
+            assert!(
+                lines.iter().all(|l| l.width() <= 12),
+                "every row fits: {lines:?}"
+            );
+            assert_eq!(
+                lines.join(" ").split_whitespace().collect::<Vec<_>>().len(),
+                lines.iter().filter(|l| !l.is_empty()).count(),
+                "the break points are the only new whitespace: {lines:?}"
+            );
+        }
+        {
+            let pal = Palette::plain();
+            let rows = input_rows("answer > ", "one two three four five six", 20, &pal);
+            let text: Vec<String> = rows
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect();
+            assert!(rows.len() > 1, "it wrapped: {text:?}");
+            assert!(text[0].starts_with("answer > "), "{text:?}");
+            assert!(
+                text[1..].iter().all(|r| r.starts_with("         ")),
+                "continuations hang under the prompt: {text:?}"
+            );
+            assert!(
+                text.iter().all(|r| r.width() <= 21),
+                "no row leaves the panel (the caret is the 21st): {text:?}"
+            );
+            assert!(
+                text.last().is_some_and(|r| r.ends_with('▍')),
+                "the caret rides the last row: {text:?}"
+            );
+        }
+        {
+            let pal = Palette::plain();
+            let long = "word ".repeat(200);
+            let rows = input_rows("answer > ", &long, 20, &pal);
+            assert_eq!(rows.len(), INPUT_ROWS, "it stops growing");
+            let first: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(first.trim_start().starts_with('…'), "{first:?}");
+            let last: String = rows[INPUT_ROWS - 1]
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(last.ends_with('▍'), "{last:?}");
+        }
+        {
+            let pal = Palette::plain();
+            let rows = input_rows("/ ", "", 20, &pal);
+            assert_eq!(rows.len(), 1);
+            let text: String = rows[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text, "/ ▍");
+        }
     }
 }

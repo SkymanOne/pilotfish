@@ -288,19 +288,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_parsing_and_the_tested_range() {
-        assert_eq!(
-            parse_claude_version("2.1.251 (Claude Code)"),
-            Some("2.1.251".to_string())
-        );
-        assert_eq!(parse_claude_version("no version here"), None);
-        assert_eq!(TESTED_CLAUDE_RANGE.0, (2, 1));
-        assert!(version_supported(Some("2.1.0")));
-        assert!(version_supported(Some("2.1.251")));
-        assert!(!version_supported(Some("2.0.9")));
-        assert!(!version_supported(Some("2.2.0")));
-        assert!(!version_supported(Some("3.0.0")));
-        assert!(!version_supported(None));
+    fn claude_version_check() {
+        {
+            assert_eq!(
+                parse_claude_version("2.1.251 (Claude Code)"),
+                Some("2.1.251".to_string())
+            );
+            assert_eq!(parse_claude_version("no version here"), None);
+            assert_eq!(TESTED_CLAUDE_RANGE.0, (2, 1));
+            assert!(version_supported(Some("2.1.0")));
+            assert!(version_supported(Some("2.1.251")));
+            assert!(!version_supported(Some("2.0.9")));
+            assert!(!version_supported(Some("2.2.0")));
+            assert!(!version_supported(Some("3.0.0")));
+            assert!(!version_supported(None));
+        }
+        {
+            let (_dir, spec) = version_spec("2.1.251");
+            let check = check_claude_version_with_spec(Some(&spec));
+            assert_eq!(check.version.as_deref(), Some("2.1.251"));
+            assert!(check.supported);
+            assert_eq!(check.warning, None);
+        }
+        {
+            let (_dir, spec) = version_spec("2.0.9");
+            let check = check_claude_version_with_spec(Some(&spec));
+            assert_eq!(check.version.as_deref(), Some("2.0.9"));
+            assert!(!check.supported);
+            let warning = check.warning.expect("a warning names the range");
+            assert!(warning.contains("outside the tested range"), "{warning}");
+        }
+        {
+            let check = check_claude_version_with_spec(Some("/nonexistent/claude-binary"));
+            assert_eq!(check.version, None);
+            assert!(!check.supported);
+            let warning = check
+                .warning
+                .expect("the warning explains what to look for");
+            assert!(warning.contains("could not run"), "{warning}");
+        }
     }
 
     /// A `claude --version` stand-in that prints a fixed version.
@@ -317,158 +343,124 @@ mod tests {
     }
 
     #[test]
-    fn the_version_check_reports_a_supported_version() {
-        let (_dir, spec) = version_spec("2.1.251");
-        let check = check_claude_version_with_spec(Some(&spec));
-        assert_eq!(check.version.as_deref(), Some("2.1.251"));
-        assert!(check.supported);
-        assert_eq!(check.warning, None);
-    }
+    fn orphan_reaper() {
+        {
+            // none and a dead pid: nothing to do, nothing to say
+            assert_eq!(
+                reap_orphan_orchestrator(None, "--session anything", None),
+                ReapResult {
+                    reaped: false,
+                    reason: None
+                }
+            );
+            assert_eq!(
+                reap_orphan_orchestrator(Some(999_999_999), "--session anything", None),
+                ReapResult {
+                    reaped: false,
+                    reason: None
+                }
+            );
 
-    #[test]
-    fn a_version_outside_the_range_warns_but_is_not_fatal() {
-        let (_dir, spec) = version_spec("2.0.9");
-        let check = check_claude_version_with_spec(Some(&spec));
-        assert_eq!(check.version.as_deref(), Some("2.0.9"));
-        assert!(!check.supported);
-        let warning = check.warning.expect("a warning names the range");
-        assert!(warning.contains("outside the tested range"), "{warning}");
-    }
-
-    #[test]
-    fn a_missing_binary_reports_a_warning_instead_of_failing() {
-        let check = check_claude_version_with_spec(Some("/nonexistent/claude-binary"));
-        assert_eq!(check.version, None);
-        assert!(!check.supported);
-        let warning = check
-            .warning
-            .expect("the warning explains what to look for");
-        assert!(warning.contains("could not run"), "{warning}");
-    }
-
-    #[test]
-    fn the_reaper_touches_only_a_live_process_that_looks_like_the_child() {
-        // none and a dead pid: nothing to do, nothing to say
-        assert_eq!(
-            reap_orphan_orchestrator(None, "--session anything", None),
-            ReapResult {
-                reaped: false,
-                reason: None
-            }
-        );
-        assert_eq!(
-            reap_orphan_orchestrator(Some(999_999_999), "--session anything", None),
-            ReapResult {
-                reaped: false,
-                reason: None
-            }
-        );
-
-        // our own process is alive but does not look like the child: this
-        // repo path contains "claude", so the match would be fatal — the
-        // matcher is the caller's contract, and it must be precise
-        let own_pid = i32::try_from(std::process::id()).unwrap_or(1);
-        let not_the_child = reap_orphan_orchestrator(Some(own_pid), "--session never-mine", None);
-        assert!(!not_the_child.reaped);
-        let reason = not_the_child
-            .reason
-            .expect("it explains why it left it alone");
-        assert!(reason.contains("is not a"), "{reason}");
-        assert!(command_line_of(own_pid).is_some());
-        assert_eq!(command_line_of(999_999_999), None);
-    }
-
-    #[test]
-    fn a_session_matcher_never_matches_another_sessions_process() {
-        // A's stale row recorded the pid with A's matcher; the OS recycled
-        // it onto session B's process. B's command line carries B's own
-        // `--session` marker, so A's matcher cannot match it — the reaper
-        // must leave B alone even though it is alive.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("sleep is available");
-        let pid = i32::try_from(child.id()).unwrap_or(1);
-        let session_a = SessionKey::new(Some("a".into()), uuid::Uuid::new_v4());
-        let matcher = orphan_matcher_for(&session_a);
-        assert!(matcher.starts_with("--session "), "{matcher}");
-        let started = process_started_at(pid).expect("the process start is readable");
-        let result = reap_orphan_orchestrator(Some(pid), &matcher, Some(started));
-        assert!(!result.reaped, "{result:?}");
-        let reason = result.reason.expect("it explains why it left it alone");
-        assert!(
-            reason.contains("is not a") && reason.contains("--session"),
-            "{reason}"
-        );
-        assert!(is_alive(Some(pid)), "session B's process was not touched");
-        let _ = child.wait();
-    }
-
-    /// A stale row whose pid now hosts a process that started *after* the
-    /// recording: even a matching command line must not be reaped. This is
-    /// the guard that makes the matcher's precision non-critical.
-    #[test]
-    fn a_stale_pid_recycled_onto_a_later_process_is_never_reaped() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("sleep is available");
-        let pid = i32::try_from(child.id()).unwrap_or(1);
-        // The stale row remembers a start time from before this process
-        // existed — the classic recycled-pid shape.
-        let now = crate::util::now_ms() / 1_000;
-        let recorded = now - 60;
-        let result = reap_orphan_orchestrator(Some(pid), "sleep", Some(recorded));
-        assert!(!result.reaped, "{result:?}");
-        let reason = result.reason.expect("it says why it left it alone");
-        assert!(reason.contains("recycled pid"), "{reason}");
-        assert!(is_alive(Some(pid)), "the recycled occupant survives");
-        let _ = child.wait();
-    }
-
-    #[test]
-    fn a_genuine_orphan_of_the_same_session_is_reaped() {
-        // The row's own snapshot: pid, session matcher and the start time
-        // recorded when the monitor booted. The process is untouched since,
-        // so the reaper recognises it as the very orphan it was left with.
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("sleep is available");
-        let pid = i32::try_from(child.id()).unwrap_or(1);
-        let started = process_started_at(pid).expect("the process start is readable");
-        let result = reap_orphan_orchestrator(Some(pid), "sleep", Some(started));
-        assert!(result.reaped, "{result:?}");
-        let reason = result.reason.expect("it says what it stopped");
-        assert!(
-            reason.contains("stopped an orphaned orchestrator"),
-            "{reason}"
-        );
-        let _ = child.wait();
-        assert!(!is_alive(Some(pid)), "the orphan was terminated");
-    }
-
-    #[test]
-    fn lstart_parses_into_epoch_seconds_on_both_dialects() {
-        use time::macros::{date, time as clock_time};
-        let expected = time::PrimitiveDateTime::new(date!(2026 - 08 - 30), clock_time!(12:00:00))
-            .assume_utc()
-            .unix_timestamp();
-        // procps Linux order: month before the day
-        assert_eq!(lstart_epoch("Sun Aug 30 12:00:00 2026"), Some(expected));
-        // macOS/BSD order: day before the month
-        assert_eq!(lstart_epoch("Sun 30 Aug 12:00:00 2026"), Some(expected));
-        // single-digit days are space-padded on both
-        let expected = time::PrimitiveDateTime::new(date!(2026 - 08 - 05), clock_time!(09:07:01))
-            .assume_utc()
-            .unix_timestamp();
-        assert_eq!(lstart_epoch("Wed Aug  5 09:07:01 2026"), Some(expected));
-        assert_eq!(lstart_epoch("Wed  5 Aug 09:07:01 2026"), Some(expected));
-        assert_eq!(lstart_epoch("not a time"), None);
-        assert_eq!(lstart_epoch(""), None);
-        // The real ps on this machine speaks one of the two dialects.
-        let own = i32::try_from(std::process::id()).unwrap_or(1);
-        let started = process_started_at(own).expect("our own lstart parses");
-        assert!(started > 1_700_000_000, "{started}");
+            // our own process is alive but does not look like the child: this
+            // repo path contains "claude", so the match would be fatal — the
+            // matcher is the caller's contract, and it must be precise
+            let own_pid = i32::try_from(std::process::id()).unwrap_or(1);
+            let not_the_child =
+                reap_orphan_orchestrator(Some(own_pid), "--session never-mine", None);
+            assert!(!not_the_child.reaped);
+            let reason = not_the_child
+                .reason
+                .expect("it explains why it left it alone");
+            assert!(reason.contains("is not a"), "{reason}");
+            assert!(command_line_of(own_pid).is_some());
+            assert_eq!(command_line_of(999_999_999), None);
+        }
+        {
+            // A's stale row recorded the pid with A's matcher; the OS recycled
+            // it onto session B's process. B's command line carries B's own
+            // `--session` marker, so A's matcher cannot match it — the reaper
+            // must leave B alone even though it is alive.
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("sleep is available");
+            let pid = i32::try_from(child.id()).unwrap_or(1);
+            let session_a = SessionKey::new(Some("a".into()), uuid::Uuid::new_v4());
+            let matcher = orphan_matcher_for(&session_a);
+            assert!(matcher.starts_with("--session "), "{matcher}");
+            let started = process_started_at(pid).expect("the process start is readable");
+            let result = reap_orphan_orchestrator(Some(pid), &matcher, Some(started));
+            assert!(!result.reaped, "{result:?}");
+            let reason = result.reason.expect("it explains why it left it alone");
+            assert!(
+                reason.contains("is not a") && reason.contains("--session"),
+                "{reason}"
+            );
+            assert!(is_alive(Some(pid)), "session B's process was not touched");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        {
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("sleep is available");
+            let pid = i32::try_from(child.id()).unwrap_or(1);
+            // The stale row remembers a start time from before this process
+            // existed — the classic recycled-pid shape.
+            let now = crate::util::now_ms() / 1_000;
+            let recorded = now - 60;
+            let result = reap_orphan_orchestrator(Some(pid), "sleep", Some(recorded));
+            assert!(!result.reaped, "{result:?}");
+            let reason = result.reason.expect("it says why it left it alone");
+            assert!(reason.contains("recycled pid"), "{reason}");
+            assert!(is_alive(Some(pid)), "the recycled occupant survives");
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        {
+            // The row's own snapshot: pid, session matcher and the start time
+            // recorded when the monitor booted. The process is untouched since,
+            // so the reaper recognises it as the very orphan it was left with.
+            let mut child = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("sleep is available");
+            let pid = i32::try_from(child.id()).unwrap_or(1);
+            let started = process_started_at(pid).expect("the process start is readable");
+            let result = reap_orphan_orchestrator(Some(pid), "sleep", Some(started));
+            assert!(result.reaped, "{result:?}");
+            let reason = result.reason.expect("it says what it stopped");
+            assert!(
+                reason.contains("stopped an orphaned orchestrator"),
+                "{reason}"
+            );
+            let _ = child.wait();
+            assert!(!is_alive(Some(pid)), "the orphan was terminated");
+        }
+        {
+            use time::macros::{date, time as clock_time};
+            let expected =
+                time::PrimitiveDateTime::new(date!(2026 - 08 - 30), clock_time!(12:00:00))
+                    .assume_utc()
+                    .unix_timestamp();
+            // procps Linux order: month before the day
+            assert_eq!(lstart_epoch("Sun Aug 30 12:00:00 2026"), Some(expected));
+            // macOS/BSD order: day before the month
+            assert_eq!(lstart_epoch("Sun 30 Aug 12:00:00 2026"), Some(expected));
+            // single-digit days are space-padded on both
+            let expected =
+                time::PrimitiveDateTime::new(date!(2026 - 08 - 05), clock_time!(09:07:01))
+                    .assume_utc()
+                    .unix_timestamp();
+            assert_eq!(lstart_epoch("Wed Aug  5 09:07:01 2026"), Some(expected));
+            assert_eq!(lstart_epoch("Wed  5 Aug 09:07:01 2026"), Some(expected));
+            assert_eq!(lstart_epoch("not a time"), None);
+            assert_eq!(lstart_epoch(""), None);
+            // The real ps on this machine speaks one of the two dialects.
+            let own = i32::try_from(std::process::id()).unwrap_or(1);
+            let started = process_started_at(own).expect("our own lstart parses");
+            assert!(started > 1_700_000_000, "{started}");
+        }
     }
 }

@@ -656,274 +656,248 @@ mod tests {
     }
 
     #[test]
-    fn headings_are_bold() {
-        let lines = plain("# The plan\n\ntext", 80);
-        assert_eq!(text_of(&lines[0]), "The plan");
-        assert!(
-            lines[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert_eq!(text_of(&lines[2]), "text");
-    }
-
-    #[test]
-    fn emphasis_inline_code_and_links_take_their_styles() {
-        let lines = plain("a **bold** and *an* and `code` and [link](https://x)", 200);
-        let line = &lines[0];
-        assert_eq!(span_named(line, "bold").style.add_modifier, Modifier::BOLD);
-        assert_eq!(span_named(line, "an").style.add_modifier, Modifier::ITALIC);
-        let pal = Palette::colored();
-        let line = &render("a `code` [link](u)", 200, &pal).unwrap()[0];
-        assert_eq!(span_named(line, "code").style.fg, Some(Color::Green));
-        assert_eq!(span_named(line, "link").style.fg, Some(Color::Cyan));
-        assert!(
-            span_named(line, "link")
-                .style
-                .add_modifier
-                .contains(Modifier::UNDERLINED)
-        );
-    }
-
-    #[test]
-    fn lists_get_markers_and_numbering() {
-        let lines = plain("- alpha\n- beta\n\n1. one\n2. two", 80);
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        assert_eq!(texts[0], "• alpha");
-        assert_eq!(texts[1], "• beta");
-        assert!(texts.contains(&"1. one".to_string()));
-        assert!(texts.contains(&"2. two".to_string()));
-    }
-
-    #[test]
-    fn nested_lists_indent() {
-        let lines = plain("- top\n  - inner", 80);
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        assert_eq!(texts[0], "• top");
-        assert_eq!(texts[1], "  • inner");
-    }
-
-    #[test]
-    fn code_blocks_stay_line_shaped_and_take_the_code_style() {
-        let pal = Palette::colored();
-        let lines = render(
-            "```rust\nfn main() {\n    oh so long a line that must be wrapped somewhere\n}\n```",
-            20,
-            &pal,
-        )
-        .unwrap();
-        assert_eq!(text_of(&lines[0]), "fn main() {");
-        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
-        // the long line was hard-wrapped, not lost
-        let joined: String = lines.iter().map(text_of).collect();
-        assert!(joined.contains("so long a line"));
-        assert!(joined.contains("somewhere"));
-        assert!(lines.iter().any(|l| text_of(l) == "}"));
-    }
-
-    #[test]
-    fn block_quotes_are_dimmed_with_a_bar() {
-        let lines = plain("> quoted thought", 80);
-        assert_eq!(text_of(&lines[0]), "│ quoted thought");
-        assert_eq!(lines[0].spans[0].style, Palette::plain().quote());
-    }
-
-    #[test]
-    fn rules_become_a_horizontal_bar() {
-        let lines = plain("---", 80);
-        assert_eq!(text_of(&lines[0]), "─".repeat(24));
-    }
-
-    #[test]
-    fn tables_lay_out_in_padded_columns_with_a_header_rule() {
-        let pal = Palette::colored();
-        let lines = render(
-            "| name | result |\n| --- | --- |\n| db | **ok** |\n| api | 12 |",
-            60,
-            &pal,
-        )
-        .unwrap();
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        assert_eq!(texts[0], "name │ result");
-        assert!(
-            lines[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-        assert!(texts[1].contains("─┼─"), "{texts:?}");
-        // cells pad to the widest line in their column
-        assert_eq!(texts[2], "db   │ ok    ");
-        assert_eq!(texts[3], "api  │ 12    ");
-        // the bold cell inside the table keeps its style
-        assert!(
-            span_named(&lines[2], "ok")
-                .style
-                .add_modifier
-                .contains(Modifier::BOLD)
-        );
-    }
-
-    #[test]
-    fn wide_cells_wrap_instead_of_truncating() {
-        let long = "x".repeat(120);
-        let lines = plain(&format!("| a |\n| --- |\n| {long} |"), 60);
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        let joined = texts.join("");
-        assert_eq!(joined.matches('x').count(), 120, "nothing is lost");
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 60, "{}", text_of(line));
+    fn block_styles() {
+        {
+            let lines = plain("# The plan\n\ntext", 80);
+            assert_eq!(text_of(&lines[0]), "The plan");
+            assert!(
+                lines[0].spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            assert_eq!(text_of(&lines[2]), "text");
+        }
+        {
+            let lines = plain("a **bold** and *an* and `code` and [link](https://x)", 200);
+            let line = &lines[0];
+            assert_eq!(span_named(line, "bold").style.add_modifier, Modifier::BOLD);
+            assert_eq!(span_named(line, "an").style.add_modifier, Modifier::ITALIC);
+            let pal = Palette::colored();
+            let line = &render("a `code` [link](u)", 200, &pal).unwrap()[0];
+            assert_eq!(span_named(line, "code").style.fg, Some(Color::Green));
+            assert_eq!(span_named(line, "link").style.fg, Some(Color::Cyan));
+            assert!(
+                span_named(line, "link")
+                    .style
+                    .add_modifier
+                    .contains(Modifier::UNDERLINED)
+            );
+        }
+        {
+            let lines = plain("- alpha\n- beta\n\n1. one\n2. two", 80);
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            assert_eq!(texts[0], "• alpha");
+            assert_eq!(texts[1], "• beta");
+            assert!(texts.contains(&"1. one".to_string()));
+            assert!(texts.contains(&"2. two".to_string()));
+        }
+        {
+            let lines = plain("- top\n  - inner", 80);
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            assert_eq!(texts[0], "• top");
+            assert_eq!(texts[1], "  • inner");
+        }
+        {
+            let pal = Palette::colored();
+            let lines = render(
+                "```rust\nfn main() {\n    oh so long a line that must be wrapped somewhere\n}\n```",
+                20,
+                &pal,
+            )
+            .unwrap();
+            assert_eq!(text_of(&lines[0]), "fn main() {");
+            assert_eq!(lines[0].spans[0].style.fg, Some(Color::Green));
+            // the long line was hard-wrapped, not lost
+            let joined: String = lines.iter().map(text_of).collect();
+            assert!(joined.contains("so long a line"));
+            assert!(joined.contains("somewhere"));
+            assert!(lines.iter().any(|l| text_of(l) == "}"));
+        }
+        {
+            let lines = plain("> quoted thought", 80);
+            assert_eq!(text_of(&lines[0]), "│ quoted thought");
+            assert_eq!(lines[0].spans[0].style, Palette::plain().quote());
+        }
+        {
+            let lines = plain("---", 80);
+            assert_eq!(text_of(&lines[0]), "─".repeat(24));
+        }
+        {
+            let lines = plain("- [x] done\n- [ ] open\n\n~~gone~~", 80);
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            assert!(texts[0].contains("[x] done"), "{texts:?}");
+            assert!(texts[1].contains("[ ] open"), "{texts:?}");
+            assert!(
+                span_named(&lines[3], "gone")
+                    .style
+                    .add_modifier
+                    .contains(Modifier::CROSSED_OUT)
+            );
         }
     }
 
     #[test]
-    fn paragraphs_wrap_to_the_width_on_word_boundaries() {
-        let lines = plain("one two three four five six seven", 12);
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 12, "{}", text_of(line));
+    fn tables() {
+        {
+            let pal = Palette::colored();
+            let lines = render(
+                "| name | result |\n| --- | --- |\n| db | **ok** |\n| api | 12 |",
+                60,
+                &pal,
+            )
+            .unwrap();
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            assert_eq!(texts[0], "name │ result");
+            assert!(
+                lines[0].spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
+            assert!(texts[1].contains("─┼─"), "{texts:?}");
+            // cells pad to the widest line in their column
+            assert_eq!(texts[2], "db   │ ok    ");
+            assert_eq!(texts[3], "api  │ 12    ");
+            // the bold cell inside the table keeps its style
+            assert!(
+                span_named(&lines[2], "ok")
+                    .style
+                    .add_modifier
+                    .contains(Modifier::BOLD)
+            );
         }
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        assert_eq!(texts[0], "one two");
-        assert_eq!(texts[1], "three four");
-    }
-
-    #[test]
-    fn cjk_and_emoji_width_is_measured_in_columns() {
-        let lines = plain("你好世界 世上 again", 8);
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 8, "{}", text_of(line));
+        {
+            let long = "x".repeat(120);
+            let lines = plain(&format!("| a |\n| --- |\n| {long} |"), 60);
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            let joined = texts.join("");
+            assert_eq!(joined.matches('x').count(), 120, "nothing is lost");
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 60, "{}", text_of(line));
+            }
         }
-        let lines = plain("🦀 ferris 🦀 crab", 8);
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 8, "{}", text_of(line));
+        {
+            // Ten columns cannot fit a 30-column pane at a readable width: the
+            // rows render as plain wrapped lines, never 4-character fragments.
+            let lines = plain(
+                "| a | b | c | d | e | f | g | h | i | j |\n\
+                 |---|---|---|---|---|---|---|---|---|---|\n\
+                 | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant |",
+                30,
+            );
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            let joined = texts.join("\n");
+            assert!(joined.contains("elephant"), "{joined}");
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 30, "{}", text_of(line));
+            }
         }
-    }
-
-    #[test]
-    fn a_cjk_word_breaks_rather_than_overflows() {
-        // one word, 16 columns wide, wrapped at 10
-        let lines = plain("你好世界你好世界", 10);
-        assert!(lines.len() >= 2);
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 10, "{}", text_of(line));
+        {
+            // A `|` inside inline code on the header line inflates pulldown's
+            // column count for the whole table; cells must still render whole
+            // words, not 4-character tails.
+            let lines = plain(
+                "| `pat|tern` | watch |\n|---|---|---|\n| matching | pattern |",
+                24,
+            );
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            let joined = texts.join("\n");
+            assert!(joined.contains("pattern"), "{joined}");
+            assert!(joined.contains("matching"), "{joined}");
+            assert!(joined.contains("watch"), "{joined}");
         }
-        let joined: String = lines.iter().map(|l| text_of(l)).collect();
-        assert_eq!(joined.chars().filter(|c| *c != '\n').count(), 8);
-    }
-
-    #[test]
-    fn groups_are_separated_by_a_blank_line_and_headings_earn_one_after() {
-        let lines = plain("# Head\n\npara one\n\n- a\n- b\n\npara two", 80);
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        // after the heading, before the list, and after the list
-        assert_eq!(texts[1], "");
-        let list_at = texts.iter().position(|t| t == "• a").unwrap();
-        assert_eq!(texts[list_at - 1], "");
-        let after = texts.iter().position(|t| t == "para two").unwrap();
-        assert_eq!(texts[after - 1], "");
-    }
-
-    #[test]
-    fn consecutive_list_items_do_not_get_blank_lines() {
-        let lines = plain("- a\n- b\n- c", 80);
-        assert_eq!(lines.len(), 3);
-    }
-
-    #[test]
-    fn hard_breaks_split_without_group_spacing() {
-        let lines = plain("first  \nsecond", 80);
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert_eq!(text_of(&lines[0]), "first");
-        assert_eq!(text_of(&lines[1]), "second");
-    }
-
-    #[test]
-    fn strikethrough_and_task_lists_render() {
-        let lines = plain("- [x] done\n- [ ] open\n\n~~gone~~", 80);
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        assert!(texts[0].contains("[x] done"), "{texts:?}");
-        assert!(texts[1].contains("[ ] open"), "{texts:?}");
-        assert!(
-            span_named(&lines[3], "gone")
-                .style
-                .add_modifier
-                .contains(Modifier::CROSSED_OUT)
-        );
-    }
-
-    #[test]
-    fn a_table_wider_than_the_pane_falls_back_to_plain_rows() {
-        // Ten columns cannot fit a 30-column pane at a readable width: the
-        // rows render as plain wrapped lines, never 4-character fragments.
-        let lines = plain(
-            "| a | b | c | d | e | f | g | h | i | j |\n\
-             |---|---|---|---|---|---|---|---|---|---|\n\
-             | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant | elephant |",
-            30,
-        );
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        let joined = texts.join("\n");
-        assert!(joined.contains("elephant"), "{joined}");
-        for line in &lines {
-            assert!(width_of(&text_of(line)) <= 30, "{}", text_of(line));
+        {
+            // A body row split by a stray `|` (inside a regex, say) yields more
+            // cells than the header; the overflow folds into the last column and
+            // the other rows keep their shape.
+            fn cell(text: &str) -> Vec<Span<'static>> {
+                vec![Span::raw(text.to_string())]
+            }
+            let rows = vec![
+                vec![cell("name"), cell("value")],
+                vec![cell("alpha"), cell("beta")],
+                // `grep -E 'a|b'` inside a cell splits into: grep -E 'a | b' | done
+                vec![cell("grep -E 'a"), cell("b'"), cell("done")],
+                vec![cell("matching"), cell("pattern")],
+            ];
+            let lines = render_table(&rows, true, 30, &Palette::plain());
+            let joined: String = lines.iter().map(text_of).collect();
+            assert!(joined.contains("alpha"), "{joined}");
+            assert!(joined.contains("matching"), "{joined}");
+            assert!(joined.contains("pattern"), "{joined}");
+            assert!(joined.contains("done"), "{joined}");
         }
     }
 
     #[test]
-    fn a_pipe_inside_inline_code_does_not_shred_the_table() {
-        // A `|` inside inline code on the header line inflates pulldown's
-        // column count for the whole table; cells must still render whole
-        // words, not 4-character tails.
-        let lines = plain(
-            "| `pat|tern` | watch |\n|---|---|---|\n| matching | pattern |",
-            24,
-        );
-        let texts: Vec<String> = lines.iter().map(text_of).collect();
-        let joined = texts.join("\n");
-        assert!(joined.contains("pattern"), "{joined}");
-        assert!(joined.contains("matching"), "{joined}");
-        assert!(joined.contains("watch"), "{joined}");
-    }
-
-    #[test]
-    fn an_over_split_row_merges_instead_of_inflating_the_table() {
-        // A body row split by a stray `|` (inside a regex, say) yields more
-        // cells than the header; the overflow folds into the last column and
-        // the other rows keep their shape.
-        fn cell(text: &str) -> Vec<Span<'static>> {
-            vec![Span::raw(text.to_string())]
+    fn wrapping() {
+        {
+            let lines = plain("one two three four five six seven", 12);
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 12, "{}", text_of(line));
+            }
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            assert_eq!(texts[0], "one two");
+            assert_eq!(texts[1], "three four");
         }
-        let rows = vec![
-            vec![cell("name"), cell("value")],
-            vec![cell("alpha"), cell("beta")],
-            // `grep -E 'a|b'` inside a cell splits into: grep -E 'a | b' | done
-            vec![cell("grep -E 'a"), cell("b'"), cell("done")],
-            vec![cell("matching"), cell("pattern")],
-        ];
-        let lines = render_table(&rows, true, 30, &Palette::plain());
-        let joined: String = lines.iter().map(text_of).collect();
-        assert!(joined.contains("alpha"), "{joined}");
-        assert!(joined.contains("matching"), "{joined}");
-        assert!(joined.contains("pattern"), "{joined}");
-        assert!(joined.contains("done"), "{joined}");
+        {
+            let lines = plain("你好世界 世上 again", 8);
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 8, "{}", text_of(line));
+            }
+            let lines = plain("🦀 ferris 🦀 crab", 8);
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 8, "{}", text_of(line));
+            }
+        }
+        {
+            // one word, 16 columns wide, wrapped at 10
+            let lines = plain("你好世界你好世界", 10);
+            assert!(lines.len() >= 2);
+            for line in &lines {
+                assert!(width_of(&text_of(line)) <= 10, "{}", text_of(line));
+            }
+            let joined: String = lines.iter().map(|l| text_of(l)).collect();
+            assert_eq!(joined.chars().filter(|c| *c != '\n').count(), 8);
+        }
+        {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(wrap_spans(&[Span::raw("word")], 0));
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(2)),
+                Ok(Vec::new())
+            );
+        }
+        {
+            assert!(plain("", 80).is_empty());
+            assert_eq!(text_of(&plain("just words", 80)[0]), "just words");
+        }
     }
 
     #[test]
-    fn wrap_spans_does_not_hang_on_a_zero_width() {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(wrap_spans(&[Span::raw("word")], 0));
-        });
-        assert_eq!(
-            rx.recv_timeout(std::time::Duration::from_secs(2)),
-            Ok(Vec::new())
-        );
-    }
-
-    #[test]
-    fn empty_and_plain_input_render_something_sane() {
-        assert!(plain("", 80).is_empty());
-        assert_eq!(text_of(&plain("just words", 80)[0]), "just words");
+    fn spacing() {
+        {
+            let lines = plain("# Head\n\npara one\n\n- a\n- b\n\npara two", 80);
+            let texts: Vec<String> = lines.iter().map(text_of).collect();
+            // after the heading, before the list, and after the list
+            assert_eq!(texts[1], "");
+            let list_at = texts.iter().position(|t| t == "• a").unwrap();
+            assert_eq!(texts[list_at - 1], "");
+            let after = texts.iter().position(|t| t == "para two").unwrap();
+            assert_eq!(texts[after - 1], "");
+        }
+        {
+            let lines = plain("- a\n- b\n- c", 80);
+            assert_eq!(lines.len(), 3);
+        }
+        {
+            let lines = plain("first  \nsecond", 80);
+            assert_eq!(lines.len(), 2, "{lines:?}");
+            assert_eq!(text_of(&lines[0]), "first");
+            assert_eq!(text_of(&lines[1]), "second");
+        }
     }
 }

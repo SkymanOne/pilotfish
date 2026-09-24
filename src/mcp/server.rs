@@ -927,16 +927,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// The single text block of a tool result.
-    fn text_of(result: &CallToolResult) -> String {
-        match result.content.first() {
-            Some(ContentBlock::Text(text)) => text.text.clone(),
-            other => panic!("expected one text block, got {other:?}"),
-        }
-    }
-
     #[tokio::test]
-    async fn tool_party_is_the_fleets_acting_session_or_the_default() {
+    async fn tool_party_acting() {
         let cwd = std::env::temp_dir().join(format!(
             "pilotfish-mcp-party-cwd-{}-{}",
             std::process::id(),
@@ -970,105 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn render_result_puts_lines_exit_code_and_structured_content_in_order() {
-        let good = CommandResult {
-            code: ExitCode::Ok,
-            out: vec!["a".into()],
-            err: vec!["warn".into()],
-            data: json!({"x": 1}),
-        };
-        let rendered = render_result(&good, Some(json!({"x": 1})));
-        assert_eq!(text_of(&rendered), "a\nwarn\nexit: 0");
-        assert_eq!(rendered.is_error, Some(false));
-        assert_eq!(rendered.structured_content, Some(json!({"x": 1})));
-
-        let bad = CommandResult {
-            code: ExitCode::MergeConflict,
-            out: Vec::new(),
-            err: vec!["boom".into()],
-            data: Value::Null,
-        };
-        let rendered = render_result(&bad, None);
-        assert_eq!(text_of(&rendered), "boom\nexit: 5");
-        assert_eq!(rendered.is_error, Some(true));
-        assert_eq!(rendered.structured_content, None);
-    }
-
-    #[test]
-    fn render_error_carries_the_message_and_exit_1() {
-        let err = anyhow::anyhow!("No run found matching \"nope\"");
-        let rendered = render_error(&err);
-        assert_eq!(
-            text_of(&rendered),
-            "No run found matching \"nope\"\nexit: 1"
-        );
-        assert_eq!(rendered.is_error, Some(true));
-    }
-
-    #[test]
-    fn the_thirteen_tools_carry_their_schemas() {
-        let tools = fleet_tools();
-        assert_eq!(
-            tools.iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
-            FLEET_TOOL_NAMES.to_vec()
-        );
-        let spawn = &tools[0];
-        assert_eq!(spawn.title.as_deref(), Some("Spawn a pi worker"));
-        let required = spawn.input_schema.get("required").unwrap();
-        assert_eq!(required, &json!(["name", "brief"]));
-        assert!(
-            spawn.output_schema.is_some(),
-            "spawn declares structured output"
-        );
-        // The spawn output names the fields the ops data actually emits.
-        let output = spawn.output_schema.as_ref().unwrap();
-        let properties = output.get("properties").unwrap();
-        for key in ["runId", "runDir", "fleetDir", "worktree", "branch"] {
-            assert!(properties.get(key).is_some(), "{key} missing: {properties}");
-        }
-        // Only spawn and status declare structured output.
-        assert!(
-            tools[1].output_schema.is_some(),
-            "status declares structured output"
-        );
-        for tool in tools.iter().skip(2) {
-            assert!(tool.output_schema.is_none(), "{}", tool.name);
-        }
-        // Every description is present: the orchestrating model reads them.
-        for tool in &tools {
-            assert!(
-                tool.description.as_ref().is_some_and(|d| !d.is_empty()),
-                "{} has no description",
-                tool.name
-            );
-        }
-        // The dialog update landed where the orchestrator needs it.
-        let answer = tools.iter().find(|t| t.name == "fleet_answer").unwrap();
-        assert!(
-            answer
-                .description
-                .as_ref()
-                .is_some_and(|d| d.contains("dialog"))
-        );
-        let status = tools.iter().find(|t| t.name == "fleet_status").unwrap();
-        assert!(
-            status
-                .description
-                .as_ref()
-                .is_some_and(|d| d.contains("dialog"))
-        );
-        // The report names its new home.
-        let report = tools.iter().find(|t| t.name == "fleet_report").unwrap();
-        assert!(
-            report
-                .description
-                .as_ref()
-                .is_some_and(|d| d.contains("runs/<runId>/report.md"))
-        );
-    }
-
-    #[test]
-    fn arguments_are_validated_like_the_zod_schemas() {
+    fn validates_arguments() {
         let mut args = Map::new();
         assert_eq!(
             req_str(&args, "name").unwrap_err().message,

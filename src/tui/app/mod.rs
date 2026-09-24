@@ -2274,7 +2274,7 @@ mod thinking_levels_tests {
     use super::*;
 
     #[test]
-    fn a_worker_offers_only_the_levels_its_model_has() {
+    fn worker_model_levels() {
         let mut state = RunState::default();
         assert_eq!(
             worker_thinking_levels(&state),

@@ -287,94 +287,84 @@ mod tests {
     }
 
     #[test]
-    fn the_cursor_lands_after_newlines() {
-        assert_eq!(caret("hello", 3, 40), (0, 3));
-        assert_eq!(caret("hello", 5, 40), (0, 5));
-        assert_eq!(
-            caret("a\nb\nc", 2, 40),
-            (1, 0),
-            "the char after the newline"
-        );
-        assert_eq!(caret("a\nb\nc", 4, 40), (2, 0), "'c' opens row 2");
-        assert_eq!(caret("a\nb\nc", 5, 40), (2, 1));
-        assert_eq!(caret("a\nb", 3, 40), (1, 1), "one past the end");
-        assert_eq!(caret("", 0, 40), (0, 0));
-    }
-
-    #[test]
-    fn a_long_sentence_wraps_inside_the_box() {
-        let text = "the quick brown fox jumps over the lazy dog";
-        let laid = layout(text, 0, 12);
-        assert!(laid.rows.len() > 1, "it wrapped: {:?}", laid.rows);
-        assert!(
-            laid.rows
-                .iter()
-                .all(|r| UnicodeWidthStr::width(r.as_str()) <= 12),
-            "no row leaves the box: {:?}",
-            laid.rows
-        );
-        assert_eq!(
-            laid.rows.concat(),
-            text,
-            "wrapping is visual only — every character is still there, in order"
-        );
-    }
-
-    #[test]
-    fn a_word_too_long_for_the_box_is_broken_rather_than_lost() {
-        let laid = layout("supercalifragilistic", 0, 6);
-        assert_eq!(
-            laid.rows,
-            vec!["superc", "alifra", "gilist", "ic"],
-            "it always advances"
-        );
-        assert_eq!(laid.rows.concat(), "supercalifragilistic");
-    }
-
-    #[test]
-    fn the_caret_follows_the_text_onto_its_wrapped_row() {
-        let text = "aaa bbb ccc";
-        // "aaa " then "bbb " then "ccc" at width 4
-        assert_eq!(layout(text, 0, 4).rows, vec!["aaa ", "bbb ", "ccc"]);
-        assert_eq!(caret(text, 0, 4), (0, 0));
-        assert_eq!(caret(text, 3, 4), (0, 3), "before the break");
-        assert_eq!(caret(text, 4, 4), (1, 0), "the boundary opens the next row");
-        assert_eq!(caret(text, 9, 4), (2, 1));
-        assert_eq!(caret(text, 11, 4), (2, 3), "the end of the text");
-    }
-
-    #[test]
-    fn a_full_last_row_puts_the_caret_on_a_fresh_one() {
-        // typing exactly to the edge would otherwise draw the caret one
-        // column outside the border
-        let laid = layout("abcd", 4, 4);
-        assert_eq!(laid.rows, vec!["abcd", ""]);
-        assert_eq!((laid.row, laid.col), (1, 0));
-        // but only when the caret is actually at the end
-        let laid = layout("abcd", 2, 4);
-        assert_eq!(laid.rows, vec!["abcd"]);
-        assert_eq!((laid.row, laid.col), (0, 2));
-    }
-
-    #[test]
-    fn empty_lines_and_a_zero_width_box_still_have_a_row() {
-        assert_eq!(layout("", 0, 20).rows, vec![""]);
-        assert_eq!(layout("a\n\nb", 0, 20).rows, vec!["a", "", "b"]);
-        assert_eq!(layout("hi", 0, 0).rows.concat(), "hi", "never loses text");
-    }
-
-    #[test]
-    fn composer_height_grows_to_the_cap() {
-        let rows =
-            |input: &str, width: usize| layout(input, 0, width).rows.len().clamp(1, MAX_LINES);
-        assert_eq!(rows("one", 40), 1);
-        assert_eq!(rows("one\ntwo\nthree", 40), 3);
-        let tall = "x\n".repeat(10);
-        assert_eq!(rows(tall.trim_end(), 40), MAX_LINES, "capped");
-        // and a single long sentence earns the same room a newline would
-        assert_eq!(
-            rows("the quick brown fox jumps over the lazy dog", 10),
-            MAX_LINES
-        );
+    fn composer_layout() {
+        {
+            assert_eq!(caret("hello", 3, 40), (0, 3));
+            assert_eq!(caret("hello", 5, 40), (0, 5));
+            assert_eq!(
+                caret("a\nb\nc", 2, 40),
+                (1, 0),
+                "the char after the newline"
+            );
+            assert_eq!(caret("a\nb\nc", 4, 40), (2, 0), "'c' opens row 2");
+            assert_eq!(caret("a\nb\nc", 5, 40), (2, 1));
+            assert_eq!(caret("a\nb", 3, 40), (1, 1), "one past the end");
+            assert_eq!(caret("", 0, 40), (0, 0));
+        }
+        {
+            let text = "the quick brown fox jumps over the lazy dog";
+            let laid = layout(text, 0, 12);
+            assert!(laid.rows.len() > 1, "it wrapped: {:?}", laid.rows);
+            assert!(
+                laid.rows
+                    .iter()
+                    .all(|r| UnicodeWidthStr::width(r.as_str()) <= 12),
+                "no row leaves the box: {:?}",
+                laid.rows
+            );
+            assert_eq!(
+                laid.rows.concat(),
+                text,
+                "wrapping is visual only — every character is still there, in order"
+            );
+        }
+        {
+            let laid = layout("supercalifragilistic", 0, 6);
+            assert_eq!(
+                laid.rows,
+                vec!["superc", "alifra", "gilist", "ic"],
+                "it always advances"
+            );
+            assert_eq!(laid.rows.concat(), "supercalifragilistic");
+        }
+        {
+            let text = "aaa bbb ccc";
+            // "aaa " then "bbb " then "ccc" at width 4
+            assert_eq!(layout(text, 0, 4).rows, vec!["aaa ", "bbb ", "ccc"]);
+            assert_eq!(caret(text, 0, 4), (0, 0));
+            assert_eq!(caret(text, 3, 4), (0, 3), "before the break");
+            assert_eq!(caret(text, 4, 4), (1, 0), "the boundary opens the next row");
+            assert_eq!(caret(text, 9, 4), (2, 1));
+            assert_eq!(caret(text, 11, 4), (2, 3), "the end of the text");
+        }
+        {
+            // typing exactly to the edge would otherwise draw the caret one
+            // column outside the border
+            let laid = layout("abcd", 4, 4);
+            assert_eq!(laid.rows, vec!["abcd", ""]);
+            assert_eq!((laid.row, laid.col), (1, 0));
+            // but only when the caret is actually at the end
+            let laid = layout("abcd", 2, 4);
+            assert_eq!(laid.rows, vec!["abcd"]);
+            assert_eq!((laid.row, laid.col), (0, 2));
+        }
+        {
+            assert_eq!(layout("", 0, 20).rows, vec![""]);
+            assert_eq!(layout("a\n\nb", 0, 20).rows, vec!["a", "", "b"]);
+            assert_eq!(layout("hi", 0, 0).rows.concat(), "hi", "never loses text");
+        }
+        {
+            let rows =
+                |input: &str, width: usize| layout(input, 0, width).rows.len().clamp(1, MAX_LINES);
+            assert_eq!(rows("one", 40), 1);
+            assert_eq!(rows("one\ntwo\nthree", 40), 3);
+            let tall = "x\n".repeat(10);
+            assert_eq!(rows(tall.trim_end(), 40), MAX_LINES, "capped");
+            // and a single long sentence earns the same room a newline would
+            assert_eq!(
+                rows("the quick brown fox jumps over the lazy dog", 10),
+                MAX_LINES
+            );
+        }
     }
 }

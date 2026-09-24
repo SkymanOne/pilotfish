@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remove_session_leaves_other_sessions() {
+    async fn remove_session_scoped() {
         let root = init_repo("pilotfish-session-rm-");
         let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
         std::fs::create_dir_all(&fleet_dir).unwrap();

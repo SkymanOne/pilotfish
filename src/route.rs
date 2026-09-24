@@ -841,320 +841,327 @@ mod tests {
     }
 
     #[test]
-    fn every_candidate_is_named_by_provider_and_priced_against_the_cheapest() {
-        let models = catalogue();
-        let mut running = RunState {
-            name: "docs".into(),
-            task_brief: "rewrite the readme\nsecond line".into(),
-            ..RunState::default()
-        };
-        running.branch = Some("pilotfish/docs-1234567".into());
-        let in_flight = vec![running];
-        let b = brief(&models, &in_flight);
-        let list = candidates(&b, &RoutingConfig::default()).unwrap();
-        let body = model_body(&b, &list, &RoutingConfig::default());
+    fn candidate_selection() {
+        {
+            let models = catalogue();
+            let mut running = RunState {
+                name: "docs".into(),
+                task_brief: "rewrite the readme\nsecond line".into(),
+                ..RunState::default()
+            };
+            running.branch = Some("pilotfish/docs-1234567".into());
+            let in_flight = vec![running];
+            let b = brief(&models, &in_flight);
+            let list = candidates(&b, &RoutingConfig::default()).unwrap();
+            let body = model_body(&b, &list, &RoutingConfig::default());
 
-        let criteria = body["questions"]["model"]["criteria"].as_object().unwrap();
-        assert_eq!(
-            criteria.len(),
-            5,
-            "the same id from two providers stays two options: {criteria:?}"
-        );
-        let opus = criteria["anthropic:claude-opus-5"].as_str().unwrap();
-        assert!(opus.contains("Opus 5"), "{opus}");
-        assert!(opus.contains("1000k context"), "{opus}");
-        assert!(opus.contains("$5.00 in / $25.00 out"), "{opus}");
-        // blended 3:1 — (3·5 + 25)/4 = 10 against (3·0.5 + 2)/4 = 0.875
-        assert!(
-            opus.contains("11.4× the cheapest option"),
-            "value is weighed against the cheapest: {opus}"
-        );
-        assert!(
-            criteria["openrouter:deepseek-v4-flash"]
-                .as_str()
-                .unwrap()
-                .contains("(the cheapest option)")
-        );
-        assert!(
-            criteria["anthropic:claude-haiku-4-5"]
-                .as_str()
-                .unwrap()
-                .contains("no reasoning levels")
-        );
-        let question = body["questions"]["model"]["instructions"].as_str().unwrap();
-        assert!(question.contains("best result for its cost"), "{question}");
-        assert_eq!(body["state"]["inFlight"][0]["brief"], "rewrite the readme");
-        assert_eq!(body["model"], "jev-latest");
-        assert_eq!(
-            body["questions"].as_object().unwrap().len(),
-            3,
-            "the thinking level waits for the model: {body}"
-        );
+            let criteria = body["questions"]["model"]["criteria"].as_object().unwrap();
+            assert_eq!(
+                criteria.len(),
+                5,
+                "the same id from two providers stays two options: {criteria:?}"
+            );
+            let opus = criteria["anthropic:claude-opus-5"].as_str().unwrap();
+            assert!(opus.contains("Opus 5"), "{opus}");
+            assert!(opus.contains("1000k context"), "{opus}");
+            assert!(opus.contains("$5.00 in / $25.00 out"), "{opus}");
+            // blended 3:1 — (3·5 + 25)/4 = 10 against (3·0.5 + 2)/4 = 0.875
+            assert!(
+                opus.contains("11.4× the cheapest option"),
+                "value is weighed against the cheapest: {opus}"
+            );
+            assert!(
+                criteria["openrouter:deepseek-v4-flash"]
+                    .as_str()
+                    .unwrap()
+                    .contains("(the cheapest option)")
+            );
+            assert!(
+                criteria["anthropic:claude-haiku-4-5"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no reasoning levels")
+            );
+            let question = body["questions"]["model"]["instructions"].as_str().unwrap();
+            assert!(question.contains("best result for its cost"), "{question}");
+            assert_eq!(body["state"]["inFlight"][0]["brief"], "rewrite the readme");
+            assert_eq!(body["model"], "jev-latest");
+            assert_eq!(
+                body["questions"].as_object().unwrap().len(),
+                3,
+                "the thinking level waits for the model: {body}"
+            );
+        }
+        {
+            let models = catalogue();
+            let config = RoutingConfig {
+                models: vec!["deepseek-v4-flash".into(), "anthropic:claude-opus-5".into()],
+                ..RoutingConfig::default()
+            };
+            let keys =
+                |list: Vec<WorkerModel>| list.iter().map(WorkerModel::key).collect::<Vec<_>>();
+            assert_eq!(
+                keys(candidates(&brief(&models, &[]), &config).unwrap()),
+                vec![
+                    "anthropic:claude-opus-5",
+                    "openrouter:deepseek-v4-flash",
+                    "opencode-go:deepseek-v4-flash"
+                ],
+                "a bare id admits every provider, provider:id admits one"
+            );
+            let pinned = Brief {
+                provider: Some("opencode-go"),
+                ..brief(&models, &[])
+            };
+            assert_eq!(
+                keys(candidates(&pinned, &config).unwrap()),
+                vec!["opencode-go:deepseek-v4-flash"],
+                "a pinned provider is never contradicted"
+            );
+        }
+        {
+            let huge: Vec<WorkerModel> = (0..300)
+                .map(|i| model("openrouter", &format!("m-{i}"), &[]))
+                .collect();
+            let err = candidates(&brief(&huge, &[]), &RoutingConfig::default()).unwrap_err();
+            assert!(err.contains("300 models"), "{err}");
+            assert!(err.contains("shortlist"), "says how to narrow it: {err}");
+            let Err(err) = candidates(&brief(&[], &[]), &RoutingConfig::default()) else {
+                panic!("expected a decline");
+            };
+            assert!(err.contains("could not be asked"), "{err}");
+        }
     }
 
     #[test]
-    fn a_pinned_model_is_not_asked_about() {
-        let models = catalogue();
-        let b = Brief {
-            model_pinned: true,
-            fallback_model: Some("claude-opus-5"),
-            ..brief(&models, &[])
-        };
-        let body = model_body(&b, &[], &RoutingConfig::default());
-        assert!(body["questions"].get("model").is_none(), "{body}");
-        let judgment = judge_answers(
-            &b,
-            &[],
-            &RoutingConfig::default(),
-            &answers(json!({"answers": {"needs_worktree": {"noul": 0.9}}})),
-        );
-        assert_eq!(judgment.ask, None);
-        assert_eq!(judgment.routing.model, None);
-        assert_eq!(judgment.routing.worktree, Some(true));
-    }
-
-    #[test]
-    fn candidates_follow_the_shortlist_and_the_pinned_provider() {
-        let models = catalogue();
-        let config = RoutingConfig {
-            models: vec!["deepseek-v4-flash".into(), "anthropic:claude-opus-5".into()],
-            ..RoutingConfig::default()
-        };
-        let keys = |list: Vec<WorkerModel>| list.iter().map(WorkerModel::key).collect::<Vec<_>>();
-        assert_eq!(
-            keys(candidates(&brief(&models, &[]), &config).unwrap()),
-            vec![
-                "anthropic:claude-opus-5",
-                "openrouter:deepseek-v4-flash",
-                "opencode-go:deepseek-v4-flash"
-            ],
-            "a bare id admits every provider, provider:id admits one"
-        );
-        let pinned = Brief {
-            provider: Some("opencode-go"),
-            ..brief(&models, &[])
-        };
-        assert_eq!(
-            keys(candidates(&pinned, &config).unwrap()),
-            vec!["opencode-go:deepseek-v4-flash"],
-            "a pinned provider is never contradicted"
-        );
-    }
-
-    #[test]
-    fn too_many_candidates_or_none_is_a_reason_not_a_request() {
-        let huge: Vec<WorkerModel> = (0..300)
-            .map(|i| model("openrouter", &format!("m-{i}"), &[]))
-            .collect();
-        let err = candidates(&brief(&huge, &[]), &RoutingConfig::default()).unwrap_err();
-        assert!(err.contains("300 models"), "{err}");
-        assert!(err.contains("shortlist"), "says how to narrow it: {err}");
-        let Err(err) = candidates(&brief(&[], &[]), &RoutingConfig::default()) else {
-            panic!("expected a decline");
-        };
-        assert!(err.contains("could not be asked"), "{err}");
-    }
-
-    #[test]
-    fn a_confident_choice_brings_its_own_provider() {
-        let models = catalogue();
-        let judgment = judge_all(
-            &brief(&models, &[]),
-            json!({"answers": {
-                "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.9},
-                "needs_worktree": {"noul": 0.95},
-                "parallel_safe": {"noul": 0.1},
-            }}),
-        );
-        let decision = judgment.routing;
-        assert_eq!(judgment.ask, None);
-        assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(
-            decision.provider.as_deref(),
-            Some("opencode-go"),
-            "not whichever provider happens to come first"
-        );
-        assert_eq!(decision.worktree, Some(true));
-        assert_eq!(decision.parallel_safe, Some(false));
-    }
-
-    #[test]
-    fn a_near_tie_goes_to_the_cheaper_model_and_a_clear_lead_does_not() {
-        let models = catalogue();
-        let pick = |opus: f64, flash: f64| {
-            judge_all(
+    fn model_decision() {
+        {
+            let models = catalogue();
+            let b = Brief {
+                model_pinned: true,
+                fallback_model: Some("claude-opus-5"),
+                ..brief(&models, &[])
+            };
+            let body = model_body(&b, &[], &RoutingConfig::default());
+            assert!(body["questions"].get("model").is_none(), "{body}");
+            let judgment = judge_answers(
+                &b,
+                &[],
+                &RoutingConfig::default(),
+                &answers(json!({"answers": {"needs_worktree": {"noul": 0.9}}})),
+            );
+            assert_eq!(judgment.ask, None);
+            assert_eq!(judgment.routing.model, None);
+            assert_eq!(judgment.routing.worktree, Some(true));
+        }
+        {
+            let models = catalogue();
+            let judgment = judge_all(
+                &brief(&models, &[]),
+                json!({"answers": {
+                    "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.9},
+                    "needs_worktree": {"noul": 0.95},
+                    "parallel_safe": {"noul": 0.1},
+                }}),
+            );
+            let decision = judgment.routing;
+            assert_eq!(judgment.ask, None);
+            assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(
+                decision.provider.as_deref(),
+                Some("opencode-go"),
+                "not whichever provider happens to come first"
+            );
+            assert_eq!(decision.worktree, Some(true));
+            assert_eq!(decision.parallel_safe, Some(false));
+        }
+        {
+            let models = catalogue();
+            let pick = |opus: f64, flash: f64| {
+                judge_all(
+                    &brief(&models, &[]),
+                    json!({"answers": {"model": {
+                        "choice": "anthropic:claude-opus-5",
+                        "confidence": 0.9,
+                        "probabilities": {
+                            "anthropic:claude-opus-5": opus,
+                            "openrouter:deepseek-v4-flash": flash,
+                        },
+                    }}}),
+                )
+                .routing
+            };
+            let tie = pick(0.45, 0.42);
+            assert_eq!(tie.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(tie.provider.as_deref(), Some("openrouter"));
+            assert!(tie.note.contains("near-tied"), "{}", tie.note);
+            let lead = pick(0.7, 0.2);
+            assert_eq!(lead.model.as_deref(), Some("claude-opus-5"));
+        }
+        {
+            let models = catalogue();
+            let judgment = judge_all(
                 &brief(&models, &[]),
                 json!({"answers": {"model": {
                     "choice": "anthropic:claude-opus-5",
-                    "confidence": 0.9,
+                    "confidence": 0.3,
                     "probabilities": {
-                        "anthropic:claude-opus-5": opus,
-                        "openrouter:deepseek-v4-flash": flash,
+                        "anthropic:claude-opus-5": 0.4,
+                        "claude-bridge:claude-opus-5": 0.1,
+                        "opencode-go:deepseek-v4-flash": 0.3,
                     },
                 }}}),
-            )
-            .routing
-        };
-        let tie = pick(0.45, 0.42);
-        assert_eq!(tie.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(tie.provider.as_deref(), Some("openrouter"));
-        assert!(tie.note.contains("near-tied"), "{}", tie.note);
-        let lead = pick(0.7, 0.2);
-        assert_eq!(lead.model.as_deref(), Some("claude-opus-5"));
-    }
+            );
+            assert_eq!(judgment.routing.model, None, "not taken below the limit");
+            assert!(
+                judgment.routing.note.contains("0.30"),
+                "{}",
+                judgment.routing.note
+            );
+            let options = judgment.ask.expect("the human is asked");
+            let keys: Vec<&str> = options.iter().map(|o| o.key.as_str()).collect();
+            assert_eq!(
+                keys,
+                vec![
+                    "anthropic:claude-opus-5",
+                    "opencode-go:deepseek-v4-flash",
+                    "claude-bridge:claude-opus-5",
+                    // no probability: cheaper first
+                    "openrouter:deepseek-v4-flash",
+                    "anthropic:claude-haiku-4-5",
+                ]
+            );
+            assert_eq!(options[0].probability, Some(0.4));
+            assert!(
+                options[0].detail.contains("Opus 5"),
+                "{}",
+                options[0].detail
+            );
+            assert!(
+                options[0].detail.contains("$5.00 / $25.00"),
+                "{}",
+                options[0].detail
+            );
 
-    #[test]
-    fn an_unsure_choice_is_put_to_the_human_leaning_first() {
-        let models = catalogue();
-        let judgment = judge_all(
-            &brief(&models, &[]),
-            json!({"answers": {"model": {
-                "choice": "anthropic:claude-opus-5",
-                "confidence": 0.3,
-                "probabilities": {
-                    "anthropic:claude-opus-5": 0.4,
-                    "claude-bridge:claude-opus-5": 0.1,
-                    "opencode-go:deepseek-v4-flash": 0.3,
-                },
-            }}}),
-        );
-        assert_eq!(judgment.routing.model, None, "not taken below the limit");
-        assert!(
-            judgment.routing.note.contains("0.30"),
-            "{}",
-            judgment.routing.note
-        );
-        let options = judgment.ask.expect("the human is asked");
-        let keys: Vec<&str> = options.iter().map(|o| o.key.as_str()).collect();
-        assert_eq!(
-            keys,
-            vec![
-                "anthropic:claude-opus-5",
-                "opencode-go:deepseek-v4-flash",
-                "claude-bridge:claude-opus-5",
-                // no probability: cheaper first
-                "openrouter:deepseek-v4-flash",
-                "anthropic:claude-haiku-4-5",
-            ]
-        );
-        assert_eq!(options[0].probability, Some(0.4));
-        assert!(
-            options[0].detail.contains("Opus 5"),
-            "{}",
-            options[0].detail
-        );
-        assert!(
-            options[0].detail.contains("$5.00 / $25.00"),
-            "{}",
-            options[0].detail
-        );
-
-        // a choice that names nothing on offer is asked about too
-        let judgment = judge_all(
-            &brief(&models, &[]),
-            json!({"answers": {"model": {"choice": "claude-opus-5", "confidence": 1.0}}}),
-        );
-        assert_eq!(
-            judgment.routing.model, None,
-            "a bare id is not a candidate's name"
-        );
-        assert_eq!(judgment.ask.map(|o| o.len()), Some(5));
-    }
-
-    #[test]
-    fn the_confidence_limit_decides_when_to_ask() {
-        let models = catalogue();
-        let b = brief(&models, &[]);
-        let list = candidates(&b, &RoutingConfig::default()).unwrap();
-        let reply = answers(json!({"answers": {"model": {
-            "choice": "anthropic:claude-opus-5", "confidence": 0.7,
-        }}}));
-        let with = |limit: f64| RoutingConfig {
-            confidence_threshold: Some(limit),
-            ..RoutingConfig::default()
-        };
-        assert_eq!(judge_answers(&b, &list, &with(0.6), &reply).ask, None);
-        assert!(judge_answers(&b, &list, &with(0.8), &reply).ask.is_some());
-        assert!(
-            judge_answers(&b, &list, &with(1.0), &reply).ask.is_some(),
-            "a limit of 1 always asks"
-        );
-    }
-
-    #[test]
-    fn the_thinking_choice_offers_only_the_levels_the_model_has() {
-        let models = catalogue();
-        let b = brief(&models, &[]);
-        let flash = &models[2];
-        let body = thinking_body(&b, flash, &RoutingConfig::default());
-        let criteria = body["questions"]["thinking"]["criteria"]
-            .as_object()
-            .unwrap();
-        assert_eq!(
-            criteria.keys().collect::<Vec<_>>(),
-            vec!["high", "off", "xhigh"],
-            "{criteria:?}"
-        );
-        assert!(
-            body["state"]["model"]
-                .as_str()
-                .unwrap()
-                .contains("deepseek-v4-flash")
-        );
-        let pick = |level: &str| {
-            thinking_answer(
-                flash,
-                &answers(json!({"answers": {"thinking": {"choice": level, "confidence": 0.8}}})),
-            )
-        };
-        assert_eq!(pick("high"), Some(("high".to_string(), 0.8)));
-        assert_eq!(pick("max"), None, "a level the model lacks is never set");
-    }
-
-    #[test]
-    fn the_model_that_runs_is_the_routed_one_or_the_fallback() {
-        let models = catalogue();
-        let b = Brief {
-            fallback_model: Some("claude-haiku-4-5"),
-            ..brief(&models, &[])
-        };
-        let routed = Routing {
-            model: Some("deepseek-v4-flash".into()),
-            provider: Some("opencode-go".into()),
-            ..Routing::default()
-        };
-        assert_eq!(
-            model_that_runs(&b, &routed)
-                .map(WorkerModel::key)
-                .as_deref(),
-            Some("opencode-go:deepseek-v4-flash")
-        );
-        assert_eq!(
-            model_that_runs(&b, &Routing::default())
-                .map(WorkerModel::key)
-                .as_deref(),
-            Some("anthropic:claude-haiku-4-5")
-        );
-    }
-
-    #[test]
-    fn a_worktree_is_only_dropped_on_a_confident_read_only() {
-        let models = catalogue();
-        let worktree = |p: f64| {
-            judge_all(
+            // a choice that names nothing on offer is asked about too
+            let judgment = judge_all(
                 &brief(&models, &[]),
-                json!({"answers": {"needs_worktree": {"noul": p}}}),
-            )
-            .routing
-            .worktree
-        };
-        assert_eq!(worktree(0.45), Some(true), "a coin flip keeps the worktree");
-        assert_eq!(worktree(0.2), Some(true));
-        assert_eq!(worktree(0.05), Some(false));
+                json!({"answers": {"model": {"choice": "claude-opus-5", "confidence": 1.0}}}),
+            );
+            assert_eq!(
+                judgment.routing.model, None,
+                "a bare id is not a candidate's name"
+            );
+            assert_eq!(judgment.ask.map(|o| o.len()), Some(5));
+        }
+        {
+            let models = catalogue();
+            let b = brief(&models, &[]);
+            let list = candidates(&b, &RoutingConfig::default()).unwrap();
+            let reply = answers(json!({"answers": {"model": {
+                "choice": "anthropic:claude-opus-5", "confidence": 0.7,
+            }}}));
+            let with = |limit: f64| RoutingConfig {
+                confidence_threshold: Some(limit),
+                ..RoutingConfig::default()
+            };
+            assert_eq!(judge_answers(&b, &list, &with(0.6), &reply).ask, None);
+            assert!(judge_answers(&b, &list, &with(0.8), &reply).ask.is_some());
+            assert!(
+                judge_answers(&b, &list, &with(1.0), &reply).ask.is_some(),
+                "a limit of 1 always asks"
+            );
+        }
+        {
+            let models = catalogue();
+            let worktree = |p: f64| {
+                judge_all(
+                    &brief(&models, &[]),
+                    json!({"answers": {"needs_worktree": {"noul": p}}}),
+                )
+                .routing
+                .worktree
+            };
+            assert_eq!(worktree(0.45), Some(true), "a coin flip keeps the worktree");
+            assert_eq!(worktree(0.2), Some(true));
+            assert_eq!(worktree(0.05), Some(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_choice() {
+        {
+            let models = catalogue();
+            let b = brief(&models, &[]);
+            let flash = &models[2];
+            let body = thinking_body(&b, flash, &RoutingConfig::default());
+            let criteria = body["questions"]["thinking"]["criteria"]
+                .as_object()
+                .unwrap();
+            assert_eq!(
+                criteria.keys().collect::<Vec<_>>(),
+                vec!["high", "off", "xhigh"],
+                "{criteria:?}"
+            );
+            assert!(
+                body["state"]["model"]
+                    .as_str()
+                    .unwrap()
+                    .contains("deepseek-v4-flash")
+            );
+            let pick = |level: &str| {
+                thinking_answer(
+                    flash,
+                    &answers(
+                        json!({"answers": {"thinking": {"choice": level, "confidence": 0.8}}}),
+                    ),
+                )
+            };
+            assert_eq!(pick("high"), Some(("high".to_string(), 0.8)));
+            assert_eq!(pick("max"), None, "a level the model lacks is never set");
+        }
+        {
+            let models = catalogue();
+            let b = Brief {
+                fallback_model: Some("claude-haiku-4-5"),
+                ..brief(&models, &[])
+            };
+            let routed = Routing {
+                model: Some("deepseek-v4-flash".into()),
+                provider: Some("opencode-go".into()),
+                ..Routing::default()
+            };
+            assert_eq!(
+                model_that_runs(&b, &routed)
+                    .map(WorkerModel::key)
+                    .as_deref(),
+                Some("opencode-go:deepseek-v4-flash")
+            );
+            assert_eq!(
+                model_that_runs(&b, &Routing::default())
+                    .map(WorkerModel::key)
+                    .as_deref(),
+                Some("anthropic:claude-haiku-4-5")
+            );
+        }
+        {
+            let models = catalogue();
+            let config = RoutingConfig {
+                enabled: true,
+                // nothing listening: asking at all would fail loudly here
+                endpoint: Some("http://127.0.0.1:1/v1/systemone".to_string()),
+                ..RoutingConfig::default()
+            };
+            let haiku = &models[4];
+            assert_eq!(
+                choose_thinking(&brief(&models, &[]), haiku, &config, "k").await,
+                None
+            );
+        }
     }
 
     #[test]
-    fn a_question_is_pending_while_its_asker_lives_and_nobody_answered() {
+    fn question_files() {
         let tmp = tempfile::tempdir().unwrap();
         let paths = FleetPaths::new(tmp.path());
         let question = |id: &str, pid: u32, deadline_ms: i64| ModelQuestion {
@@ -1192,114 +1199,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn two_cycles_choose_the_model_then_its_thinking_level() {
-        let (url, mut rx) = stub(vec![
-            json!({"answers": {
-                "model": {"type": "choice", "choice": "opencode-go:deepseek-v4-flash", "confidence": 0.82},
-                "needs_worktree": {"type": "noul", "noul": 0.9},
-                "parallel_safe": {"type": "noul", "noul": 0.8},
-            }}),
-            json!({"answers": {
-                "thinking": {"type": "choice", "choice": "xhigh", "confidence": 0.7},
-            }}),
-        ])
-        .await;
-        let models = catalogue();
-        let config = RoutingConfig {
-            enabled: true,
-            endpoint: Some(url),
-            ..RoutingConfig::default()
-        };
-        let b = brief(&models, &[]);
-        let judgment = judge(&b, &config, Some("sk-test"))
-            .await
-            .expect("a decision");
-        assert_eq!(judgment.ask, None);
-        let decision = judgment.routing;
-        assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(decision.provider.as_deref(), Some("opencode-go"));
-        assert_eq!(decision.worktree, Some(true));
-        let runs = model_that_runs(&b, &decision).unwrap();
-        let thinking = choose_thinking(&b, runs, &config, "sk-test").await;
-        assert_eq!(thinking, Some(("xhigh".to_string(), 0.7)));
-
-        let (head, body) = rx.recv().await.unwrap();
-        assert!(
-            head.to_lowercase()
-                .contains("authorization: bearer sk-test"),
-            "the key rides as a bearer token: {head}"
-        );
-        let sent: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(sent["state"]["task"]["name"], "add-auth");
-        assert!(sent["questions"]["model"]["criteria"]["anthropic:claude-opus-5"].is_string());
-        let (_, body) = rx.recv().await.unwrap();
-        let sent: Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            sent["questions"]["thinking"]["criteria"]
-                .as_object()
-                .unwrap()
-                .len(),
-            3,
-            "the chosen model's own three levels: {sent}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_model_with_one_level_or_none_is_not_asked_about_thinking() {
-        let models = catalogue();
-        let config = RoutingConfig {
-            enabled: true,
-            // nothing listening: asking at all would fail loudly here
-            endpoint: Some("http://127.0.0.1:1/v1/systemone".to_string()),
-            ..RoutingConfig::default()
-        };
-        let haiku = &models[4];
-        assert_eq!(
-            choose_thinking(&brief(&models, &[]), haiku, &config, "k").await,
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn a_judgment_that_cannot_be_had_says_so_rather_than_failing() {
-        let models = catalogue();
-        let config = RoutingConfig {
-            enabled: true,
-            // nothing listening: a spawn must not fail because a judgment could not be had
-            endpoint: Some("http://127.0.0.1:1/v1/systemone".to_string()),
-            ..RoutingConfig::default()
-        };
-        let judgment = judge(&brief(&models, &[]), &config, Some("sk-test"))
-            .await
-            .expect("routing was on, so the outcome is said");
-        assert_eq!(judgment.routing.model, None);
-        assert_eq!(judgment.ask, None, "nothing to ask when nothing was judged");
-        assert!(
-            judgment.routing.note.contains("did not answer"),
-            "{}",
-            judgment.routing.note
-        );
-    }
-
-    #[tokio::test]
-    async fn routing_is_silent_when_off_or_unkeyed_and_says_why_it_declined() {
-        let models = catalogue();
-        let on = RoutingConfig {
-            enabled: true,
-            ..RoutingConfig::default()
-        };
-        assert!(
-            judge(&brief(&models, &[]), &RoutingConfig::default(), Some("k"))
+    async fn http_round_trips() {
+        {
+            let (url, mut rx) = stub(vec![
+                json!({"answers": {
+                    "model": {"type": "choice", "choice": "opencode-go:deepseek-v4-flash", "confidence": 0.82},
+                    "needs_worktree": {"type": "noul", "noul": 0.9},
+                    "parallel_safe": {"type": "noul", "noul": 0.8},
+                }}),
+                json!({"answers": {
+                    "thinking": {"type": "choice", "choice": "xhigh", "confidence": 0.7},
+                }}),
+            ])
+            .await;
+            let models = catalogue();
+            let config = RoutingConfig {
+                enabled: true,
+                endpoint: Some(url),
+                ..RoutingConfig::default()
+            };
+            let b = brief(&models, &[]);
+            let judgment = judge(&b, &config, Some("sk-test"))
                 .await
-                .is_none(),
-            "off by default"
-        );
-        assert!(judge(&brief(&models, &[]), &on, None).await.is_none());
-        let declined = judge(&brief(&[], &[]), &on, Some("k")).await.unwrap();
-        assert!(
-            declined.routing.note.starts_with("not routed:"),
-            "{}",
-            declined.routing.note
-        );
+                .expect("a decision");
+            assert_eq!(judgment.ask, None);
+            let decision = judgment.routing;
+            assert_eq!(decision.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(decision.provider.as_deref(), Some("opencode-go"));
+            assert_eq!(decision.worktree, Some(true));
+            let runs = model_that_runs(&b, &decision).unwrap();
+            let thinking = choose_thinking(&b, runs, &config, "sk-test").await;
+            assert_eq!(thinking, Some(("xhigh".to_string(), 0.7)));
+
+            let (head, body) = rx.recv().await.unwrap();
+            assert!(
+                head.to_lowercase()
+                    .contains("authorization: bearer sk-test"),
+                "the key rides as a bearer token: {head}"
+            );
+            let sent: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(sent["state"]["task"]["name"], "add-auth");
+            assert!(sent["questions"]["model"]["criteria"]["anthropic:claude-opus-5"].is_string());
+            let (_, body) = rx.recv().await.unwrap();
+            let sent: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                sent["questions"]["thinking"]["criteria"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                3,
+                "the chosen model's own three levels: {sent}"
+            );
+        }
+        {
+            let models = catalogue();
+            let config = RoutingConfig {
+                enabled: true,
+                // nothing listening: a spawn must not fail because a judgment could not be had
+                endpoint: Some("http://127.0.0.1:1/v1/systemone".to_string()),
+                ..RoutingConfig::default()
+            };
+            let judgment = judge(&brief(&models, &[]), &config, Some("sk-test"))
+                .await
+                .expect("routing was on, so the outcome is said");
+            assert_eq!(judgment.routing.model, None);
+            assert_eq!(judgment.ask, None, "nothing to ask when nothing was judged");
+            assert!(
+                judgment.routing.note.contains("did not answer"),
+                "{}",
+                judgment.routing.note
+            );
+        }
+        {
+            let models = catalogue();
+            let on = RoutingConfig {
+                enabled: true,
+                ..RoutingConfig::default()
+            };
+            assert!(
+                judge(&brief(&models, &[]), &RoutingConfig::default(), Some("k"))
+                    .await
+                    .is_none(),
+                "off by default"
+            );
+            assert!(judge(&brief(&models, &[]), &on, None).await.is_none());
+            let declined = judge(&brief(&[], &[]), &on, Some("k")).await.unwrap();
+            assert!(
+                declined.routing.note.starts_with("not routed:"),
+                "{}",
+                declined.routing.note
+            );
+        }
     }
 }

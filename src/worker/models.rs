@@ -364,137 +364,131 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parses_the_second_column_and_dedupes() {
-        let pi = listing_script(&[
-            "  fake               glm-5.3                1M",
-            "  fake               glm-5.3                1M",
-            "  fake               glm-5.3-flash                1M",
-        ]);
-        let pi = format!("sh {pi}");
-        let models = list_models(&pi).await;
-        assert_eq!(models, vec!["glm-5.3", "glm-5.3-flash"]);
-        // The listing is cached per pi spec: a second ask does not run pi again.
-        let again = list_models(&pi).await;
-        assert_eq!(again, models);
-    }
-
-    #[tokio::test]
-    async fn known_model_passes_and_unknown_names_the_closest() {
-        let pi = format!(
-            "sh {}",
-            listing_script(&[
+    async fn model_check() {
+        {
+            let pi = listing_script(&[
+                "  fake               glm-5.3                1M",
                 "  fake               glm-5.3                1M",
                 "  fake               glm-5.3-flash                1M",
-                "  fake               claude-sonnet-5                1M",
-            ])
-        );
-        // prime the cache; the checks below then read the one real listing
-        list_models(&pi).await;
-        assert_eq!(check_model(&pi, None).await.unwrap(), None);
-        assert_eq!(check_model(&pi, Some("glm-5.3")).await.unwrap(), None);
-        let bad = check_model(&pi, Some("glm-5.3-max"))
-            .await
-            .unwrap()
+            ]);
+            let pi = format!("sh {pi}");
+            let models = list_models(&pi).await;
+            assert_eq!(models, vec!["glm-5.3", "glm-5.3-flash"]);
+            // The listing is cached per pi spec: a second ask does not run pi again.
+            let again = list_models(&pi).await;
+            assert_eq!(again, models);
+        }
+        {
+            let pi = format!(
+                "sh {}",
+                listing_script(&[
+                    "  fake               glm-5.3                1M",
+                    "  fake               glm-5.3-flash                1M",
+                    "  fake               claude-sonnet-5                1M",
+                ])
+            );
+            // prime the cache; the checks below then read the one real listing
+            list_models(&pi).await;
+            assert_eq!(check_model(&pi, None).await.unwrap(), None);
+            assert_eq!(check_model(&pi, Some("glm-5.3")).await.unwrap(), None);
+            let bad = check_model(&pi, Some("glm-5.3-max"))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(bad.contains("unknown model \"glm-5.3-max\""), "{bad}");
+            assert!(bad.contains("did you mean glm-5.3-flash, glm-5.3"), "{bad}");
+            assert!(bad.contains("shows all 3"), "{bad}");
+            // Nothing similar at all: still refused, no suggestions.
+            let alien = check_model(&pi, Some("zort-9000")).await.unwrap().unwrap();
+            assert!(alien.contains("unknown model \"zort-9000\""), "{alien}");
+            assert!(!alien.contains("did you mean"), "{alien}");
+        }
+        {
+            assert_eq!(
+                list_models("definitely-not-a-real-pi-bin").await,
+                Vec::<String>::new()
+            );
+            assert_eq!(
+                check_model("definitely-not-a-real-pi-bin", Some("anything-at-all"))
+                    .await
+                    .unwrap(),
+                None
+            );
+        }
+        {
+            assert!(shares_stem("glm-5.3", "glm-5.3-max"));
+            assert!(shares_stem("glm/5.3", "glm-5.3-max"));
+            assert!(!shares_stem("glm-5.3-max", "gpt-6"));
+        }
+    }
+
+    #[tokio::test]
+    async fn catalogue_fetch() {
+        {
+            let fleet = tmp_fleet();
+            let pi = rpc_fake_pi(false);
+            let models = ensure_pi_catalogue(fleet.root(), &pi).await;
+            assert_eq!(models.len(), 2);
+            let cache = read_pi_cache(fleet.root()).unwrap();
+            assert_eq!(
+                cache
+                    .available_models
+                    .iter()
+                    .map(|m| format!("{}:{}", m.provider, m.id))
+                    .collect::<Vec<_>>(),
+                vec!["fakeprovider:glm-5.3", "fakeprovider:glm-5.3-flash"],
+                "the one-shot writes what the fake pi answered"
+            );
+            assert_eq!(
+                cache
+                    .commands
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>(),
+                vec!["skill:fleet-worker-report", "compact-notes", "session-name"],
+                "and the commands with it, like a booted worker would"
+            );
+            // a catalogue already on disk is never re-fetched
+            assert_eq!(
+                ensure_pi_catalogue(fleet.root(), "no-such-pi").await,
+                models
+            );
+        }
+        {
+            let fleet = tmp_fleet();
+            let kept = vec![WorkerCommand {
+                name: "keep-me".to_string(),
+                description: "kept".to_string(),
+                source: "test".to_string(),
+            }];
+            write_pi_cache(
+                fleet.root(),
+                &PiCache {
+                    available_models: Vec::new(),
+                    commands: kept.clone(),
+                    ..PiCache::default()
+                },
+            )
             .unwrap();
-        assert!(bad.contains("unknown model \"glm-5.3-max\""), "{bad}");
-        assert!(bad.contains("did you mean glm-5.3-flash, glm-5.3"), "{bad}");
-        assert!(bad.contains("shows all 3"), "{bad}");
-        // Nothing similar at all: still refused, no suggestions.
-        let alien = check_model(&pi, Some("zort-9000")).await.unwrap().unwrap();
-        assert!(alien.contains("unknown model \"zort-9000\""), "{alien}");
-        assert!(!alien.contains("did you mean"), "{alien}");
-    }
-
-    #[tokio::test]
-    async fn an_unaskable_pi_never_blocks_a_spawn() {
-        assert_eq!(
-            list_models("definitely-not-a-real-pi-bin").await,
-            Vec::<String>::new()
-        );
-        assert_eq!(
-            check_model("definitely-not-a-real-pi-bin", Some("anything-at-all"))
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn a_missing_catalogue_is_fetched_from_pi_models_and_commands() {
-        let fleet = tmp_fleet();
-        let pi = rpc_fake_pi(false);
-        let models = ensure_pi_catalogue(fleet.root(), &pi).await;
-        assert_eq!(models.len(), 2);
-        let cache = read_pi_cache(fleet.root()).unwrap();
-        assert_eq!(
-            cache
-                .available_models
-                .iter()
-                .map(|m| format!("{}:{}", m.provider, m.id))
-                .collect::<Vec<_>>(),
-            vec!["fakeprovider:glm-5.3", "fakeprovider:glm-5.3-flash"],
-            "the one-shot writes what the fake pi answered"
-        );
-        assert_eq!(
-            cache
-                .commands
-                .iter()
-                .map(|c| c.name.clone())
-                .collect::<Vec<_>>(),
-            vec!["skill:fleet-worker-report", "compact-notes", "session-name"],
-            "and the commands with it, like a booted worker would"
-        );
-        // a catalogue already on disk is never re-fetched
-        assert_eq!(
-            ensure_pi_catalogue(fleet.root(), "no-such-pi").await,
-            models
-        );
-    }
-
-    #[tokio::test]
-    async fn fields_pi_did_not_answer_are_left_alone() {
-        let fleet = tmp_fleet();
-        let kept = vec![WorkerCommand {
-            name: "keep-me".to_string(),
-            description: "kept".to_string(),
-            source: "test".to_string(),
-        }];
-        write_pi_cache(
-            fleet.root(),
-            &PiCache {
-                available_models: Vec::new(),
-                commands: kept.clone(),
-                ..PiCache::default()
-            },
-        )
-        .unwrap();
-        // this pi answers models but never answers get_commands: the models
-        // land and the pre-existing commands survive the read-modify-write
-        let models = ensure_pi_catalogue(fleet.root(), &rpc_fake_pi(true)).await;
-        assert_eq!(models.len(), 2);
-        let cache = read_pi_cache(fleet.root()).unwrap();
-        assert_eq!(cache.available_models.len(), 2);
-        assert_eq!(cache.commands, kept);
-    }
-
-    #[tokio::test]
-    async fn an_unaskable_pi_writes_nothing() {
-        let fleet = tmp_fleet();
-        assert!(
-            ensure_pi_catalogue(fleet.root(), "definitely-not-a-real-pi-bin")
-                .await
-                .is_empty()
-        );
-        assert!(
-            !crate::fleet::run::pi_cache_json_path(fleet.root()).exists(),
-            "no catalogue file is written when pi cannot be asked"
-        );
-    }
-
-    #[test]
-    fn stem_heuristic_matches_version_variants_only() {
-        assert!(shares_stem("glm-5.3", "glm-5.3-max"));
-        assert!(shares_stem("glm/5.3", "glm-5.3-max"));
-        assert!(!shares_stem("glm-5.3-max", "gpt-6"));
+            // this pi answers models but never answers get_commands: the models
+            // land and the pre-existing commands survive the read-modify-write
+            let models = ensure_pi_catalogue(fleet.root(), &rpc_fake_pi(true)).await;
+            assert_eq!(models.len(), 2);
+            let cache = read_pi_cache(fleet.root()).unwrap();
+            assert_eq!(cache.available_models.len(), 2);
+            assert_eq!(cache.commands, kept);
+        }
+        {
+            let fleet = tmp_fleet();
+            assert!(
+                ensure_pi_catalogue(fleet.root(), "definitely-not-a-real-pi-bin")
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                !crate::fleet::run::pi_cache_json_path(fleet.root()).exists(),
+                "no catalogue file is written when pi cannot be asked"
+            );
+        }
     }
 }

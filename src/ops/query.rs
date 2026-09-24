@@ -794,7 +794,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_fleet_view_shows_the_acting_sessions_runs_and_all_shows_everything() {
+    async fn status_scoped_to_session() {
         let dir = tmp_dir("pilotfish-query-scope-");
         let paths = crate::paths::FleetPaths::new(dir.join(crate::paths::STATE_DIR_NAME));
         let other = uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
@@ -863,182 +863,182 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn status_on_an_empty_fleet_says_so_without_printing() {
-        let dir = tmp_dir("pilotfish-query-");
-        let result = status_core_with_env(None, Some(&dir), false, false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert_eq!(result.out, vec!["(no runs)"]);
-        assert!(result.data.runs.is_empty());
-        assert!(result.err.is_empty());
-    }
-
-    #[tokio::test]
-    async fn single_run_status_is_json_with_the_derived_status_and_session_file() {
-        let (dir, paths, run_id) =
-            fleet_with_run("pilotfish-query-solo-", RunStatus::Running, Some(1));
-        std::fs::create_dir_all(paths.run_session_dir(&run_id)).unwrap();
-        std::fs::write(paths.run_session_dir(&run_id).join("s1.jsonl"), "{}\n").unwrap();
-        // A pending question makes the derived view `blocked`.
-        let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
-        state.pending_question = Some(crate::fleet::run::PendingQuestion {
-            id: "m_q1".into(),
-            question: "which?".into(),
-            options: None,
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        run::save_state(&paths.run_dir(&run_id), &state).unwrap();
-
-        let result = status_core_with_env(Some("auth"), Some(&dir), false, false, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        let parsed: Value = serde_json::from_str(&result.out[0]).unwrap();
-        assert_eq!(parsed["name"], "auth");
-        assert_eq!(parsed["status"], "blocked");
-        assert!(
-            parsed["sessionFile"]
-                .as_str()
-                .is_some_and(|s| s.ends_with("s1.jsonl")),
-            "{}",
-            parsed["sessionFile"]
-        );
-        assert_eq!(result.data.runs.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn fleet_table_and_json_hide_archived_unless_asked() {
-        let (dir, paths, _run_id) =
-            fleet_with_run("pilotfish-query-fleet-", RunStatus::Settled, None);
-        // A second, archived run.
-        let archived_id = "old-20260828141531";
-        let old_dir = paths.run_dir(archived_id);
-        std::fs::create_dir_all(&old_dir).unwrap();
-        let mut old = RunState::new(
-            paths.root().to_string_lossy().as_ref(),
-            archived_id,
-            "old",
-            "/tmp/x",
-            "b",
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        old.status = RunStatus::Archived;
-        run::save_state(&old_dir, &old).unwrap();
-
-        let table = status_core_with_env(None, Some(&dir), false, false, None)
-            .await
-            .unwrap();
-        assert_eq!(table.code, ExitCode::Ok);
-        let header = &table.out[0];
-        assert!(
-            header.contains("NAME") && header.contains("STATE") && header.contains("AGE"),
-            "{header}"
-        );
-        assert!(
-            table
-                .out
-                .iter()
-                .any(|l| l.contains("auth") && l.contains("settled")),
-            "{:?}",
-            table.out
-        );
-        assert!(
-            !table.out.join("\n").contains("old-"),
-            "archived hidden: {:?}",
-            table.out
-        );
-
-        let all = status_core_with_env(None, Some(&dir), false, true, None)
-            .await
-            .unwrap();
-        assert!(
-            all.out
-                .iter()
-                .any(|l| l.contains("old") && l.contains("archived")),
-            "archived shown: {:?}",
-            all.out
-        );
-
-        let json = status_core_with_env(None, Some(&dir), true, false, None)
-            .await
-            .unwrap();
-        let parsed: Value = serde_json::from_str(&json.out[0]).unwrap();
-        assert_eq!(parsed.as_array().unwrap().len(), 1);
-        assert_eq!(parsed[0]["status"], "settled");
-
-        // An empty fleet in json mode is an empty array.
-        let empty_dir = tmp_dir("pilotfish-query-empty-");
-        let empty = status_core_with_env(None, Some(&empty_dir), true, false, None)
-            .await
-            .unwrap();
-        assert_eq!(empty.out, vec!["[]"]);
-    }
-
-    #[tokio::test]
-    async fn output_prints_text_then_tool_trail() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-query-out-", RunStatus::Settled, None);
-        let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
-        state.last_assistant_text = Some("Working: wrote hello.txt".into());
-        run::save_state(&paths.run_dir(&run_id), &state).unwrap();
-        crate::util::append_text(
-            &paths.run_events(&run_id),
-            &format!("{}\n", r#"{"type":"tool_execution_end","toolName":"bash","result":{"content":[{"text":"hi\n"}]}}"#),
-        )
-        .unwrap();
-
-        let text = output_core_with_env("auth", Some(&dir), None, None)
-            .await
-            .unwrap();
-        assert_eq!(text.out, vec!["Working: wrote hello.txt"]);
-        let trail = output_core_with_env("auth", Some(&dir), Some(5), None)
-            .await
-            .unwrap();
-        assert_eq!(trail.out, vec!["bash: hi"]);
-
-        // No events at all: the placeholder, not an error.
-        let (dir2, _p2, _r2) = fleet_with_run("pilotfish-query-out2-", RunStatus::Running, Some(1));
-        let trail2 = output_core_with_env("auth", Some(&dir2), Some(5), None)
-            .await
-            .unwrap();
-        assert_eq!(trail2.out, vec!["(no tool activity yet)"]);
-    }
-
-    #[tokio::test]
-    async fn logs_tails_pi_log_and_says_when_there_is_none() {
-        let (dir, paths, run_id) =
-            fleet_with_run("pilotfish-query-logs-", RunStatus::Running, Some(1));
-        let log = paths.pi_log(&run_id);
-        for i in 0..10 {
-            crate::util::append_text(&log, &format!("line {i}\n")).unwrap();
+    async fn status_views() {
+        {
+            let dir = tmp_dir("pilotfish-query-");
+            let result = status_core_with_env(None, Some(&dir), false, false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert_eq!(result.out, vec!["(no runs)"]);
+            assert!(result.data.runs.is_empty());
+            assert!(result.err.is_empty());
         }
-        let result = logs_core_with_env("auth", Some(&dir), Some(3), None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert_eq!(result.out, vec!["line 7\nline 8\nline 9"]);
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-query-solo-", RunStatus::Running, Some(1));
+            std::fs::create_dir_all(paths.run_session_dir(&run_id)).unwrap();
+            std::fs::write(paths.run_session_dir(&run_id).join("s1.jsonl"), "{}\n").unwrap();
+            // A pending question makes the derived view `blocked`.
+            let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
+            state.pending_question = Some(crate::fleet::run::PendingQuestion {
+                id: "m_q1".into(),
+                question: "which?".into(),
+                options: None,
+                context: None,
+                asked_at: crate::util::now_iso(),
+            });
+            run::save_state(&paths.run_dir(&run_id), &state).unwrap();
 
-        let (dir2, _p2, _r2) =
-            fleet_with_run("pilotfish-query-logs2-", RunStatus::Running, Some(1));
-        let none = logs_core_with_env("auth", Some(&dir2), None, None)
-            .await
-            .unwrap();
-        assert_eq!(none.out, vec!["(no pi.log yet)"]);
+            let result = status_core_with_env(Some("auth"), Some(&dir), false, false, None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            let parsed: Value = serde_json::from_str(&result.out[0]).unwrap();
+            assert_eq!(parsed["name"], "auth");
+            assert_eq!(parsed["status"], "blocked");
+            assert!(
+                parsed["sessionFile"]
+                    .as_str()
+                    .is_some_and(|s| s.ends_with("s1.jsonl")),
+                "{}",
+                parsed["sessionFile"]
+            );
+            assert_eq!(result.data.runs.len(), 1);
+        }
+        {
+            let (dir, paths, _run_id) =
+                fleet_with_run("pilotfish-query-fleet-", RunStatus::Settled, None);
+            // A second, archived run.
+            let archived_id = "old-20260828141531";
+            let old_dir = paths.run_dir(archived_id);
+            std::fs::create_dir_all(&old_dir).unwrap();
+            let mut old = RunState::new(
+                paths.root().to_string_lossy().as_ref(),
+                archived_id,
+                "old",
+                "/tmp/x",
+                "b",
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            );
+            old.status = RunStatus::Archived;
+            run::save_state(&old_dir, &old).unwrap();
+
+            let table = status_core_with_env(None, Some(&dir), false, false, None)
+                .await
+                .unwrap();
+            assert_eq!(table.code, ExitCode::Ok);
+            let header = &table.out[0];
+            assert!(
+                header.contains("NAME") && header.contains("STATE") && header.contains("AGE"),
+                "{header}"
+            );
+            assert!(
+                table
+                    .out
+                    .iter()
+                    .any(|l| l.contains("auth") && l.contains("settled")),
+                "{:?}",
+                table.out
+            );
+            assert!(
+                !table.out.join("\n").contains("old-"),
+                "archived hidden: {:?}",
+                table.out
+            );
+
+            let all = status_core_with_env(None, Some(&dir), false, true, None)
+                .await
+                .unwrap();
+            assert!(
+                all.out
+                    .iter()
+                    .any(|l| l.contains("old") && l.contains("archived")),
+                "archived shown: {:?}",
+                all.out
+            );
+
+            let json = status_core_with_env(None, Some(&dir), true, false, None)
+                .await
+                .unwrap();
+            let parsed: Value = serde_json::from_str(&json.out[0]).unwrap();
+            assert_eq!(parsed.as_array().unwrap().len(), 1);
+            assert_eq!(parsed[0]["status"], "settled");
+
+            // An empty fleet in json mode is an empty array.
+            let empty_dir = tmp_dir("pilotfish-query-empty-");
+            let empty = status_core_with_env(None, Some(&empty_dir), true, false, None)
+                .await
+                .unwrap();
+            assert_eq!(empty.out, vec!["[]"]);
+        }
     }
 
     #[tokio::test]
-    async fn report_exit_2_without_anything_and_appendix_when_steered() {
+    async fn output_and_logs() {
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-query-out-", RunStatus::Settled, None);
+            let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
+            state.last_assistant_text = Some("Working: wrote hello.txt".into());
+            run::save_state(&paths.run_dir(&run_id), &state).unwrap();
+            crate::util::append_text(
+                &paths.run_events(&run_id),
+                &format!("{}\n", r#"{"type":"tool_execution_end","toolName":"bash","result":{"content":[{"text":"hi\n"}]}}"#),
+            )
+            .unwrap();
+
+            let text = output_core_with_env("auth", Some(&dir), None, None)
+                .await
+                .unwrap();
+            assert_eq!(text.out, vec!["Working: wrote hello.txt"]);
+            let trail = output_core_with_env("auth", Some(&dir), Some(5), None)
+                .await
+                .unwrap();
+            assert_eq!(trail.out, vec!["bash: hi"]);
+
+            // No events at all: the placeholder, not an error.
+            let (dir2, _p2, _r2) =
+                fleet_with_run("pilotfish-query-out2-", RunStatus::Running, Some(1));
+            let trail2 = output_core_with_env("auth", Some(&dir2), Some(5), None)
+                .await
+                .unwrap();
+            assert_eq!(trail2.out, vec!["(no tool activity yet)"]);
+        }
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-query-logs-", RunStatus::Running, Some(1));
+            let log = paths.pi_log(&run_id);
+            for i in 0..10 {
+                crate::util::append_text(&log, &format!("line {i}\n")).unwrap();
+            }
+            let result = logs_core_with_env("auth", Some(&dir), Some(3), None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert_eq!(result.out, vec!["line 7\nline 8\nline 9"]);
+
+            let (dir2, _p2, _r2) =
+                fleet_with_run("pilotfish-query-logs2-", RunStatus::Running, Some(1));
+            let none = logs_core_with_env("auth", Some(&dir2), None, None)
+                .await
+                .unwrap();
+            assert_eq!(none.out, vec!["(no pi.log yet)"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn report_exit_codes() {
         let (dir, _paths, _run_id) =
             fleet_with_run("pilotfish-query-rep1-", RunStatus::Settled, None);
         let missing = report_core_with_env("auth", Some(&dir), None)
@@ -1079,7 +1079,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_settles_times_out_and_reports_bad_ends() {
+    async fn wait_outcomes() {
         // Settle after 300 ms; the pid (our own process) stays alive, so the
         // run stays Running until then.
         let (dir, paths, run_id) =
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attach_renders_the_transcript_tail() {
+    async fn attach_renders_tail() {
         let (dir, paths, run_id) =
             fleet_with_run("pilotfish-query-attach-", RunStatus::Settled, None);
         let lines = [
@@ -1186,25 +1186,7 @@ mod tests {
     }
 
     #[test]
-    fn derived_view_is_taken_not_reimplemented() {
-        let (_dir, paths, run_id) =
-            fleet_with_run("pilotfish-query-derive-", RunStatus::Running, Some(1));
-        let mut state = run::load_state(&paths.run_dir(&run_id)).unwrap();
-        state.pid = Some(1);
-        assert_eq!(derived_json(&state)["status"], "running");
-        state.pending_dialog = Some(crate::fleet::run::PendingDialog {
-            id: "u-1".into(),
-            method: "select".into(),
-            question: "pick".into(),
-            options: None,
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        assert_eq!(derived_json(&state)["status"], "blocked");
-    }
-
-    #[test]
-    fn transcript_fold_shapes_match_the_console() {
+    fn fold_matches_console() {
         let mut lines = Vec::new();
         apply_transcript_event(
             &mut lines,

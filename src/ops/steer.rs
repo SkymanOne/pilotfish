@@ -522,212 +522,216 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_appends_a_steer_envelope_and_queues() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        let result = send_core_with_env("auth", Some(&dir), "use tabs", orch(), None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert_eq!(result.out, vec!["steer queued for auth"]);
-        let envelopes = inbox_lines(&paths, &run_id);
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].from, orch());
-        assert_eq!(envelopes[0].to, Party::worker(run_uuid(&paths, &run_id)));
-        assert_eq!(envelopes[0].decode(), Some(Decoded::Steer("use tabs")));
-        assert_eq!(
-            result.data,
-            ControlData {
-                name: "auth".into(),
-                kind: "steer".into(),
-                question_id: None,
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn followup_and_stop_append_their_envelope_types() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        followup_core_with_env("auth", Some(&dir), "then fmt", orch(), None)
-            .await
-            .unwrap();
-        stop_core_with_env("auth", Some(&dir), Party::Console, None)
-            .await
-            .unwrap();
-        let envelopes = inbox_lines(&paths, &run_id);
-        assert_eq!(envelopes.len(), 2);
-        assert_eq!(envelopes[0].kind, "follow_up");
-        assert_eq!(envelopes[1].kind, "abort", "stop appends an abort envelope");
-        // Provenance is threaded honestly.
-        assert_eq!(envelopes[0].from, orch());
-        assert_eq!(envelopes[1].from, Party::Console);
-        let payload = &envelopes[1].payload;
-        assert!(
-            payload.as_object().is_some_and(serde_json::Map::is_empty),
-            "abort carries exactly {{}}: {payload}"
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_messages_are_refused_before_touching_the_run() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        for (core, expect) in [
-            (
-                send_core_with_env("auth", Some(&dir), "  ", orch(), None).await,
-                "send: message",
-            ),
-            (
-                followup_core_with_env("auth", Some(&dir), "", orch(), None).await,
-                "followup: message",
-            ),
-            (
-                answer_core_with_env("auth", Some(&dir), None, "", orch(), None).await,
-                "answer: message",
-            ),
-        ] {
-            let err = core.unwrap_err().to_string();
-            assert!(err.contains(expect), "{expect} <- {err}");
-        }
-        // Nothing was appended.
-        assert!(inbox_lines(&paths, &run_id).is_empty());
-    }
-
-    #[tokio::test]
-    async fn steering_a_terminal_run_refuses_with_the_resume_hint() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Settled, None);
-        for core in [
-            send_core_with_env("auth", Some(&dir), "m", orch(), None).await,
-            followup_core_with_env("auth", Some(&dir), "m", orch(), None).await,
-        ] {
-            let result = core.unwrap();
-            assert_eq!(result.code, ExitCode::Error);
-            let err = result.err.join("\n");
-            assert!(err.contains("is settled — steering refused"), "{err}");
-            assert!(
-                err.contains("pilotfish spawn auth-2 --session"),
-                "carries the copy-pasteable resume command: {err}"
+    async fn steer_envelopes() {
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            let result = send_core_with_env("auth", Some(&dir), "use tabs", orch(), None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert_eq!(result.out, vec!["steer queued for auth"]);
+            let envelopes = inbox_lines(&paths, &run_id);
+            assert_eq!(envelopes.len(), 1);
+            assert_eq!(envelopes[0].from, orch());
+            assert_eq!(envelopes[0].to, Party::worker(run_uuid(&paths, &run_id)));
+            assert_eq!(envelopes[0].decode(), Some(Decoded::Steer("use tabs")));
+            assert_eq!(
+                result.data,
+                ControlData {
+                    name: "auth".into(),
+                    kind: "steer".into(),
+                    question_id: None,
+                }
             );
         }
-        let stop = stop_core_with_env("auth", Some(&dir), orch(), None)
-            .await
-            .unwrap();
-        assert_eq!(stop.code, ExitCode::Error);
-        assert!(stop.err[0].contains("nothing to stop"), "{}", stop.err[0]);
-        let answer = answer_core_with_env("auth", Some(&dir), None, "x", orch(), None)
-            .await
-            .unwrap();
-        assert!(answer.err[0].contains("nothing is waiting for an answer"));
-        // Nothing was written.
-        assert!(inbox_lines(&paths, &run_id).is_empty());
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            followup_core_with_env("auth", Some(&dir), "then fmt", orch(), None)
+                .await
+                .unwrap();
+            stop_core_with_env("auth", Some(&dir), Party::Console, None)
+                .await
+                .unwrap();
+            let envelopes = inbox_lines(&paths, &run_id);
+            assert_eq!(envelopes.len(), 2);
+            assert_eq!(envelopes[0].kind, "follow_up");
+            assert_eq!(envelopes[1].kind, "abort", "stop appends an abort envelope");
+            // Provenance is threaded honestly.
+            assert_eq!(envelopes[0].from, orch());
+            assert_eq!(envelopes[1].from, Party::Console);
+            let payload = &envelopes[1].payload;
+            assert!(
+                payload.as_object().is_some_and(serde_json::Map::is_empty),
+                "abort carries exactly {{}}: {payload}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn answer_needs_a_question_dialog_or_explicit_id() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        let refused = answer_core_with_env("auth", Some(&dir), None, "argon2", orch(), None)
-            .await
-            .unwrap();
-        assert_eq!(refused.code, ExitCode::Error);
-        assert!(
-            refused.err[0].contains("no pending question — use send"),
-            "{}",
-            refused.err[0]
-        );
-        assert!(inbox_lines(&paths, &run_id).is_empty());
+    async fn steer_refusals() {
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            for (core, expect) in [
+                (
+                    send_core_with_env("auth", Some(&dir), "  ", orch(), None).await,
+                    "send: message",
+                ),
+                (
+                    followup_core_with_env("auth", Some(&dir), "", orch(), None).await,
+                    "followup: message",
+                ),
+                (
+                    answer_core_with_env("auth", Some(&dir), None, "", orch(), None).await,
+                    "answer: message",
+                ),
+            ] {
+                let err = core.unwrap_err().to_string();
+                assert!(err.contains(expect), "{expect} <- {err}");
+            }
+            // Nothing was appended.
+            assert!(inbox_lines(&paths, &run_id).is_empty());
+        }
+        {
+            let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Settled, None);
+            for core in [
+                send_core_with_env("auth", Some(&dir), "m", orch(), None).await,
+                followup_core_with_env("auth", Some(&dir), "m", orch(), None).await,
+            ] {
+                let result = core.unwrap();
+                assert_eq!(result.code, ExitCode::Error);
+                let err = result.err.join("\n");
+                assert!(err.contains("is settled — steering refused"), "{err}");
+                assert!(
+                    err.contains("pilotfish spawn auth-2 --session"),
+                    "carries the copy-pasteable resume command: {err}"
+                );
+            }
+            let stop = stop_core_with_env("auth", Some(&dir), orch(), None)
+                .await
+                .unwrap();
+            assert_eq!(stop.code, ExitCode::Error);
+            assert!(stop.err[0].contains("nothing to stop"), "{}", stop.err[0]);
+            let answer = answer_core_with_env("auth", Some(&dir), None, "x", orch(), None)
+                .await
+                .unwrap();
+            assert!(answer.err[0].contains("nothing is waiting for an answer"));
+            // Nothing was written.
+            assert!(inbox_lines(&paths, &run_id).is_empty());
+        }
+        {
+            let dir = tmp_dir("pilotfish-steer-none-");
+            let err = send_core_with_env("ghost", Some(&dir), "m", orch(), None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("No run found"), "{err}");
+            let err = send_core_with_env("  ", Some(&dir), "m", orch(), None)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert_eq!(err, "<name> required");
+        }
     }
 
     #[tokio::test]
-    async fn answer_targets_the_pending_question_by_default() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        let run_dir = paths.run_dir(&run_id);
-        let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
-        state.pending_question = Some(PendingQuestion {
-            id: "m_q1".into(),
-            question: "which fixture?".into(),
-            options: None,
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        crate::fleet::run::save_state(&run_dir, &state).unwrap();
+    async fn answer_targeting() {
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            let refused = answer_core_with_env("auth", Some(&dir), None, "argon2", orch(), None)
+                .await
+                .unwrap();
+            assert_eq!(refused.code, ExitCode::Error);
+            assert!(
+                refused.err[0].contains("no pending question — use send"),
+                "{}",
+                refused.err[0]
+            );
+            assert!(inbox_lines(&paths, &run_id).is_empty());
+        }
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            let run_dir = paths.run_dir(&run_id);
+            let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
+            state.pending_question = Some(PendingQuestion {
+                id: "m_q1".into(),
+                question: "which fixture?".into(),
+                options: None,
+                context: None,
+                asked_at: crate::util::now_iso(),
+            });
+            crate::fleet::run::save_state(&run_dir, &state).unwrap();
 
-        let result = answer_core_with_env("auth", Some(&dir), None, "argon2", Party::Console, None)
-            .await
-            .unwrap();
-        assert_eq!(result.code, ExitCode::Ok);
-        assert_eq!(result.out, vec!["answer queued for auth (question m_q1)"]);
-        assert_eq!(result.data.question_id.as_deref(), Some("m_q1"));
-        let envelopes = inbox_lines(&paths, &run_id);
-        assert_eq!(envelopes.len(), 1);
-        assert_eq!(envelopes[0].from, Party::Console);
-        assert_eq!(
-            envelopes[0].decode(),
-            Some(Decoded::Answer {
-                message: Some("argon2"),
-                question_id: Some("m_q1")
-            })
-        );
+            let result =
+                answer_core_with_env("auth", Some(&dir), None, "argon2", Party::Console, None)
+                    .await
+                    .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            assert_eq!(result.out, vec!["answer queued for auth (question m_q1)"]);
+            assert_eq!(result.data.question_id.as_deref(), Some("m_q1"));
+            let envelopes = inbox_lines(&paths, &run_id);
+            assert_eq!(envelopes.len(), 1);
+            assert_eq!(envelopes[0].from, Party::Console);
+            assert_eq!(
+                envelopes[0].decode(),
+                Some(Decoded::Answer {
+                    message: Some("argon2"),
+                    question_id: Some("m_q1")
+                })
+            );
+        }
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
+            let run_dir = paths.run_dir(&run_id);
+            let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
+            state.pending_dialog = Some(PendingDialog {
+                id: "ui-9".into(),
+                method: "confirm".into(),
+                question: "overwrite?".into(),
+                options: None,
+                context: None,
+                asked_at: crate::util::now_iso(),
+            });
+            crate::fleet::run::save_state(&run_dir, &state).unwrap();
+
+            let result = answer_core_with_env("auth", Some(&dir), None, "yes", orch(), None)
+                .await
+                .unwrap();
+            assert_eq!(result.data.question_id.as_deref(), Some("ui-9"));
+            let envelopes = inbox_lines(&paths, &run_id);
+            assert_eq!(
+                envelopes[0].decode(),
+                Some(Decoded::Answer {
+                    message: Some("yes"),
+                    question_id: Some("ui-9")
+                })
+            );
+
+            // An explicit id wins even when it is not the pending one.
+            let result =
+                answer_core_with_env("auth", Some(&dir), Some("q_other"), "no", orch(), None)
+                    .await
+                    .unwrap();
+            assert_eq!(result.data.question_id.as_deref(), Some("q_other"));
+            let envelopes = inbox_lines(&paths, &run_id);
+            assert_eq!(envelopes.len(), 2);
+            assert_eq!(
+                envelopes[1].decode(),
+                Some(Decoded::Answer {
+                    message: Some("no"),
+                    question_id: Some("q_other")
+                })
+            );
+        }
     }
 
     #[tokio::test]
-    async fn answer_falls_back_to_the_pending_dialog_and_explicit_ids_win() {
-        let (dir, paths, run_id) = fleet_with_run("pilotfish-steer-", RunStatus::Running, Some(1));
-        let run_dir = paths.run_dir(&run_id);
-        let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
-        state.pending_dialog = Some(PendingDialog {
-            id: "ui-9".into(),
-            method: "confirm".into(),
-            question: "overwrite?".into(),
-            options: None,
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        crate::fleet::run::save_state(&run_dir, &state).unwrap();
-
-        let result = answer_core_with_env("auth", Some(&dir), None, "yes", orch(), None)
-            .await
-            .unwrap();
-        assert_eq!(result.data.question_id.as_deref(), Some("ui-9"));
-        let envelopes = inbox_lines(&paths, &run_id);
-        assert_eq!(
-            envelopes[0].decode(),
-            Some(Decoded::Answer {
-                message: Some("yes"),
-                question_id: Some("ui-9")
-            })
-        );
-
-        // An explicit id wins even when it is not the pending one.
-        let result = answer_core_with_env("auth", Some(&dir), Some("q_other"), "no", orch(), None)
-            .await
-            .unwrap();
-        assert_eq!(result.data.question_id.as_deref(), Some("q_other"));
-        let envelopes = inbox_lines(&paths, &run_id);
-        assert_eq!(envelopes.len(), 2);
-        assert_eq!(
-            envelopes[1].decode(),
-            Some(Decoded::Answer {
-                message: Some("no"),
-                question_id: Some("q_other")
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn unknown_runs_and_empty_names_are_errors() {
-        let dir = tmp_dir("pilotfish-steer-none-");
-        let err = send_core_with_env("ghost", Some(&dir), "m", orch(), None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("No run found"), "{err}");
-        let err = send_core_with_env("  ", Some(&dir), "m", orch(), None)
-            .await
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "<name> required");
-    }
-
-    #[tokio::test]
-    async fn the_cli_attributes_steering_to_the_fleets_acting_session() {
+    async fn cli_steer_provenance() {
         let dir = tmp_dir("pilotfish-steer-session-");
         let paths = FleetPaths::new(dir.join(crate::paths::STATE_DIR_NAME));
         let run_id = "auth-20260828141530";

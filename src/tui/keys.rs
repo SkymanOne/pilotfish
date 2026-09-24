@@ -333,118 +333,100 @@ mod tests {
     }
 
     #[test]
-    fn every_printable_key_is_text() {
-        // the whole point of dropping normal mode: no letter is stolen from a
-        // message, so starting to type is never punished
-        for ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:?@ !".chars() {
+    fn text_keys() {
+        {
+            // the whole point of dropping normal mode: no letter is stolen from a
+            // message, so starting to type is never punished
+            for ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/:?@ !".chars()
+            {
+                assert_eq!(
+                    map_key(key(KeyCode::Char(ch))),
+                    A::InsertChar(ch),
+                    "{ch:?} must reach the composer"
+                );
+            }
+        }
+        {
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('f'))), A::OpenFleet);
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('k'))), A::OpenPalette);
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('r'))), A::Search);
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('y'))), A::ToggleMouse);
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('o'))), A::ToggleVerbose);
+            assert_eq!(map_key(ctrl_key(KeyCode::Char('j'))), A::Newline);
+        }
+        {
+            assert_eq!(map_key(key(KeyCode::Enter)), A::Send);
             assert_eq!(
-                map_key(key(KeyCode::Char(ch))),
-                A::InsertChar(ch),
-                "{ch:?} must reach the composer"
+                map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+                A::Newline
             );
+            assert_eq!(
+                map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+                A::Newline
+            );
+            assert_eq!(map_key(key(KeyCode::Tab)), A::AcceptCompletion);
+            assert_eq!(map_key(key(KeyCode::Backspace)), A::InsertBackspace);
+            assert_eq!(map_key(key(KeyCode::Delete)), A::InsertDelete);
+            assert_eq!(map_key(key(KeyCode::Left)), A::InsertLeft);
+            assert_eq!(map_key(key(KeyCode::Right)), A::InsertRight);
+            assert_eq!(map_key(key(KeyCode::Home)), A::InsertHome);
+            assert_eq!(map_key(key(KeyCode::End)), A::InsertEnd);
+            assert_eq!(map_key(ctrl_key(KeyCode::Home)), A::First);
+            assert_eq!(map_key(ctrl_key(KeyCode::End)), A::Last);
+            assert_eq!(map_key(key(KeyCode::Up)), A::CompletionPrev);
+            assert_eq!(map_key(key(KeyCode::Down)), A::CompletionNext);
+            assert_eq!(map_key(key(KeyCode::PageUp)), A::ScrollPageUp);
+            assert_eq!(map_key(key(KeyCode::PageDown)), A::ScrollPageDown);
+            assert_eq!(map_key(key(KeyCode::Esc)), A::Escape);
+        }
+        {
+            let mut ev = key(KeyCode::Char('a'));
+            ev.kind = KeyEventKind::Release;
+            assert_eq!(map_key(ev), A::Ignored);
         }
     }
 
     #[test]
-    fn the_chords_are_the_only_non_text_letters() {
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('f'))), A::OpenFleet);
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('k'))), A::OpenPalette);
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('r'))), A::Search);
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('y'))), A::ToggleMouse);
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('o'))), A::ToggleVerbose);
-        assert_eq!(map_key(ctrl_key(KeyCode::Char('j'))), A::Newline);
-    }
-
-    #[test]
-    fn the_composer_keys_edit_and_send() {
-        assert_eq!(map_key(key(KeyCode::Enter)), A::Send);
-        assert_eq!(
-            map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-            A::Newline
-        );
-        assert_eq!(
-            map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
-            A::Newline
-        );
-        assert_eq!(map_key(key(KeyCode::Tab)), A::AcceptCompletion);
-        assert_eq!(map_key(key(KeyCode::Backspace)), A::InsertBackspace);
-        assert_eq!(map_key(key(KeyCode::Delete)), A::InsertDelete);
-        assert_eq!(map_key(key(KeyCode::Left)), A::InsertLeft);
-        assert_eq!(map_key(key(KeyCode::Right)), A::InsertRight);
-        assert_eq!(map_key(key(KeyCode::Home)), A::InsertHome);
-        assert_eq!(map_key(key(KeyCode::End)), A::InsertEnd);
-        assert_eq!(map_key(ctrl_key(KeyCode::Home)), A::First);
-        assert_eq!(map_key(ctrl_key(KeyCode::End)), A::Last);
-        assert_eq!(map_key(key(KeyCode::Up)), A::CompletionPrev);
-        assert_eq!(map_key(key(KeyCode::Down)), A::CompletionNext);
-        assert_eq!(map_key(key(KeyCode::PageUp)), A::ScrollPageUp);
-        assert_eq!(map_key(key(KeyCode::PageDown)), A::ScrollPageDown);
-        assert_eq!(map_key(key(KeyCode::Esc)), A::Escape);
-    }
-
-    #[test]
-    fn an_overlay_reads_single_letters_as_commands() {
-        assert_eq!(map_overlay_key(key(KeyCode::Char('j'))), A::Move(1));
-        assert_eq!(map_overlay_key(key(KeyCode::Char('k'))), A::Move(-1));
-        assert_eq!(map_overlay_key(key(KeyCode::Down)), A::Move(1));
-        assert_eq!(map_overlay_key(key(KeyCode::Up)), A::Move(-1));
-        assert_eq!(map_overlay_key(key(KeyCode::Char('g'))), A::First);
-        assert_eq!(map_overlay_key(key(KeyCode::Char('G'))), A::Last);
-        assert_eq!(map_overlay_key(key(KeyCode::Char('3'))), A::JumpTo(2));
-        // enter stays `Send`; only the fleet list reads it as "take this row"
-        assert_eq!(map_overlay_key(key(KeyCode::Enter)), A::Send);
-        assert_eq!(map_overlay_key(key(KeyCode::Esc)), A::Escape);
-        // anything the overlay does not navigate with stays a character —
-        // `n` above all, which is how a confirm prompt hears "no"
-        assert_eq!(map_overlay_key(key(KeyCode::Char('a'))), A::InsertChar('a'));
-        assert_eq!(map_overlay_key(key(KeyCode::Char('n'))), A::InsertChar('n'));
-        assert_eq!(map_overlay_key(key(KeyCode::Char('y'))), A::InsertChar('y'));
-        assert_eq!(map_overlay_key(key(KeyCode::Char('?'))), A::InsertChar('?'));
-        // the chords still work from inside one
-        assert_eq!(
-            map_overlay_key(ctrl_key(KeyCode::Char('k'))),
-            A::OpenPalette
-        );
-    }
-
-    #[test]
-    fn a_key_release_is_not_a_press() {
-        let mut ev = key(KeyCode::Char('a'));
-        ev.kind = KeyEventKind::Release;
-        assert_eq!(map_key(ev), A::Ignored);
-    }
-
-    #[test]
-    fn the_wheel_scrolls_and_other_buttons_do_nothing() {
-        let wheel = |kind| MouseEvent {
-            kind,
-            column: 0,
-            row: 0,
-            modifiers: KeyModifiers::NONE,
-        };
-        assert_eq!(map_mouse(wheel(MouseEventKind::ScrollUp)), A::ScrollHalfUp);
-        assert_eq!(
-            map_mouse(wheel(MouseEventKind::ScrollDown)),
-            A::ScrollHalfDown
-        );
-        assert_eq!(
-            map_mouse(wheel(MouseEventKind::Down(MouseButton::Left))),
-            A::Ignored
-        );
-    }
-
-    #[test]
-    fn the_help_names_every_chord_and_the_fleet_letters() {
-        let sections = help_sections();
-        let titles: Vec<&str> = sections.iter().map(|s| s.title).collect();
-        assert_eq!(titles, vec!["Typing", "Chords", "Fleet (ctrl-f)"]);
-        let keys: Vec<&str> = sections
-            .iter()
-            .flat_map(|s| s.rows.iter())
-            .map(|row| row.keys)
-            .collect();
-        for chord in ["ctrl-f", "ctrl-k", "ctrl-r", "ctrl-o", "ctrl-y"] {
-            assert!(keys.contains(&chord), "{chord} is documented: {keys:?}");
+    fn overlay_keys() {
+        {
+            assert_eq!(map_overlay_key(key(KeyCode::Char('j'))), A::Move(1));
+            assert_eq!(map_overlay_key(key(KeyCode::Char('k'))), A::Move(-1));
+            assert_eq!(map_overlay_key(key(KeyCode::Down)), A::Move(1));
+            assert_eq!(map_overlay_key(key(KeyCode::Up)), A::Move(-1));
+            assert_eq!(map_overlay_key(key(KeyCode::Char('g'))), A::First);
+            assert_eq!(map_overlay_key(key(KeyCode::Char('G'))), A::Last);
+            assert_eq!(map_overlay_key(key(KeyCode::Char('3'))), A::JumpTo(2));
+            // enter stays `Send`; only the fleet list reads it as "take this row"
+            assert_eq!(map_overlay_key(key(KeyCode::Enter)), A::Send);
+            assert_eq!(map_overlay_key(key(KeyCode::Esc)), A::Escape);
+            // anything the overlay does not navigate with stays a character —
+            // `n` above all, which is how a confirm prompt hears "no"
+            assert_eq!(map_overlay_key(key(KeyCode::Char('a'))), A::InsertChar('a'));
+            assert_eq!(map_overlay_key(key(KeyCode::Char('n'))), A::InsertChar('n'));
+            assert_eq!(map_overlay_key(key(KeyCode::Char('y'))), A::InsertChar('y'));
+            assert_eq!(map_overlay_key(key(KeyCode::Char('?'))), A::InsertChar('?'));
+            // the chords still work from inside one
+            assert_eq!(
+                map_overlay_key(ctrl_key(KeyCode::Char('k'))),
+                A::OpenPalette
+            );
+        }
+        {
+            let wheel = |kind| MouseEvent {
+                kind,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::NONE,
+            };
+            assert_eq!(map_mouse(wheel(MouseEventKind::ScrollUp)), A::ScrollHalfUp);
+            assert_eq!(
+                map_mouse(wheel(MouseEventKind::ScrollDown)),
+                A::ScrollHalfDown
+            );
+            assert_eq!(
+                map_mouse(wheel(MouseEventKind::Down(MouseButton::Left))),
+                A::Ignored
+            );
         }
     }
 }

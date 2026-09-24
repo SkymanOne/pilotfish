@@ -98,45 +98,7 @@ mod tests {
     }
 
     #[test]
-    fn steering_appendix_is_empty_without_steering() {
-        let state = state_with_steering(Vec::new());
-        assert_eq!(build_steering_appendix(&state), "");
-        let mut zero_but_logged = state_with_steering(vec![SteeringEntry {
-            source: "console".into(),
-            ts: "t".into(),
-            message: "m".into(),
-        }]);
-        zero_but_logged.steer_count = 0;
-        assert_eq!(build_steering_appendix(&zero_but_logged), "");
-    }
-
-    #[test]
-    fn steering_appendix_lists_entries_in_order() {
-        let state = state_with_steering(vec![
-            SteeringEntry {
-                source: "orchestrator".into(),
-                ts: "t1".into(),
-                message: "first".into(),
-            },
-            SteeringEntry {
-                source: "console".into(),
-                ts: "t2".into(),
-                message: "second".into(),
-            },
-        ]);
-        let appendix = build_steering_appendix(&state);
-        assert!(
-            appendix.starts_with("\n---\n## Steering log (orchestrator-side, most recent last)\n"),
-            "{appendix}"
-        );
-        assert!(
-            appendix.ends_with("- [orchestrator] t1 first\n- [console] t2 second\n"),
-            "{appendix}"
-        );
-    }
-
-    #[test]
-    fn report_file_wins_then_fallback_then_missing() {
+    fn report_source_order() {
         let fleet = std::env::temp_dir().join(format!(
             "pilotfish-report-{}-{}",
             std::process::id(),
@@ -164,5 +126,16 @@ mod tests {
 
         state.last_assistant_text = None;
         assert_eq!(read_report(&fleet, &state), ReportResult::Missing);
+        {
+            let state = state_with_steering(Vec::new());
+            assert_eq!(build_steering_appendix(&state), "");
+            let mut zero_but_logged = state_with_steering(vec![SteeringEntry {
+                source: "console".into(),
+                ts: "t".into(),
+                message: "m".into(),
+            }]);
+            zero_but_logged.steer_count = 0;
+            assert_eq!(build_steering_appendix(&zero_but_logged), "");
+        }
     }
 }

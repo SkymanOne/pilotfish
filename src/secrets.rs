@@ -140,72 +140,70 @@ mod tests {
     const KEY: &str = "ts_live_0123456789abcdef";
 
     #[test]
-    fn a_secret_never_prints_and_shows_only_its_last_four() {
-        let key = Secret::new(KEY);
-        let printed = format!("{key:?}");
-        assert!(!printed.contains("0123456789"), "{printed}");
-        assert_eq!(key.masked(), "••••cdef");
-        assert_eq!(printed, "Secret(••••cdef)");
-        // a short key shows none of itself
-        assert_eq!(Secret::new("abc123").masked(), "••••");
-    }
-
-    #[test]
-    fn a_key_typed_into_a_masked_field_never_shows_either() {
-        let mut typed = Secret::default();
-        for ch in "ts_live_".chars() {
-            typed.push(ch);
+    fn secret_masking() {
+        {
+            let key = Secret::new(KEY);
+            let printed = format!("{key:?}");
+            assert!(!printed.contains("0123456789"), "{printed}");
+            assert_eq!(key.masked(), "••••cdef");
+            assert_eq!(printed, "Secret(••••cdef)");
+            // a short key shows none of itself
+            assert_eq!(Secret::new("abc123").masked(), "••••");
         }
-        typed.push_str("0123456789abcdef\n");
-        typed.pop();
-        typed.push('f');
-        assert_eq!(
-            typed.len(),
-            24,
-            "one dot per character is all it gives away"
-        );
-        assert_eq!(typed.finished().expose(), "ts_live_0123456789abcdef");
-        assert!(!format!("{typed:?}").contains("live"));
+        {
+            let mut typed = Secret::default();
+            for ch in "ts_live_".chars() {
+                typed.push(ch);
+            }
+            typed.push_str("0123456789abcdef\n");
+            typed.pop();
+            typed.push('f');
+            assert_eq!(
+                typed.len(),
+                24,
+                "one dot per character is all it gives away"
+            );
+            assert_eq!(typed.finished().expose(), "ts_live_0123456789abcdef");
+            assert!(!format!("{typed:?}").contains("live"));
+        }
+        {
+            assert_eq!(Secret::new(&format!("  {KEY}\n")).expose(), KEY);
+            assert!(Secret::new(" \n ").is_empty());
+        }
     }
 
     #[test]
-    fn a_pasted_key_loses_its_surrounding_whitespace() {
-        assert_eq!(Secret::new(&format!("  {KEY}\n")).expose(), KEY);
-        assert!(Secret::new(" \n ").is_empty());
-    }
+    fn key_resolution() {
+        {
+            let config = RoutingConfig {
+                api_key: Some(Secret::new("configured-key-00000000")),
+                ..RoutingConfig::default()
+            };
+            let path = PathBuf::from("/home/me/.pilotfish/config.toml");
+            let (key, source) = typesafe_key_with(Some(KEY), &config, Some(path.clone())).unwrap();
+            assert_eq!(key.expose(), KEY);
+            assert_eq!(source, KeySource::Env);
 
-    #[test]
-    fn the_environment_wins_over_the_config_file() {
-        let config = RoutingConfig {
-            api_key: Some(Secret::new("configured-key-00000000")),
-            ..RoutingConfig::default()
-        };
-        let path = PathBuf::from("/home/me/.pilotfish/config.toml");
-        let (key, source) = typesafe_key_with(Some(KEY), &config, Some(path.clone())).unwrap();
-        assert_eq!(key.expose(), KEY);
-        assert_eq!(source, KeySource::Env);
+            // a blank variable is no variable
+            let (key, source) = typesafe_key_with(Some("  "), &config, Some(path.clone())).unwrap();
+            assert_eq!(source, KeySource::Config(path));
+            assert_eq!(key.expose(), "configured-key-00000000");
 
-        // a blank variable is no variable
-        let (key, source) = typesafe_key_with(Some("  "), &config, Some(path.clone())).unwrap();
-        assert_eq!(source, KeySource::Config(path));
-        assert_eq!(key.expose(), "configured-key-00000000");
-
-        assert_eq!(
-            typesafe_key_with(None, &RoutingConfig::default(), None),
-            None,
-            "neither set is no key"
-        );
-    }
-
-    #[test]
-    fn a_configured_key_never_prints_with_its_config() {
-        let config: RoutingConfig = toml::from_str(&format!("api_key = \"  {KEY} \"")).unwrap();
-        assert_eq!(
-            config.api_key.as_ref().map(Secret::expose),
-            Some(KEY),
-            "trimmed"
-        );
-        let printed = format!("{config:?}");
-        assert!(!printed.contains("0123456789"), "{printed}");
+            assert_eq!(
+                typesafe_key_with(None, &RoutingConfig::default(), None),
+                None,
+                "neither set is no key"
+            );
+        }
+        {
+            let config: RoutingConfig = toml::from_str(&format!("api_key = \"  {KEY} \"")).unwrap();
+            assert_eq!(
+                config.api_key.as_ref().map(Secret::expose),
+                Some(KEY),
+                "trimmed"
+            );
+            let printed = format!("{config:?}");
+            assert!(!printed.contains("0123456789"), "{printed}");
+        }
     }
 }

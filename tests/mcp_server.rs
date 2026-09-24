@@ -288,7 +288,7 @@ async fn shutdown(client: Client, server: tokio::task::JoinHandle<()>) {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn lists_exactly_the_fleet_tools_with_their_schemas() {
+async fn lists_fleet_tools() {
     let fleet = Fleet::new("mcp-list-");
     let (mut client, server) = Client::connect(&fleet).await;
     let tools = client.list_tools().await;
@@ -327,289 +327,272 @@ async fn lists_exactly_the_fleet_tools_with_their_schemas() {
 }
 
 #[tokio::test]
-async fn status_on_an_empty_fleet_renders_the_placeholder_with_exit_0() {
-    let fleet = Fleet::new("mcp-empty-");
-    let (mut client, server) = Client::connect(&fleet).await;
-    let status = client.call_tool("fleet_status", json!({})).await;
-    assert_eq!(status["isError"], json!(false), "{status}");
-    assert_eq!(text_of(&status), "(no runs)\nexit: 0");
-    assert_eq!(status["structuredContent"]["runs"], json!([]));
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn an_unknown_run_is_a_tool_error_with_exit_1() {
-    let fleet = Fleet::new("mcp-ghost-");
-    let (mut client, server) = Client::connect(&fleet).await;
-    let report = client
-        .call_tool("fleet_report", json!({"name": "nope"}))
-        .await;
-    assert_eq!(report["isError"], json!(true), "{report}");
-    let text = text_of(&report);
-    assert!(
-        text.contains("No run found matching \"nope\"") && text.ends_with("exit: 1"),
-        "{text}"
-    );
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn bad_arguments_are_protocol_errors_not_tool_results() {
-    let fleet = Fleet::new("mcp-args-");
-    let (mut client, server) = Client::connect(&fleet).await;
-    // Missing required argument.
-    let error = client
-        .call_tool_error("fleet_spawn", json!({"name": "x"}))
-        .await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    // Empty string where min(1) applies.
-    let error = client
-        .call_tool_error("fleet_send", json!({"name": "w", "message": ""}))
-        .await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    // Wrong type.
-    let error = client
-        .call_tool_error("fleet_wait", json!({"name": "w", "timeoutSec": "soon"}))
-        .await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    // timeoutSec above the 600 cap.
-    let error = client
-        .call_tool_error("fleet_wait", json!({"name": "w", "timeoutSec": 601}))
-        .await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn an_unknown_tool_is_a_protocol_error() {
-    let fleet = Fleet::new("mcp-unknown-");
-    let (mut client, server) = Client::connect(&fleet).await;
-    let error = client.call_tool_error("fleet_teleport", json!({})).await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    assert!(
-        error["message"].as_str().unwrap().contains("Unknown tool"),
-        "{error}"
-    );
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn spawn_refuses_an_empty_brief_before_touching_the_fleet() {
-    let fleet = Fleet::new("mcp-brief-");
-    let (mut client, server) = Client::connect(&fleet).await;
-    // An empty string fails the min(1) schema: a protocol error.
-    let error = client
-        .call_tool_error("fleet_spawn", json!({"name": "x", "brief": ""}))
-        .await;
-    assert_eq!(error["code"], json!(-32602), "{error}");
-    // A whitespace brief passes the schema and is refused by the core: a
-    // tool error carrying exit 1.
-    let refused = client
-        .call_tool("fleet_spawn", json!({"name": "x", "brief": "  "}))
-        .await;
-    assert_eq!(refused["isError"], json!(true), "{refused}");
-    assert!(
-        text_of(&refused).contains("task brief required"),
-        "{refused}"
-    );
-    assert!(text_of(&refused).ends_with("exit: 1"), "{refused}");
-    // Nothing was created.
-    assert!(
-        run::list_runs(fleet.paths.root()).is_empty(),
-        "the refused spawn created nothing"
-    );
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn wait_times_out_with_exit_3_and_ends_badly_with_exit_4() {
-    let fleet = Fleet::new("mcp-wait-");
-    // A live pid keeps the run non-terminal until the deadline lapses.
-    fleet.write_state_with(|state| {
-        state.status = RunStatus::Running;
-        state.pid = Some(1);
-    });
-    let (mut client, server) = Client::connect(&fleet).await;
-    let timed_out = client
-        .call_tool("fleet_wait", json!({"name": "w", "timeoutSec": 1}))
-        .await;
-    assert_eq!(timed_out["isError"], json!(true), "{timed_out}");
-    assert!(
-        text_of(&timed_out).contains("timed out after 1s"),
-        "{timed_out}"
-    );
-    assert!(text_of(&timed_out).ends_with("exit: 3"), "{timed_out}");
-
-    let stopped = Fleet::new("mcp-wait2-");
-    stopped.write_state(RunStatus::Stopped);
-    let (mut client2, server2) = Client::connect(&stopped).await;
-    let ended = client2.call_tool("fleet_wait", json!({"name": "w"})).await;
-    assert_eq!(ended["isError"], json!(true), "{ended}");
-    assert_eq!(text_of(&ended), "w stopped\nexit: 4");
-    shutdown(client, server).await;
-    shutdown(client2, server2).await;
-}
-
-#[tokio::test]
-async fn wait_on_a_settled_run_is_exit_0() {
-    let fleet = Fleet::new("mcp-wait3-");
-    fleet.write_state(RunStatus::Settled);
-    let (mut client, server) = Client::connect(&fleet).await;
-    let settled = client.call_tool("fleet_wait", json!({"name": "w"})).await;
-    assert_eq!(settled["isError"], json!(false), "{settled}");
-    assert_eq!(text_of(&settled), "w settled\nexit: 0");
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn answer_resolves_the_pending_question_with_orchestrator_provenance() {
-    let fleet = Fleet::new("mcp-answer-");
-    fleet.write_state_with(|state| {
-        state.status = RunStatus::Running;
-        state.pid = Some(1);
-        state.pending_question = Some(PendingQuestion {
-            id: "m_q1".into(),
-            question: "which fixture?".into(),
-            options: None,
-            context: None,
-            asked_at: pilotfish::util::now_iso(),
+async fn status_and_wait_tools() {
+    {
+        let fleet = Fleet::new("mcp-empty-");
+        let (mut client, server) = Client::connect(&fleet).await;
+        let status = client.call_tool("fleet_status", json!({})).await;
+        assert_eq!(status["isError"], json!(false), "{status}");
+        assert_eq!(text_of(&status), "(no runs)\nexit: 0");
+        assert_eq!(status["structuredContent"]["runs"], json!([]));
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-wait-");
+        // A live pid keeps the run non-terminal until the deadline lapses.
+        fleet.write_state_with(|state| {
+            state.status = RunStatus::Running;
+            state.pid = Some(1);
         });
-    });
-    let (mut client, server) = Client::connect(&fleet).await;
+        let (mut client, server) = Client::connect(&fleet).await;
+        let timed_out = client
+            .call_tool("fleet_wait", json!({"name": "w", "timeoutSec": 1}))
+            .await;
+        assert_eq!(timed_out["isError"], json!(true), "{timed_out}");
+        assert!(
+            text_of(&timed_out).contains("timed out after 1s"),
+            "{timed_out}"
+        );
+        assert!(text_of(&timed_out).ends_with("exit: 3"), "{timed_out}");
 
-    let answered = client
-        .call_tool("fleet_answer", json!({"name": "w", "answer": "argon2"}))
-        .await;
-    assert_eq!(answered["isError"], json!(false), "{answered}");
-    assert_eq!(
-        text_of(&answered),
-        "answer queued for w (question m_q1)\nexit: 0"
-    );
-    let envelopes = fleet.inbox();
-    assert_eq!(envelopes.len(), 1);
-    assert_eq!(
-        envelopes[0].from,
-        Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION),
-        "honest provenance"
-    );
-    assert_eq!(
-        envelopes[0].decode(),
-        Some(Decoded::Answer {
-            message: Some("argon2"),
-            question_id: Some("m_q1")
-        })
-    );
-    shutdown(client, server).await;
+        let stopped = Fleet::new("mcp-wait2-");
+        stopped.write_state(RunStatus::Stopped);
+        let (mut client2, server2) = Client::connect(&stopped).await;
+        let ended = client2.call_tool("fleet_wait", json!({"name": "w"})).await;
+        assert_eq!(ended["isError"], json!(true), "{ended}");
+        assert_eq!(text_of(&ended), "w stopped\nexit: 4");
+        shutdown(client, server).await;
+        shutdown(client2, server2).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-wait3-");
+        fleet.write_state(RunStatus::Settled);
+        let (mut client, server) = Client::connect(&fleet).await;
+        let settled = client.call_tool("fleet_wait", json!({"name": "w"})).await;
+        assert_eq!(settled["isError"], json!(false), "{settled}");
+        assert_eq!(text_of(&settled), "w settled\nexit: 0");
+        shutdown(client, server).await;
+    }
 }
 
 #[tokio::test]
-async fn answer_with_nothing_pending_refuses_with_exit_1() {
-    let fleet = Fleet::new("mcp-answer2-");
-    fleet.write_state_with(|state| {
-        state.status = RunStatus::Running;
-        state.pid = Some(1);
-    });
-    let (mut client, server) = Client::connect(&fleet).await;
-    let refused = client
-        .call_tool("fleet_answer", json!({"name": "w", "answer": "x"}))
-        .await;
-    assert_eq!(refused["isError"], json!(true), "{refused}");
-    assert!(
-        text_of(&refused).contains("no pending question"),
-        "{refused}"
-    );
-    assert!(text_of(&refused).ends_with("exit: 1"), "{refused}");
-    shutdown(client, server).await;
+async fn error_kinds() {
+    {
+        let fleet = Fleet::new("mcp-ghost-");
+        let (mut client, server) = Client::connect(&fleet).await;
+        let report = client
+            .call_tool("fleet_report", json!({"name": "nope"}))
+            .await;
+        assert_eq!(report["isError"], json!(true), "{report}");
+        let text = text_of(&report);
+        assert!(
+            text.contains("No run found matching \"nope\"") && text.ends_with("exit: 1"),
+            "{text}"
+        );
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-args-");
+        let (mut client, server) = Client::connect(&fleet).await;
+        // Missing required argument.
+        let error = client
+            .call_tool_error("fleet_spawn", json!({"name": "x"}))
+            .await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        // Empty string where min(1) applies.
+        let error = client
+            .call_tool_error("fleet_send", json!({"name": "w", "message": ""}))
+            .await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        // Wrong type.
+        let error = client
+            .call_tool_error("fleet_wait", json!({"name": "w", "timeoutSec": "soon"}))
+            .await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        // timeoutSec above the 600 cap.
+        let error = client
+            .call_tool_error("fleet_wait", json!({"name": "w", "timeoutSec": 601}))
+            .await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-unknown-");
+        let (mut client, server) = Client::connect(&fleet).await;
+        let error = client.call_tool_error("fleet_teleport", json!({})).await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains("Unknown tool"),
+            "{error}"
+        );
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-brief-");
+        let (mut client, server) = Client::connect(&fleet).await;
+        // An empty string fails the min(1) schema: a protocol error.
+        let error = client
+            .call_tool_error("fleet_spawn", json!({"name": "x", "brief": ""}))
+            .await;
+        assert_eq!(error["code"], json!(-32602), "{error}");
+        // A whitespace brief passes the schema and is refused by the core: a
+        // tool error carrying exit 1.
+        let refused = client
+            .call_tool("fleet_spawn", json!({"name": "x", "brief": "  "}))
+            .await;
+        assert_eq!(refused["isError"], json!(true), "{refused}");
+        assert!(
+            text_of(&refused).contains("task brief required"),
+            "{refused}"
+        );
+        assert!(text_of(&refused).ends_with("exit: 1"), "{refused}");
+        // Nothing was created.
+        assert!(
+            run::list_runs(fleet.paths.root()).is_empty(),
+            "the refused spawn created nothing"
+        );
+        shutdown(client, server).await;
+    }
 }
 
 #[tokio::test]
-async fn answer_also_resolves_a_pending_pi_dialog() {
-    let fleet = Fleet::new("mcp-dialog-");
-    fleet.write_state_with(|state| {
-        state.status = RunStatus::Running;
-        state.pid = Some(1);
-        state.pending_dialog = Some(PendingDialog {
-            id: "ui-9".into(),
-            method: "confirm".into(),
-            question: "overwrite?".into(),
-            options: None,
-            context: None,
-            asked_at: pilotfish::util::now_iso(),
+async fn steering_tools() {
+    {
+        let fleet = Fleet::new("mcp-answer-");
+        fleet.write_state_with(|state| {
+            state.status = RunStatus::Running;
+            state.pid = Some(1);
+            state.pending_question = Some(PendingQuestion {
+                id: "m_q1".into(),
+                question: "which fixture?".into(),
+                options: None,
+                context: None,
+                asked_at: pilotfish::util::now_iso(),
+            });
         });
-    });
-    let (mut client, server) = Client::connect(&fleet).await;
-    let answered = client
-        .call_tool("fleet_answer", json!({"name": "w", "answer": "yes"}))
-        .await;
-    assert_eq!(answered["isError"], json!(false), "{answered}");
-    assert!(text_of(&answered).contains("(question ui-9)"), "{answered}");
-    let envelopes = fleet.inbox();
-    assert_eq!(
-        envelopes[0].decode(),
-        Some(Decoded::Answer {
-            message: Some("yes"),
-            question_id: Some("ui-9")
-        })
-    );
-    shutdown(client, server).await;
-}
+        let (mut client, server) = Client::connect(&fleet).await;
 
-#[tokio::test]
-async fn steering_a_terminal_run_refuses_with_the_resume_hint() {
-    let fleet = Fleet::new("mcp-steer-");
-    fleet.write_state(RunStatus::Settled);
-    let (mut client, server) = Client::connect(&fleet).await;
-    let send = client
-        .call_tool("fleet_send", json!({"name": "w", "message": "again"}))
-        .await;
-    assert_eq!(send["isError"], json!(true), "{send}");
-    let text = text_of(&send);
-    assert!(text.contains("is settled — steering refused"), "{text}");
-    assert!(text.contains("pilotfish spawn w-2 --session"), "{text}");
-    assert!(text.ends_with("exit: 1"), "{text}");
-    // A refused stop reads "nothing to stop" with the same exit code.
-    let stop = client.call_tool("fleet_stop", json!({"name": "w"})).await;
-    assert!(text_of(&stop).contains("nothing to stop"), "{stop}");
-    assert_eq!(stop["isError"], json!(true));
-    // Nothing reached the inbox.
-    assert!(
-        fleet.inbox().is_empty(),
-        "the refusals left the inbox untouched"
-    );
-    shutdown(client, server).await;
-}
-
-#[tokio::test]
-async fn merge_refuses_an_unsettled_run_with_exit_1() {
-    let fleet = Fleet::new("mcp-merge-");
-    fleet.write_state_with(|state| {
-        state.status = RunStatus::Running;
-        state.pid = Some(1);
-    });
-    let (mut client, server) = Client::connect(&fleet).await;
-    let merge = client.call_tool("fleet_merge", json!({"name": "w"})).await;
-    assert_eq!(merge["isError"], json!(true), "{merge}");
-    let text = text_of(&merge);
-    assert!(
-        text.contains("is running — only settled runs can be merged"),
-        "{text}"
-    );
-    assert!(text.ends_with("exit: 1"), "{text}");
-    shutdown(client, server).await;
-}
-
-/// A result carries the exit code the CLI would have, surfaced for the
-/// orchestrator: `wait` timeout is 3, a merge refusal is 1 — never a bare
-/// `isError` without the number.
-#[tokio::test]
-async fn every_tool_result_ends_with_its_exit_line() {
-    let fleet = Fleet::new("mcp-exits-");
-    fleet.write_state(RunStatus::Settled);
-    let (mut client, server) = Client::connect(&fleet).await;
-    let stop = client.call_tool("fleet_stop", json!({"name": "w"})).await;
-    assert!(text_of(&stop).ends_with("exit: 1"), "{stop}");
-    let report = client.call_tool("fleet_report", json!({"name": "w"})).await;
-    assert!(text_of(&report).ends_with("exit: 2"), "no report: {report}");
-    shutdown(client, server).await;
-    assert_eq!(ExitCode::MergeConflict as u8, 5, "the merge-conflict code");
+        let answered = client
+            .call_tool("fleet_answer", json!({"name": "w", "answer": "argon2"}))
+            .await;
+        assert_eq!(answered["isError"], json!(false), "{answered}");
+        assert_eq!(
+            text_of(&answered),
+            "answer queued for w (question m_q1)\nexit: 0"
+        );
+        let envelopes = fleet.inbox();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(
+            envelopes[0].from,
+            Party::Orchestrator(DEFAULT_ORCHESTRATOR_SESSION),
+            "honest provenance"
+        );
+        assert_eq!(
+            envelopes[0].decode(),
+            Some(Decoded::Answer {
+                message: Some("argon2"),
+                question_id: Some("m_q1")
+            })
+        );
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-answer2-");
+        fleet.write_state_with(|state| {
+            state.status = RunStatus::Running;
+            state.pid = Some(1);
+        });
+        let (mut client, server) = Client::connect(&fleet).await;
+        let refused = client
+            .call_tool("fleet_answer", json!({"name": "w", "answer": "x"}))
+            .await;
+        assert_eq!(refused["isError"], json!(true), "{refused}");
+        assert!(
+            text_of(&refused).contains("no pending question"),
+            "{refused}"
+        );
+        assert!(text_of(&refused).ends_with("exit: 1"), "{refused}");
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-dialog-");
+        fleet.write_state_with(|state| {
+            state.status = RunStatus::Running;
+            state.pid = Some(1);
+            state.pending_dialog = Some(PendingDialog {
+                id: "ui-9".into(),
+                method: "confirm".into(),
+                question: "overwrite?".into(),
+                options: None,
+                context: None,
+                asked_at: pilotfish::util::now_iso(),
+            });
+        });
+        let (mut client, server) = Client::connect(&fleet).await;
+        let answered = client
+            .call_tool("fleet_answer", json!({"name": "w", "answer": "yes"}))
+            .await;
+        assert_eq!(answered["isError"], json!(false), "{answered}");
+        assert!(text_of(&answered).contains("(question ui-9)"), "{answered}");
+        let envelopes = fleet.inbox();
+        assert_eq!(
+            envelopes[0].decode(),
+            Some(Decoded::Answer {
+                message: Some("yes"),
+                question_id: Some("ui-9")
+            })
+        );
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-steer-");
+        fleet.write_state(RunStatus::Settled);
+        let (mut client, server) = Client::connect(&fleet).await;
+        let send = client
+            .call_tool("fleet_send", json!({"name": "w", "message": "again"}))
+            .await;
+        assert_eq!(send["isError"], json!(true), "{send}");
+        let text = text_of(&send);
+        assert!(text.contains("is settled — steering refused"), "{text}");
+        assert!(text.contains("pilotfish spawn w-2 --session"), "{text}");
+        assert!(text.ends_with("exit: 1"), "{text}");
+        // A refused stop reads "nothing to stop" with the same exit code.
+        let stop = client.call_tool("fleet_stop", json!({"name": "w"})).await;
+        assert!(text_of(&stop).contains("nothing to stop"), "{stop}");
+        assert_eq!(stop["isError"], json!(true));
+        // Nothing reached the inbox.
+        assert!(
+            fleet.inbox().is_empty(),
+            "the refusals left the inbox untouched"
+        );
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-merge-");
+        fleet.write_state_with(|state| {
+            state.status = RunStatus::Running;
+            state.pid = Some(1);
+        });
+        let (mut client, server) = Client::connect(&fleet).await;
+        let merge = client.call_tool("fleet_merge", json!({"name": "w"})).await;
+        assert_eq!(merge["isError"], json!(true), "{merge}");
+        let text = text_of(&merge);
+        assert!(
+            text.contains("is running — only settled runs can be merged"),
+            "{text}"
+        );
+        assert!(text.ends_with("exit: 1"), "{text}");
+        shutdown(client, server).await;
+    }
+    {
+        let fleet = Fleet::new("mcp-exits-");
+        fleet.write_state(RunStatus::Settled);
+        let (mut client, server) = Client::connect(&fleet).await;
+        let stop = client.call_tool("fleet_stop", json!({"name": "w"})).await;
+        assert!(text_of(&stop).ends_with("exit: 1"), "{stop}");
+        let report = client.call_tool("fleet_report", json!({"name": "w"})).await;
+        assert!(text_of(&report).ends_with("exit: 2"), "no report: {report}");
+        shutdown(client, server).await;
+        assert_eq!(ExitCode::MergeConflict as u8, 5, "the merge-conflict code");
+    }
 }

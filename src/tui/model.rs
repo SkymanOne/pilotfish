@@ -325,267 +325,259 @@ mod tests {
     const DEAD_PID: i32 = i32::MAX;
 
     #[test]
-    fn orchestrator_row_reflects_activity_approvals_and_exit() {
-        let row = orchestrator_row(&OrchSummary::default());
-        assert_eq!(row.glyph, "○");
-        assert_eq!(row.detail, "idle");
-        assert!(!row.attention);
+    fn orchestrator_row_views() {
+        {
+            let row = orchestrator_row(&OrchSummary::default());
+            assert_eq!(row.glyph, "○");
+            assert_eq!(row.detail, "idle");
+            assert!(!row.attention);
 
-        let row = orchestrator_row(&OrchSummary {
-            turn_active: true,
-            ..OrchSummary::default()
-        });
-        assert_eq!(row.glyph, "●");
-        assert_eq!(row.detail, "working…");
+            let row = orchestrator_row(&OrchSummary {
+                turn_active: true,
+                ..OrchSummary::default()
+            });
+            assert_eq!(row.glyph, "●");
+            assert_eq!(row.detail, "working…");
 
-        let row = orchestrator_row(&OrchSummary {
-            pending_approvals: 1,
-            ..OrchSummary::default()
-        });
-        assert_eq!(row.glyph, "?");
-        assert_eq!(row.detail, "1 approval to approve");
-        assert!(row.attention);
+            let row = orchestrator_row(&OrchSummary {
+                pending_approvals: 1,
+                ..OrchSummary::default()
+            });
+            assert_eq!(row.glyph, "?");
+            assert_eq!(row.detail, "1 approval to approve");
+            assert!(row.attention);
 
-        let row = orchestrator_row(&OrchSummary {
-            pending_approvals: 3,
-            ..OrchSummary::default()
-        });
-        assert_eq!(row.detail, "3 approvals to approve");
+            let row = orchestrator_row(&OrchSummary {
+                pending_approvals: 3,
+                ..OrchSummary::default()
+            });
+            assert_eq!(row.detail, "3 approvals to approve");
 
-        let row = orchestrator_row(&OrchSummary {
-            exited: true,
-            ..OrchSummary::default()
-        });
-        assert_eq!(row.glyph, "!");
-        assert_eq!(row.detail, "exited");
-        assert!(row.attention);
+            let row = orchestrator_row(&OrchSummary {
+                exited: true,
+                ..OrchSummary::default()
+            });
+            assert_eq!(row.glyph, "!");
+            assert_eq!(row.detail, "exited");
+            assert!(row.attention);
+        }
+        {
+            let uuid = uuid::Uuid::new_v4();
+            let row = orchestrator_row(&OrchSummary {
+                session_uuid: uuid,
+                session_name: "add-auth".into(),
+                ..OrchSummary::default()
+            });
+            assert_eq!(row.name, "add-auth");
+            assert_eq!(row.target, SessionTarget::Orchestrator(uuid));
+            assert_eq!(row.target.key(), "orchestrator");
+            // the legacy default session keeps the old spelling
+            let row = orchestrator_row(&OrchSummary::default());
+            assert_eq!(row.name, "orchestrator");
+            assert_eq!(
+                row.target,
+                SessionTarget::Orchestrator(crate::util::nil_uuid())
+            );
+        }
+        {
+            assert_eq!(session_label(None), "orchestrator");
+            assert_eq!(session_label(Some("db")), "orchestrator · db");
+            assert_eq!(
+                session_label(Some("   ")),
+                "orchestrator",
+                "a blank alias is no alias"
+            );
+        }
+        {
+            let uuid = uuid::Uuid::new_v4();
+            assert_eq!(session_display_name(Some("db"), uuid), "db");
+            assert_eq!(
+                session_display_name(None, uuid),
+                crate::util::short_uuid(&uuid),
+                "an alias-less session is shown by its short uuid until one appears"
+            );
+            assert_eq!(
+                session_display_name(None, crate::util::nil_uuid()),
+                "orchestrator"
+            );
+        }
     }
 
     #[test]
-    fn the_orchestrator_row_uses_the_session_name_and_uuid() {
-        let uuid = uuid::Uuid::new_v4();
-        let row = orchestrator_row(&OrchSummary {
-            session_uuid: uuid,
-            session_name: "add-auth".into(),
-            ..OrchSummary::default()
-        });
-        assert_eq!(row.name, "add-auth");
-        assert_eq!(row.target, SessionTarget::Orchestrator(uuid));
-        assert_eq!(row.target.key(), "orchestrator");
-        // the legacy default session keeps the old spelling
-        let row = orchestrator_row(&OrchSummary::default());
-        assert_eq!(row.name, "orchestrator");
-        assert_eq!(
-            row.target,
-            SessionTarget::Orchestrator(crate::util::nil_uuid())
-        );
+    fn worker_rows() {
+        {
+            let mut running = state("add-auth", "add-auth-20260829120000");
+            running.status = crate::fleet::run::RunStatus::Running;
+            running.pid = Some(alive_pid());
+            running.branch = Some("pilotfish/add-auth-9120000".into());
+            let mut settled = state("add-tests", "add-tests-20260829120001");
+            settled.status = crate::fleet::run::RunStatus::Settled;
+            let mut gone = state("merged", "merged-20260829120002");
+            gone.status = crate::fleet::run::RunStatus::Archived;
+            let runs = [
+                RunRow {
+                    run_id: "add-auth-20260829120000",
+                    state: &running,
+                    diff_stat: Some("+12 −3"),
+                },
+                RunRow {
+                    run_id: "add-tests-20260829120001",
+                    state: &settled,
+                    diff_stat: None,
+                },
+                RunRow {
+                    run_id: "merged-20260829120002",
+                    state: &gone,
+                    diff_stat: None,
+                },
+            ];
+            let rows = build_rows(&OrchSummary::default(), &runs, NOW);
+            assert_eq!(rows.len(), 3, "{rows:?}");
+            assert_eq!(rows[0].name, "orchestrator");
+            assert_eq!(rows[1].name, "add-auth");
+            assert_eq!(rows[2].name, "add-tests");
+            assert_eq!(rows[1].glyph, "●");
+            assert_eq!(
+                rows[1].branch.as_deref(),
+                Some("pilotfish/add-auth-9120000")
+            );
+            assert_eq!(rows[1].diff_stat.as_deref(), Some("+12 −3"));
+            assert_eq!(rows[2].glyph, "✓");
+            assert_eq!(rows[2].diff_stat, None);
+            assert!(rows[1].target.is_worker());
+            assert_eq!(rows[1].target.key(), "add-auth-20260829120000");
+        }
+        {
+            let mut s = state("db", "db-20260829120000");
+            s.status = crate::fleet::run::RunStatus::Running;
+            s.pid = Some(alive_pid());
+            s.created_at = "2026-09-30T11:59:00.000Z".into();
+            s.pending_dialog = Some(crate::fleet::run::PendingDialog {
+                id: "u-1".into(),
+                method: "select".into(),
+                question: "Pick one".into(),
+                options: Some(vec!["a".into()]),
+                context: None,
+                asked_at: crate::util::now_iso(),
+            });
+            let row = worker_row(
+                &RunRow {
+                    run_id: "db-20260829120000",
+                    state: &s,
+                    diff_stat: None,
+                },
+                NOW,
+            )
+            .unwrap();
+            assert_eq!(row.glyph, "?");
+            assert_eq!(row.detail, "needs an answer");
+            assert!(row.attention);
+            assert!(!row.age.is_empty());
+        }
+        {
+            let mut s = state("db", "db-20260829120000");
+            s.status = crate::fleet::run::RunStatus::Running;
+            s.pid = Some(DEAD_PID);
+            let row = worker_row(
+                &RunRow {
+                    run_id: "db-20260829120000",
+                    state: &s,
+                    diff_stat: None,
+                },
+                NOW,
+            )
+            .unwrap();
+            assert_eq!(row.glyph, "!", "the pid is not alive");
+            assert_eq!(row.detail, "monitor gone");
+        }
     }
 
     #[test]
-    fn the_session_label_always_says_orchestrator_and_carries_the_alias() {
-        assert_eq!(session_label(None), "orchestrator");
-        assert_eq!(session_label(Some("db")), "orchestrator · db");
-        assert_eq!(
-            session_label(Some("   ")),
-            "orchestrator",
-            "a blank alias is no alias"
-        );
-    }
+    fn activity_lines() {
+        {
+            let mut s = state("db", "db-20260829120000");
+            s.status = crate::fleet::run::RunStatus::Running;
+            s.pid = Some(alive_pid());
+            let view = derive_view(&s, |_| true, NOW);
+            assert_eq!(worker_detail(&s, view), "working…");
 
-    #[test]
-    fn session_display_name_uses_alias_then_short_uuid_then_legacy_spelling() {
-        let uuid = uuid::Uuid::new_v4();
-        assert_eq!(session_display_name(Some("db"), uuid), "db");
-        assert_eq!(
-            session_display_name(None, uuid),
-            crate::util::short_uuid(&uuid),
-            "an alias-less session is shown by its short uuid until one appears"
-        );
-        assert_eq!(
-            session_display_name(None, crate::util::nil_uuid()),
-            "orchestrator"
-        );
-    }
+            s.activity = Some(WorkerActivity::Thinking);
+            assert_eq!(worker_detail(&s, view), "✻ thinking…");
+            s.activity = Some(WorkerActivity::Text);
+            assert_eq!(worker_detail(&s, view), "✎ replying…");
+            s.activity = Some(WorkerActivity::Tool);
+            assert_eq!(worker_detail(&s, view), "working…", "no tool known yet");
+            s.last_tool = Some("bash".into());
+            assert_eq!(worker_detail(&s, view), "⚙ bash");
 
-    #[test]
-    fn worker_rows_follow_the_orchestrator_and_skip_archived() {
-        let mut running = state("add-auth", "add-auth-20260829120000");
-        running.status = crate::fleet::run::RunStatus::Running;
-        running.pid = Some(alive_pid());
-        running.branch = Some("pilotfish/add-auth-9120000".into());
-        let mut settled = state("add-tests", "add-tests-20260829120001");
-        settled.status = crate::fleet::run::RunStatus::Settled;
-        let mut gone = state("merged", "merged-20260829120002");
-        gone.status = crate::fleet::run::RunStatus::Archived;
-        let runs = [
-            RunRow {
-                run_id: "add-auth-20260829120000",
-                state: &running,
-                diff_stat: Some("+12 −3"),
-            },
-            RunRow {
-                run_id: "add-tests-20260829120001",
-                state: &settled,
-                diff_stat: None,
-            },
-            RunRow {
-                run_id: "merged-20260829120002",
-                state: &gone,
-                diff_stat: None,
-            },
-        ];
-        let rows = build_rows(&OrchSummary::default(), &runs, NOW);
-        assert_eq!(rows.len(), 3, "{rows:?}");
-        assert_eq!(rows[0].name, "orchestrator");
-        assert_eq!(rows[1].name, "add-auth");
-        assert_eq!(rows[2].name, "add-tests");
-        assert_eq!(rows[1].glyph, "●");
-        assert_eq!(
-            rows[1].branch.as_deref(),
-            Some("pilotfish/add-auth-9120000")
-        );
-        assert_eq!(rows[1].diff_stat.as_deref(), Some("+12 −3"));
-        assert_eq!(rows[2].glyph, "✓");
-        assert_eq!(rows[2].diff_stat, None);
-        assert!(rows[1].target.is_worker());
-        assert_eq!(rows[1].target.key(), "add-auth-20260829120000");
-    }
+            s.pending_question = Some(crate::fleet::run::PendingQuestion {
+                id: "q_1".into(),
+                question: "which fixture?".into(),
+                options: None,
+                context: None,
+                asked_at: crate::util::now_iso(),
+            });
+            let blocked = derive_view(&s, |_| true, NOW);
+            assert_eq!(blocked, DerivedView::Blocked);
+            assert_eq!(worker_detail(&s, blocked), "needs an answer");
 
-    #[test]
-    fn worker_details_describe_the_operation_not_the_state() {
-        let mut s = state("db", "db-20260829120000");
-        s.status = crate::fleet::run::RunStatus::Running;
-        s.pid = Some(alive_pid());
-        let view = derive_view(&s, |_| true, NOW);
-        assert_eq!(worker_detail(&s, view), "working…");
+            s.status = crate::fleet::run::RunStatus::Starting;
+            s.pid = None;
+            s.pending_question = None;
+            assert_eq!(worker_detail(&s, DerivedView::Starting), "starting…");
 
-        s.activity = Some(WorkerActivity::Thinking);
-        assert_eq!(worker_detail(&s, view), "✻ thinking…");
-        s.activity = Some(WorkerActivity::Text);
-        assert_eq!(worker_detail(&s, view), "✎ replying…");
-        s.activity = Some(WorkerActivity::Tool);
-        assert_eq!(worker_detail(&s, view), "working…", "no tool known yet");
-        s.last_tool = Some("bash".into());
-        assert_eq!(worker_detail(&s, view), "⚙ bash");
+            s.status = crate::fleet::run::RunStatus::Settled;
+            assert_eq!(worker_detail(&s, DerivedView::Settled), "done");
 
-        s.pending_question = Some(crate::fleet::run::PendingQuestion {
-            id: "q_1".into(),
-            question: "which fixture?".into(),
-            options: None,
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        let blocked = derive_view(&s, |_| true, NOW);
-        assert_eq!(blocked, DerivedView::Blocked);
-        assert_eq!(worker_detail(&s, blocked), "needs an answer");
+            s.status = crate::fleet::run::RunStatus::Error;
+            s.error = Some("boom\nsecond line".into());
+            assert_eq!(
+                worker_detail(&s, DerivedView::Error),
+                "boom",
+                "first line only"
+            );
 
-        s.status = crate::fleet::run::RunStatus::Starting;
-        s.pid = None;
-        s.pending_question = None;
-        assert_eq!(worker_detail(&s, DerivedView::Starting), "starting…");
-
-        s.status = crate::fleet::run::RunStatus::Settled;
-        assert_eq!(worker_detail(&s, DerivedView::Settled), "done");
-
-        s.status = crate::fleet::run::RunStatus::Error;
-        s.error = Some("boom\nsecond line".into());
-        assert_eq!(
-            worker_detail(&s, DerivedView::Error),
-            "boom",
-            "first line only"
-        );
-
-        s.error = None;
-        assert_eq!(worker_detail(&s, DerivedView::Error), "failed");
-        assert_eq!(worker_detail(&s, DerivedView::Dead), "monitor gone");
-        assert_eq!(worker_detail(&s, DerivedView::Stopped), "stopped");
-    }
-
-    #[test]
-    fn blocked_workers_and_pending_dialogs_flag_attention() {
-        let mut s = state("db", "db-20260829120000");
-        s.status = crate::fleet::run::RunStatus::Running;
-        s.pid = Some(alive_pid());
-        s.created_at = "2026-09-30T11:59:00.000Z".into();
-        s.pending_dialog = Some(crate::fleet::run::PendingDialog {
-            id: "u-1".into(),
-            method: "select".into(),
-            question: "Pick one".into(),
-            options: Some(vec!["a".into()]),
-            context: None,
-            asked_at: crate::util::now_iso(),
-        });
-        let row = worker_row(
-            &RunRow {
-                run_id: "db-20260829120000",
-                state: &s,
-                diff_stat: None,
-            },
-            NOW,
-        )
-        .unwrap();
-        assert_eq!(row.glyph, "?");
-        assert_eq!(row.detail, "needs an answer");
-        assert!(row.attention);
-        assert!(!row.age.is_empty());
-    }
-
-    #[test]
-    fn dead_workers_show_the_monitor_gone_glyph() {
-        let mut s = state("db", "db-20260829120000");
-        s.status = crate::fleet::run::RunStatus::Running;
-        s.pid = Some(DEAD_PID);
-        let row = worker_row(
-            &RunRow {
-                run_id: "db-20260829120000",
-                state: &s,
-                diff_stat: None,
-            },
-            NOW,
-        )
-        .unwrap();
-        assert_eq!(row.glyph, "!", "the pid is not alive");
-        assert_eq!(row.detail, "monitor gone");
-    }
-
-    #[test]
-    fn activity_lines_carry_the_elapsed_time() {
-        let since = NOW - 8_000;
-        let thinking = activity(ActivityKind::Thinking, None, since);
-        assert_eq!(
-            activity_line(Some(&thinking), NOW).as_deref(),
-            Some("✻ thinking… 8s")
-        );
-        let responding = activity(ActivityKind::Responding, None, since);
-        assert_eq!(
-            activity_line(Some(&responding), NOW).as_deref(),
-            Some("✎ replying… 8s")
-        );
-        let tool = activity(ActivityKind::Tool, Some("Bash".into()), since);
-        assert_eq!(
-            activity_line(Some(&tool), NOW).as_deref(),
-            Some("⚙ Bash… 8s")
-        );
-        // minutes roll over
-        let tool = activity(ActivityKind::Tool, Some("Bash".into()), NOW - 95_000);
-        assert_eq!(
-            activity_line(Some(&tool), NOW).as_deref(),
-            Some("⚙ Bash… 1m35s")
-        );
-        assert_eq!(activity_line(None, NOW), None);
-    }
-
-    #[test]
-    fn worker_activity_line_ages_from_the_last_movement() {
-        let mut s = state("db", "db-20260829120000");
-        s.status = crate::fleet::run::RunStatus::Running;
-        s.pid = Some(alive_pid());
-        s.created_at = "2026-09-30T11:59:50.000Z".into();
-        s.last_activity = Some("2026-09-30T11:59:52.000Z".into());
-        // NOW - since = 8s
-        let line = worker_activity_line(&s, DerivedView::Running, NOW).unwrap();
-        assert_eq!(line, "working… 8s");
-        // Not running: no line at all.
-        assert_eq!(worker_activity_line(&s, DerivedView::Blocked, NOW), None);
+            s.error = None;
+            assert_eq!(worker_detail(&s, DerivedView::Error), "failed");
+            assert_eq!(worker_detail(&s, DerivedView::Dead), "monitor gone");
+            assert_eq!(worker_detail(&s, DerivedView::Stopped), "stopped");
+        }
+        {
+            let since = NOW - 8_000;
+            let thinking = activity(ActivityKind::Thinking, None, since);
+            assert_eq!(
+                activity_line(Some(&thinking), NOW).as_deref(),
+                Some("✻ thinking… 8s")
+            );
+            let responding = activity(ActivityKind::Responding, None, since);
+            assert_eq!(
+                activity_line(Some(&responding), NOW).as_deref(),
+                Some("✎ replying… 8s")
+            );
+            let tool = activity(ActivityKind::Tool, Some("Bash".into()), since);
+            assert_eq!(
+                activity_line(Some(&tool), NOW).as_deref(),
+                Some("⚙ Bash… 8s")
+            );
+            // minutes roll over
+            let tool = activity(ActivityKind::Tool, Some("Bash".into()), NOW - 95_000);
+            assert_eq!(
+                activity_line(Some(&tool), NOW).as_deref(),
+                Some("⚙ Bash… 1m35s")
+            );
+            assert_eq!(activity_line(None, NOW), None);
+        }
+        {
+            let mut s = state("db", "db-20260829120000");
+            s.status = crate::fleet::run::RunStatus::Running;
+            s.pid = Some(alive_pid());
+            s.created_at = "2026-09-30T11:59:50.000Z".into();
+            s.last_activity = Some("2026-09-30T11:59:52.000Z".into());
+            // NOW - since = 8s
+            let line = worker_activity_line(&s, DerivedView::Running, NOW).unwrap();
+            assert_eq!(line, "working… 8s");
+            // Not running: no line at all.
+            assert_eq!(worker_activity_line(&s, DerivedView::Blocked, NOW), None);
+        }
     }
 }

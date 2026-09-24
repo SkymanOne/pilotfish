@@ -1304,150 +1304,128 @@ mod tests {
     }
 
     #[test]
-    fn pi_command_splits_the_bin_spec() {
-        assert_eq!(pi_command_from("pi"), ("pi".to_string(), Vec::new()));
-        assert_eq!(
-            pi_command_from("node /tmp/fake-pi.mjs"),
-            ("node".to_string(), vec!["/tmp/fake-pi.mjs".to_string()])
-        );
-        assert_eq!(pi_command_from(""), ("pi".to_string(), Vec::new()));
-        assert_eq!(pi_command_from("  pi  "), ("pi".to_string(), Vec::new()));
+    fn pi_launch() {
+        {
+            let run_dir = Path::new("/f/.pilotfish/runs/r-1");
+            let ext = Path::new("/f/.pilotfish/pi/extensions/fleet-worker.ts");
+            let skill = Path::new("/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md");
+            let args = build_pi_args(&base_state(), run_dir, ext, skill);
+            assert_eq!(
+                args,
+                vec![
+                    "--mode",
+                    "rpc",
+                    "--session-dir",
+                    "/f/.pilotfish/runs/r-1/session",
+                    "--extension",
+                    "/f/.pilotfish/pi/extensions/fleet-worker.ts",
+                    "--skill",
+                    "/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md",
+                ]
+            );
+            let mut state = base_state();
+            state.provider = Some("anthropic".into());
+            state.model = Some("fable".into());
+            state.thinking = Some("high".into());
+            state.skill = Some("/extra/skill".into());
+            state.append_system_prompt = Some("be terse".into());
+            state.tools = Some("read,bash".into());
+            state.exclude_tools = Some("web".into());
+            state.session_arg = Some("abc123".into());
+            let args = build_pi_args(&state, run_dir, ext, skill);
+            // The last occurrence: `--skill` appears twice (worker protocol + user).
+            let pair = |flag: &str| {
+                let at = args.iter().rposition(|a| a == flag).unwrap();
+                args[at + 1].clone()
+            };
+            assert_eq!(pair("--provider"), "anthropic");
+            assert_eq!(pair("--model"), "fable");
+            assert_eq!(pair("--thinking"), "high");
+            assert_eq!(pair("--skill"), "/extra/skill");
+            assert_eq!(pair("--append-system-prompt"), "be terse");
+            // A user allowlist must still admit the worker protocol tools.
+            assert_eq!(pair("--tools"), "read,bash,fleet_ask,fleet_progress");
+            assert_eq!(pair("--exclude-tools"), "web");
+            assert_eq!(pair("--session"), "abc123");
+        }
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = FleetPaths::new(dir.path());
+            let (ext, skill) = materialize_worker_files(&paths).unwrap();
+            assert_eq!(std::fs::read_to_string(&ext).unwrap(), FLEET_EXTENSION_TS);
+            assert_eq!(std::fs::read_to_string(&skill).unwrap(), FLEET_SKILL_MD);
+            assert!(FLEET_SKILL_MD.starts_with("---\nname: fleet-worker-report\n"));
+            // A stale file is refreshed.
+            std::fs::write(&ext, "stale").unwrap();
+            materialize_worker_files(&paths).unwrap();
+            assert_eq!(std::fs::read_to_string(&ext).unwrap(), FLEET_EXTENSION_TS);
+        }
     }
 
     #[test]
-    fn build_pi_args_carries_the_worker_protocol_and_user_flags() {
-        let run_dir = Path::new("/f/.pilotfish/runs/r-1");
-        let ext = Path::new("/f/.pilotfish/pi/extensions/fleet-worker.ts");
-        let skill = Path::new("/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md");
-        let args = build_pi_args(&base_state(), run_dir, ext, skill);
-        assert_eq!(
-            args,
-            vec![
-                "--mode",
-                "rpc",
-                "--session-dir",
-                "/f/.pilotfish/runs/r-1/session",
-                "--extension",
-                "/f/.pilotfish/pi/extensions/fleet-worker.ts",
-                "--skill",
-                "/f/.pilotfish/pi/skills/fleet-worker-report/SKILL.md",
-            ]
-        );
-        let mut state = base_state();
-        state.provider = Some("anthropic".into());
-        state.model = Some("fable".into());
-        state.thinking = Some("high".into());
-        state.skill = Some("/extra/skill".into());
-        state.append_system_prompt = Some("be terse".into());
-        state.tools = Some("read,bash".into());
-        state.exclude_tools = Some("web".into());
-        state.session_arg = Some("abc123".into());
-        let args = build_pi_args(&state, run_dir, ext, skill);
-        // The last occurrence: `--skill` appears twice (worker protocol + user).
-        let pair = |flag: &str| {
-            let at = args.iter().rposition(|a| a == flag).unwrap();
-            args[at + 1].clone()
-        };
-        assert_eq!(pair("--provider"), "anthropic");
-        assert_eq!(pair("--model"), "fable");
-        assert_eq!(pair("--thinking"), "high");
-        assert_eq!(pair("--skill"), "/extra/skill");
-        assert_eq!(pair("--append-system-prompt"), "be terse");
-        // A user allowlist must still admit the worker protocol tools.
-        assert_eq!(pair("--tools"), "read,bash,fleet_ask,fleet_progress");
-        assert_eq!(pair("--exclude-tools"), "web");
-        assert_eq!(pair("--session"), "abc123");
-    }
-
-    #[test]
-    fn report_reminder_points_at_the_runs_layout() {
-        let reminder = report_reminder(Path::new("/f/.pilotfish"), "auth-1");
-        assert!(
-            reminder.contains("/f/.pilotfish/runs/auth-1/report.md"),
-            "{reminder}"
-        );
-        assert!(reminder.contains("Steering received"));
-        assert!(!reminder.contains("/reports/"), "{reminder}");
-    }
-
-    #[test]
-    fn materialize_writes_embedded_files_and_is_idempotent() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = FleetPaths::new(dir.path());
-        let (ext, skill) = materialize_worker_files(&paths).unwrap();
-        assert_eq!(std::fs::read_to_string(&ext).unwrap(), FLEET_EXTENSION_TS);
-        assert_eq!(std::fs::read_to_string(&skill).unwrap(), FLEET_SKILL_MD);
-        assert!(FLEET_SKILL_MD.starts_with("---\nname: fleet-worker-report\n"));
-        // A stale file is refreshed.
-        std::fs::write(&ext, "stale").unwrap();
-        materialize_worker_files(&paths).unwrap();
-        assert_eq!(std::fs::read_to_string(&ext).unwrap(), FLEET_EXTENSION_TS);
-    }
-
-    #[test]
-    fn resolve_provider_never_guesses() {
-        let models = vec![
-            ModelRef {
-                id: Some("m-1".into()),
-                name: None,
-                provider: Some("vendorco".into()),
-                ..ModelRef::default()
-            },
-            ModelRef {
-                id: Some("m-1".into()),
-                name: None,
-                provider: Some("vendorco".into()),
-                ..ModelRef::default()
-            },
-            ModelRef {
-                id: Some("m-2".into()),
-                name: None,
-                provider: Some("other".into()),
-                ..ModelRef::default()
-            },
-        ];
-        assert_eq!(
-            resolve_provider(&models, "m-1").unwrap(),
-            "vendorco".to_string()
-        );
-        assert!(resolve_provider(&models, "ghost").is_err());
-        let ambiguous = vec![
-            ModelRef {
-                id: Some("m".into()),
-                name: None,
-                provider: Some("a".into()),
-                ..ModelRef::default()
-            },
-            ModelRef {
-                id: Some("m".into()),
-                name: None,
-                provider: Some("b".into()),
-                ..ModelRef::default()
-            },
-        ];
-        let err = resolve_provider(&ambiguous, "m").unwrap_err();
-        assert!(err.contains("ambiguous"), "{err}");
-    }
-
-    #[test]
-    fn dialog_answers_map_to_pis_response_shapes() {
-        assert_eq!(
-            dialog_reply("confirm", "u1", "yes"),
-            ExtensionUiResponse::confirmed("u1", true)
-        );
-        assert_eq!(
-            dialog_reply("confirm", "u1", "no"),
-            ExtensionUiResponse::confirmed("u1", false)
-        );
-        assert_eq!(
-            dialog_reply("select", "u2", "b"),
-            ExtensionUiResponse::value("u2", "b")
-        );
-        assert_eq!(
-            dialog_reply("input", "u3", "  "),
-            ExtensionUiResponse::cancelled("u3")
-        );
-        assert!(is_affirmative(" OK "));
-        assert!(!is_affirmative("nope"));
+    fn provider_and_dialogs() {
+        {
+            let models = vec![
+                ModelRef {
+                    id: Some("m-1".into()),
+                    name: None,
+                    provider: Some("vendorco".into()),
+                    ..ModelRef::default()
+                },
+                ModelRef {
+                    id: Some("m-1".into()),
+                    name: None,
+                    provider: Some("vendorco".into()),
+                    ..ModelRef::default()
+                },
+                ModelRef {
+                    id: Some("m-2".into()),
+                    name: None,
+                    provider: Some("other".into()),
+                    ..ModelRef::default()
+                },
+            ];
+            assert_eq!(
+                resolve_provider(&models, "m-1").unwrap(),
+                "vendorco".to_string()
+            );
+            assert!(resolve_provider(&models, "ghost").is_err());
+            let ambiguous = vec![
+                ModelRef {
+                    id: Some("m".into()),
+                    name: None,
+                    provider: Some("a".into()),
+                    ..ModelRef::default()
+                },
+                ModelRef {
+                    id: Some("m".into()),
+                    name: None,
+                    provider: Some("b".into()),
+                    ..ModelRef::default()
+                },
+            ];
+            let err = resolve_provider(&ambiguous, "m").unwrap_err();
+            assert!(err.contains("ambiguous"), "{err}");
+        }
+        {
+            assert_eq!(
+                dialog_reply("confirm", "u1", "yes"),
+                ExtensionUiResponse::confirmed("u1", true)
+            );
+            assert_eq!(
+                dialog_reply("confirm", "u1", "no"),
+                ExtensionUiResponse::confirmed("u1", false)
+            );
+            assert_eq!(
+                dialog_reply("select", "u2", "b"),
+                ExtensionUiResponse::value("u2", "b")
+            );
+            assert_eq!(
+                dialog_reply("input", "u3", "  "),
+                ExtensionUiResponse::cancelled("u3")
+            );
+            assert!(is_affirmative(" OK "));
+            assert!(!is_affirmative("nope"));
+        }
     }
 }

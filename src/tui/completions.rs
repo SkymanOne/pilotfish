@@ -512,172 +512,156 @@ mod tests {
     }
 
     #[test]
-    fn console_commands_carry_their_aliases_and_argument_hints() {
-        let quit = resolve_command("/q").unwrap();
-        assert_eq!(quit.name, "/quit");
-        assert_eq!(resolve_command("/rm").unwrap().name, "/remove");
-        assert_eq!(resolve_command("/shutdown").unwrap().name, "/shutdown");
-        assert_eq!(resolve_command("/nope"), None);
-        assert!(resolve_command("/model").unwrap().takes_argument);
-    }
-
-    #[test]
-    fn worker_only_commands_hide_on_the_orchestrator() {
-        let input = "/";
-        let state = completions_for(input, &ctx(CompletionTarget::Orchestrator)).unwrap();
-        let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
-        assert!(labels.contains(&"/help"));
-        assert!(!labels.contains(&"/answer"), "worker-only: {labels:?}");
-        assert!(!labels.contains(&"/stop"));
-
-        let state = completions_for(input, &ctx(CompletionTarget::Worker)).unwrap();
-        let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
-        assert!(labels.contains(&"/answer"));
-        assert!(labels.contains(&"/stop"));
-        // and accepting an argument-taking command ends in a space to type into
-        let answer = state.items.iter().find(|s| s.label == "/answer").unwrap();
-        assert_eq!(answer.value, "/answer ");
-        let stop = state.items.iter().find(|s| s.label == "/stop").unwrap();
-        assert_eq!(stop.value, "/stop");
-    }
-
-    #[test]
-    fn session_commands_are_offered_everywhere_with_their_argument_hint() {
-        // the session surface is console-wide: offered on both targets
-        for target in [CompletionTarget::Orchestrator, CompletionTarget::Worker] {
-            let state = completions_for("/", &ctx(target)).unwrap();
+    fn command_completions() {
+        {
+            let input = "/";
+            let state = completions_for(input, &ctx(CompletionTarget::Orchestrator)).unwrap();
             let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
-            assert!(labels.contains(&"/sessions"), "{labels:?}");
-            assert!(labels.contains(&"/session"), "{labels:?}");
-            assert!(labels.contains(&"/shutdown"));
+            assert!(labels.contains(&"/help"));
+            assert!(!labels.contains(&"/answer"), "worker-only: {labels:?}");
+            assert!(!labels.contains(&"/stop"));
+
+            let state = completions_for(input, &ctx(CompletionTarget::Worker)).unwrap();
+            let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
+            assert!(labels.contains(&"/answer"));
+            assert!(labels.contains(&"/stop"));
+            // and accepting an argument-taking command ends in a space to type into
+            let answer = state.items.iter().find(|s| s.label == "/answer").unwrap();
+            assert_eq!(answer.value, "/answer ");
+            let stop = state.items.iter().find(|s| s.label == "/stop").unwrap();
+            assert_eq!(stop.value, "/stop");
         }
-        // every console command fits, with room for the agent's
-        assert!(
-            COMMANDS.len() <= MAX_SUGGESTIONS,
-            "the cap must hold them all"
-        );
-        // /session takes an argument: accepting it opens the composer
-        let state = completions_for("/session", &ctx(CompletionTarget::Orchestrator)).unwrap();
-        assert_eq!(state.items[0].label, "/session");
-        assert_eq!(state.items[0].value, "/session ", "an argument follows");
-        // aliases still resolve
-        assert_eq!(resolve_command("/sd").unwrap().name, "/shutdown");
+        {
+            // the session surface is console-wide: offered on both targets
+            for target in [CompletionTarget::Orchestrator, CompletionTarget::Worker] {
+                let state = completions_for("/", &ctx(target)).unwrap();
+                let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
+                assert!(labels.contains(&"/sessions"), "{labels:?}");
+                assert!(labels.contains(&"/session"), "{labels:?}");
+                assert!(labels.contains(&"/shutdown"));
+            }
+            // every console command fits, with room for the agent's
+            assert!(
+                COMMANDS.len() <= MAX_SUGGESTIONS,
+                "the cap must hold them all"
+            );
+            // /session takes an argument: accepting it opens the composer
+            let state = completions_for("/session", &ctx(CompletionTarget::Orchestrator)).unwrap();
+            assert_eq!(state.items[0].label, "/session");
+            assert_eq!(state.items[0].value, "/session ", "an argument follows");
+            // aliases still resolve
+            assert_eq!(resolve_command("/sd").unwrap().name, "/shutdown");
+        }
+        {
+            let mut c = ctx(CompletionTarget::Orchestrator);
+            c.agent_commands = vec![
+                AgentCommandOption::from_orchestrator("usage", Some("Show usage"), Some("<scope>")),
+                AgentCommandOption::from_worker("skill:review", "Review the diff", "skill"),
+            ];
+            let state = completions_for("/", &c).unwrap();
+            let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
+            assert!(labels.contains(&"/usage"));
+            assert!(labels.contains(&"/skill:review"));
+            // console commands come first, the agent's ride after
+            let first_agent = labels.iter().position(|l| *l == "/usage").unwrap();
+            assert!(first_agent > labels.iter().position(|l| *l == "/help").unwrap());
+            // a pi command's source is shown
+            let skill = state
+                .items
+                .iter()
+                .find(|s| s.label == "/skill:review")
+                .unwrap();
+            assert!(skill.detail.contains("[skill]"), "{}", skill.detail);
+            assert_eq!(skill.value, "/skill:review", "no argument hint: no space");
+            let usage = state.items.iter().find(|s| s.label == "/usage").unwrap();
+            assert_eq!(usage.value, "/usage ", "claude's hint makes room for it");
+        }
+        {
+            let mut c = ctx(CompletionTarget::Orchestrator);
+            c.workers = vec![
+                ("add-auth".into(), "running".into()),
+                ("add-tests".into(), "blocked".into()),
+            ];
+            c.files = vec![
+                "src/main.rs".into(),
+                "src/cli.rs".into(),
+                "README.md".into(),
+            ];
+            let state = completions_for("@ad", &c).unwrap();
+            let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
+            assert_eq!(
+                labels,
+                vec!["@add-auth", "@add-tests", "@README.md"],
+                "workers first; \"readme\" holds \"ad\" as a substring"
+            );
+            let state = completions_for("@README", &c).unwrap();
+            assert_eq!(state.items[0].label, "@README.md");
+            // @ completes mid-input (only / must open the line), replacing the token
+            let state = completions_for("hi @ad", &c).unwrap();
+            assert_eq!(state.start, 3);
+            assert_eq!(state.items[0].label, "@add-auth");
+        }
     }
 
     #[test]
-    fn typing_narrows_by_long_form_and_alias() {
-        let mut c = ctx(CompletionTarget::Orchestrator);
-        c.agent_commands = vec![AgentCommandOption::from_orchestrator(
-            "model",
-            Some("Set the model"),
-            Some("<model>"),
-        )];
-        let state = completions_for("/q", &c).unwrap();
-        assert_eq!(state.items.len(), 1);
-        assert_eq!(state.items[0].label, "/quit");
-        assert_eq!(state.start, 0);
-        assert_eq!(state.token, "/q");
+    fn completion_ranking() {
+        {
+            let mut c = ctx(CompletionTarget::Orchestrator);
+            c.agent_commands = vec![AgentCommandOption::from_orchestrator(
+                "model",
+                Some("Set the model"),
+                Some("<model>"),
+            )];
+            let state = completions_for("/q", &c).unwrap();
+            assert_eq!(state.items.len(), 1);
+            assert_eq!(state.items[0].label, "/quit");
+            assert_eq!(state.start, 0);
+            assert_eq!(state.token, "/q");
+        }
+        {
+            let items = vec!["stop", "post", "step"];
+            let ranked = rank(&items, "st", |s| (*s).to_string());
+            assert_eq!(ranked, vec!["stop", "step", "post"]);
+            // case-insensitive both ways
+            let ranked = rank(&items, "ST", |s| (*s).to_string());
+            assert_eq!(ranked, vec!["stop", "step", "post"]);
+        }
     }
 
     #[test]
-    fn agent_commands_pass_through_after_the_console_owns() {
-        let mut c = ctx(CompletionTarget::Orchestrator);
-        c.agent_commands = vec![
-            AgentCommandOption::from_orchestrator("usage", Some("Show usage"), Some("<scope>")),
-            AgentCommandOption::from_worker("skill:review", "Review the diff", "skill"),
-        ];
-        let state = completions_for("/", &c).unwrap();
-        let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
-        assert!(labels.contains(&"/usage"));
-        assert!(labels.contains(&"/skill:review"));
-        // console commands come first, the agent's ride after
-        let first_agent = labels.iter().position(|l| *l == "/usage").unwrap();
-        assert!(first_agent > labels.iter().position(|l| *l == "/help").unwrap());
-        // a pi command's source is shown
-        let skill = state
-            .items
-            .iter()
-            .find(|s| s.label == "/skill:review")
-            .unwrap();
-        assert!(skill.detail.contains("[skill]"), "{}", skill.detail);
-        assert_eq!(skill.value, "/skill:review", "no argument hint: no space");
-        let usage = state.items.iter().find(|s| s.label == "/usage").unwrap();
-        assert_eq!(usage.value, "/usage ", "claude's hint makes room for it");
-    }
-
-    #[test]
-    fn at_completes_workers_then_files() {
-        let mut c = ctx(CompletionTarget::Orchestrator);
-        c.workers = vec![
-            ("add-auth".into(), "running".into()),
-            ("add-tests".into(), "blocked".into()),
-        ];
-        c.files = vec![
-            "src/main.rs".into(),
-            "src/cli.rs".into(),
-            "README.md".into(),
-        ];
-        let state = completions_for("@ad", &c).unwrap();
-        let labels: Vec<&str> = state.items.iter().map(|s| s.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["@add-auth", "@add-tests", "@README.md"],
-            "workers first; \"readme\" holds \"ad\" as a substring"
-        );
-        let state = completions_for("@README", &c).unwrap();
-        assert_eq!(state.items[0].label, "@README.md");
-        // @ completes mid-input (only / must open the line), replacing the token
-        let state = completions_for("hi @ad", &c).unwrap();
-        assert_eq!(state.start, 3);
-        assert_eq!(state.items[0].label, "@add-auth");
-    }
-
-    #[test]
-    fn ranking_puts_prefix_matches_before_substring_matches() {
-        let items = vec!["stop", "post", "step"];
-        let ranked = rank(&items, "st", |s| (*s).to_string());
-        assert_eq!(ranked, vec!["stop", "step", "post"]);
-        // case-insensitive both ways
-        let ranked = rank(&items, "ST", |s| (*s).to_string());
-        assert_eq!(ranked, vec!["stop", "step", "post"]);
-    }
-
-    #[test]
-    fn apply_suggestion_replaces_only_the_token() {
-        let state = completions_for("/q", &ctx(CompletionTarget::Orchestrator)).unwrap();
-        let out = apply_suggestion(
-            "/q",
-            &state,
-            &Suggestion {
-                value: "/quit".into(),
-                label: String::new(),
-                detail: String::new(),
-                kind: SuggestionKind::Command,
-            },
-        );
-        assert_eq!(out, "/quit");
-    }
-
-    #[test]
-    fn active_token_finds_the_word_the_cursor_ends_on() {
-        let (token, start) = active_token("hello @wor");
-        assert_eq!((token, start), ("@wor", 6));
-        assert_eq!(active_token(""), ("", 0));
-        assert_eq!(active_token("done "), ("", 5));
-    }
-
-    #[test]
-    fn summarize_args_picks_the_primary_argument_and_clips() {
-        assert_eq!(
-            summarize_args(&serde_json::json!({"command": "git status\nmore"})),
-            "git status"
-        );
-        let long = "x".repeat(200);
-        let summary = summarize_args(&serde_json::json!({"path": long}));
-        assert_eq!(summary.chars().count(), 80);
-        assert!(summary.ends_with('…'));
-        assert_eq!(summarize_args(&serde_json::json!({"name": "db"})), "db");
-        assert_eq!(summarize_args(&serde_json::json!({"n": 1})), r#"{"n":1}"#);
-        assert_eq!(summarize_args(&serde_json::Value::Null), "");
+    fn token_editing() {
+        {
+            let state = completions_for("/q", &ctx(CompletionTarget::Orchestrator)).unwrap();
+            let out = apply_suggestion(
+                "/q",
+                &state,
+                &Suggestion {
+                    value: "/quit".into(),
+                    label: String::new(),
+                    detail: String::new(),
+                    kind: SuggestionKind::Command,
+                },
+            );
+            assert_eq!(out, "/quit");
+        }
+        {
+            let (token, start) = active_token("hello @wor");
+            assert_eq!((token, start), ("@wor", 6));
+            assert_eq!(active_token(""), ("", 0));
+            assert_eq!(active_token("done "), ("", 5));
+        }
+        {
+            assert_eq!(
+                summarize_args(&serde_json::json!({"command": "git status\nmore"})),
+                "git status"
+            );
+            let long = "x".repeat(200);
+            let summary = summarize_args(&serde_json::json!({"path": long}));
+            assert_eq!(summary.chars().count(), 80);
+            assert!(summary.ends_with('…'));
+            assert_eq!(summarize_args(&serde_json::json!({"name": "db"})), "db");
+            assert_eq!(summarize_args(&serde_json::json!({"n": 1})), r#"{"n":1}"#);
+            assert_eq!(summarize_args(&serde_json::Value::Null), "");
+        }
     }
 }

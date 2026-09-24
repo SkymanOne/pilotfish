@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn a_status_transition_into_a_terminal_view_is_reported_exactly_once() {
+    fn terminal_reported_once() {
         let (tmp, fleet_dir) = mk_fleet("terminal");
         let (run_id, run_dir, _state) = add_running_run(&fleet_dir, "add-auth");
         let mut watcher = FleetWatcher::new(FleetWatcherOptions {
@@ -569,80 +569,120 @@ mod tests {
     }
 
     #[test]
-    fn questions_become_events_and_console_answers_are_news_while_the_orchestrators_are_not() {
-        let (tmp, fleet_dir) = mk_fleet("provenance");
-        let (_run_id, run_dir, _state) = add_running_run(&fleet_dir, "db");
-        let mut w = watcher(&fleet_dir);
-        w.start(false);
-        append_event(
-            &run_dir,
-            &json!({"type":"worker_question","questionId":"q_1","question":"bcrypt or argon2?","options":["bcrypt","argon2"],"context":"brief says secure only"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"answer_delivered","questionId":"q_1","source":"orchestrator","message":"argon2"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"steering_delivered","source":"orchestrator","message":"use tabs"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"worker_progress","message":"tests pass"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"worker_question_resolved","questionId":"q_1","how":"answered"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"tool_execution_end","toolName":"bash"}),
-        );
-        w.tick();
-        assert_eq!(kinds(&w.take_batch()), vec![FleetEventKind::Question]);
+    fn question_events() {
+        {
+            let (tmp, fleet_dir) = mk_fleet("provenance");
+            let (_run_id, run_dir, _state) = add_running_run(&fleet_dir, "db");
+            let mut w = watcher(&fleet_dir);
+            w.start(false);
+            append_event(
+                &run_dir,
+                &json!({"type":"worker_question","questionId":"q_1","question":"bcrypt or argon2?","options":["bcrypt","argon2"],"context":"brief says secure only"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"answer_delivered","questionId":"q_1","source":"orchestrator","message":"argon2"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"steering_delivered","source":"orchestrator","message":"use tabs"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"worker_progress","message":"tests pass"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"worker_question_resolved","questionId":"q_1","how":"answered"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"tool_execution_end","toolName":"bash"}),
+            );
+            w.tick();
+            assert_eq!(kinds(&w.take_batch()), vec![FleetEventKind::Question]);
 
-        // the human's interventions are the news
-        append_event(
-            &run_dir,
-            &json!({"type":"answer_delivered","questionId":"q_2","source":"console","message":"argon2"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"steering_delivered","source":"console","message":"use spaces"}),
-        );
-        append_event(
-            &run_dir,
-            &json!({"type":"worker_question_resolved","questionId":"q_3","how":"timeout"}),
-        );
-        w.tick();
-        let events = w.take_batch();
-        assert_eq!(
-            kinds(&events),
-            vec![
-                FleetEventKind::AnsweredByConsole,
-                FleetEventKind::ConsoleSteer,
-                FleetEventKind::QuestionResolved,
-            ]
-        );
-        let answered = crate::fleet::event::format_fleet_event(&events[0]);
-        assert!(answered.contains("answer: argon2"), "{answered}");
-        assert!(answered.contains("question-id: q_2"), "{answered}");
-        let steered = crate::fleet::event::format_fleet_event(&events[1]);
-        assert!(
-            steered.contains("message: use spaces") || steered.contains("message: use tabs"),
-            "{steered}"
-        );
-        let resolved = crate::fleet::event::format_fleet_event(&events[2]);
-        assert!(resolved.contains("how: timeout"), "{resolved}");
+            // the human's interventions are the news
+            append_event(
+                &run_dir,
+                &json!({"type":"answer_delivered","questionId":"q_2","source":"console","message":"argon2"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"steering_delivered","source":"console","message":"use spaces"}),
+            );
+            append_event(
+                &run_dir,
+                &json!({"type":"worker_question_resolved","questionId":"q_3","how":"timeout"}),
+            );
+            w.tick();
+            let events = w.take_batch();
+            assert_eq!(
+                kinds(&events),
+                vec![
+                    FleetEventKind::AnsweredByConsole,
+                    FleetEventKind::ConsoleSteer,
+                    FleetEventKind::QuestionResolved,
+                ]
+            );
+            let answered = crate::fleet::event::format_fleet_event(&events[0]);
+            assert!(answered.contains("answer: argon2"), "{answered}");
+            assert!(answered.contains("question-id: q_2"), "{answered}");
+            let steered = crate::fleet::event::format_fleet_event(&events[1]);
+            assert!(
+                steered.contains("message: use spaces") || steered.contains("message: use tabs"),
+                "{steered}"
+            );
+            let resolved = crate::fleet::event::format_fleet_event(&events[2]);
+            assert!(resolved.contains("how: timeout"), "{resolved}");
 
-        // already-consumed lines are not replayed
-        w.tick();
-        assert!(w.take_batch().is_empty());
-        drop(tmp);
+            // already-consumed lines are not replayed
+            w.tick();
+            assert!(w.take_batch().is_empty());
+            drop(tmp);
+        }
+        {
+            let (tmp, fleet_dir) = mk_fleet("dialogs");
+            let (_run_id, run_dir, mut state) = add_running_run(&fleet_dir, "dialog-run");
+            state.pending_dialog = Some(crate::fleet::run::PendingDialog {
+                id: "u-1".into(),
+                method: "select".into(),
+                question: "Pick one".into(),
+                options: Some(vec!["a".into(), "b".into()]),
+                context: None,
+                asked_at: "t".into(),
+            });
+            run::save_state(&run_dir, &state).unwrap();
+            // start first: a dialog appended afterwards is news, not history
+            let mut w = watcher(&fleet_dir);
+            w.start(true);
+            append_event(
+                &run_dir,
+                &json!({"type":"worker_dialog","questionId":"u-1","method":"select","question":"Pick one","options":["a","b"]}),
+            );
+            w.tick();
+            let events = w.take_batch();
+            // the snapshot mentions the dialog like a question
+            let snapshot = events
+                .iter()
+                .find(|e| e.kind == FleetEventKind::Snapshot)
+                .expect("a snapshot was queued");
+            let snap_text = crate::fleet::event::format_fleet_event(snapshot);
+            assert!(snap_text.contains("asking: Pick one"), "{snap_text}");
+            // and the dialog itself surfaces as a question
+            let question = events
+                .iter()
+                .find(|e| e.kind == FleetEventKind::Question)
+                .expect("the dialog became a question event");
+            let text = crate::fleet::event::format_fleet_event(question);
+            assert!(text.contains("question-id: u-1"), "{text}");
+            assert!(text.contains("(select)"), "{text}");
+            drop(tmp);
+        }
     }
 
     #[test]
-    fn cursors_skip_history_resume_across_watchers_and_snapshot_lists_live_runs() {
+    fn cursors_resume() {
         let (tmp, fleet_dir) = mk_fleet("cursors");
         let (run_id, run_dir, mut state) = add_running_run(&fleet_dir, "old");
         state.pending_question = Some(crate::fleet::run::PendingQuestion {
@@ -717,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_events_are_off_by_default_and_throttled_when_enabled() {
+    fn progress_throttled() {
         let (tmp, fleet_dir) = mk_fleet("progress");
         let (_run_id, run_dir, _state) = add_running_run(&fleet_dir, "slow");
         let mut off = watcher(&fleet_dir);
@@ -759,52 +799,12 @@ mod tests {
         drop(tmp);
     }
 
-    #[test]
-    fn a_pending_dialog_surfaces_like_a_question_and_names_the_method() {
-        let (tmp, fleet_dir) = mk_fleet("dialogs");
-        let (_run_id, run_dir, mut state) = add_running_run(&fleet_dir, "dialog-run");
-        state.pending_dialog = Some(crate::fleet::run::PendingDialog {
-            id: "u-1".into(),
-            method: "select".into(),
-            question: "Pick one".into(),
-            options: Some(vec!["a".into(), "b".into()]),
-            context: None,
-            asked_at: "t".into(),
-        });
-        run::save_state(&run_dir, &state).unwrap();
-        // start first: a dialog appended afterwards is news, not history
-        let mut w = watcher(&fleet_dir);
-        w.start(true);
-        append_event(
-            &run_dir,
-            &json!({"type":"worker_dialog","questionId":"u-1","method":"select","question":"Pick one","options":["a","b"]}),
-        );
-        w.tick();
-        let events = w.take_batch();
-        // the snapshot mentions the dialog like a question
-        let snapshot = events
-            .iter()
-            .find(|e| e.kind == FleetEventKind::Snapshot)
-            .expect("a snapshot was queued");
-        let snap_text = crate::fleet::event::format_fleet_event(snapshot);
-        assert!(snap_text.contains("asking: Pick one"), "{snap_text}");
-        // and the dialog itself surfaces as a question
-        let question = events
-            .iter()
-            .find(|e| e.kind == FleetEventKind::Question)
-            .expect("the dialog became a question event");
-        let text = crate::fleet::event::format_fleet_event(question);
-        assert!(text.contains("question-id: u-1"), "{text}");
-        assert!(text.contains("(select)"), "{text}");
-        drop(tmp);
-    }
-
     /// The core multi-session guarantee: a watcher pinned to one session
     /// reports only the runs that session owns, so a worker settling in
     /// session B can never produce a `<fleet-event>` in session A's
     /// transcript.
     #[test]
-    fn a_watcher_reports_only_the_runs_its_session_owns() {
+    fn reports_owned_runs() {
         let (tmp, fleet_dir) = mk_fleet("owner");
         // Two live sessions sharing one store.
         let a = crate::orch::session::create_session(&fleet_dir, Some("session-a")).unwrap();

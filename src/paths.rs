@@ -686,128 +686,91 @@ mod tests {
     }
 
     #[test]
-    fn layout_paths_are_derived_from_the_root() {
-        let paths = FleetPaths::new("/repo/x/.pilotfish");
-        let uuid = uuid::Uuid::parse_str("9ff7d0c4-4f2a-4b1e-8a3c-2d5e6f7a8b9c").unwrap();
-        let key = SessionKey::new(Some("s0".into()), uuid);
-        let default_key = SessionKey::default();
-        assert_eq!(paths.root(), Path::new("/repo/x/.pilotfish"));
-        assert_eq!(
-            paths.fleet_json(),
-            PathBuf::from("/repo/x/.pilotfish/fleet.json")
-        );
-        assert_eq!(
-            paths.console_lock(),
-            PathBuf::from("/repo/x/.pilotfish/console.lock")
-        );
-        assert_eq!(
-            paths.orchestrators_dir(),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators")
-        );
-        // A session's whole state sits in its own alias-prefixed directory.
-        assert_eq!(key.dir_name(), "s0-f7a8b9c");
-        assert_eq!(
-            paths.orchestrator_dir(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c")
-        );
-        assert_eq!(
-            paths.orchestrator_state(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/state.json")
-        );
-        assert_eq!(
-            paths.orchestrator_events(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/events.jsonl")
-        );
-        assert_eq!(
-            paths.orchestrator_inbox(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/inbox.jsonl")
-        );
-        assert_eq!(
-            paths.claude_log(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/claude.log")
-        );
-        assert_eq!(
-            paths.orchestrator_prompt(&key),
-            PathBuf::from("/repo/x/.pilotfish/orchestrators/s0-f7a8b9c/prompt.md")
-        );
-        // An alias-less session dirs as `default-<short-uuid>`; the alias is
-        // sanitized before it reaches the filesystem.
-        assert_eq!(default_key.dir_name(), "default-0000000");
-        let noisy = SessionKey::new(Some("My Session!".into()), uuid);
-        assert_eq!(noisy.dir_name(), "my-session-f7a8b9c");
-        assert_eq!(
-            paths.run_json("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/run.json")
-        );
-        assert_eq!(
-            paths.run_report("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/report.md")
-        );
-        assert_eq!(
-            paths.pi_log("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/pi.log")
-        );
-        assert_eq!(
-            paths.run_session_dir("a-1f2e3d4"),
-            PathBuf::from("/repo/x/.pilotfish/runs/a-1f2e3d4/session")
-        );
-        assert_eq!(
-            paths.pi_extension(),
-            PathBuf::from("/repo/x/.pilotfish/pi/extensions/fleet-worker.ts")
-        );
-        assert_eq!(
-            paths.pi_skill(),
-            PathBuf::from("/repo/x/.pilotfish/pi/skills/fleet-worker-report/SKILL.md")
-        );
-    }
-
-    #[test]
-    fn discover_prefers_pilotfish_dir_env_over_cwd() {
-        let cwd = Path::new("/repo");
-        assert_eq!(
-            FleetPaths::discover_with_env(cwd, None),
-            FleetPaths::new("/repo/.pilotfish")
-        );
-        assert_eq!(
-            FleetPaths::discover_with_env(cwd, Some("/elsewhere/fleet")),
-            FleetPaths::new("/elsewhere/fleet")
-        );
-        assert_eq!(
-            FleetPaths::discover_with_env(cwd, Some("  ")),
-            FleetPaths::new("/repo/.pilotfish")
-        );
-        // The env names themselves are derived, never spelled in full.
-        assert_eq!(env_var("DIR"), "PILOTFISH_DIR");
-        assert_eq!(env_var("RUN"), "PILOTFISH_RUN");
-        assert_eq!(env_var("HOME"), "PILOTFISH_HOME");
-    }
-
-    /// A temp user dir, the way production resolves `~/.pilotfish`: with the
-    /// injected `$PILOTFISH_HOME` the override wins wholesale, else `.pilotfish` under
-    /// the injected home, else nothing. Every branch is injectable, so a test
-    /// can never land in the real home directory.
-    #[test]
-    fn user_dir_prefers_pilotfish_home_and_falls_back_under_the_home() {
-        let home = Path::new("/home/alice");
-        assert_eq!(
-            user_dir_with_env(None, Some(home)),
-            Some(home.join(STATE_DIR_NAME))
-        );
-        assert_eq!(
-            user_dir_with_env(Some("/elsewhere/config"), Some(home)),
-            Some(PathBuf::from("/elsewhere/config"))
-        );
-        // A blank value is the variable set-but-empty: the fallback applies.
-        assert_eq!(
-            user_dir_with_env(Some("  "), Some(home)),
-            Some(home.join(STATE_DIR_NAME))
-        );
-        // The override stands alone; without any home there is no `.pilotfish`.
-        assert_eq!(
-            user_dir_with_env(Some("/elsewhere/config"), None),
-            Some(PathBuf::from("/elsewhere/config"))
-        );
-        assert_eq!(user_dir_with_env(None, None), None);
+    fn dir_resolution() {
+        {
+            let cwd = Path::new("/repo");
+            assert_eq!(
+                FleetPaths::discover_with_env(cwd, None),
+                FleetPaths::new("/repo/.pilotfish")
+            );
+            assert_eq!(
+                FleetPaths::discover_with_env(cwd, Some("/elsewhere/fleet")),
+                FleetPaths::new("/elsewhere/fleet")
+            );
+            assert_eq!(
+                FleetPaths::discover_with_env(cwd, Some("  ")),
+                FleetPaths::new("/repo/.pilotfish")
+            );
+            // The env names themselves are derived, never spelled in full.
+            assert_eq!(env_var("DIR"), "PILOTFISH_DIR");
+            assert_eq!(env_var("RUN"), "PILOTFISH_RUN");
+            assert_eq!(env_var("HOME"), "PILOTFISH_HOME");
+        }
+        {
+            let home = Path::new("/home/alice");
+            assert_eq!(
+                user_dir_with_env(None, Some(home)),
+                Some(home.join(STATE_DIR_NAME))
+            );
+            assert_eq!(
+                user_dir_with_env(Some("/elsewhere/config"), Some(home)),
+                Some(PathBuf::from("/elsewhere/config"))
+            );
+            // A blank value is the variable set-but-empty: the fallback applies.
+            assert_eq!(
+                user_dir_with_env(Some("  "), Some(home)),
+                Some(home.join(STATE_DIR_NAME))
+            );
+            // The override stands alone; without any home there is no `.pilotfish`.
+            assert_eq!(
+                user_dir_with_env(Some("/elsewhere/config"), None),
+                Some(PathBuf::from("/elsewhere/config"))
+            );
+            assert_eq!(user_dir_with_env(None, None), None);
+        }
+        {
+            let config = UserConfig {
+                orchestrator: OrchestratorConfig {
+                    model: Some("claude-fable-5".into()),
+                },
+                worker: WorkerConfig {
+                    model: Some("deepseek-v4-flash".into()),
+                    provider: Some("opencode-go".into()),
+                },
+                session: SessionConfig::default(),
+                routing: RoutingConfig::default(),
+                limits: LimitsConfig {
+                    max_workers_per_session: Some(4),
+                },
+            };
+            // Orchestrator: explicit beats the persisted record beats the config.
+            assert_eq!(
+                config.orchestrator_model(Some("opus"), Some("sonnet")),
+                Some("opus")
+            );
+            assert_eq!(
+                config.orchestrator_model(None, Some("sonnet")),
+                Some("sonnet")
+            );
+            assert_eq!(
+                config.orchestrator_model(None, None),
+                Some("claude-fable-5")
+            );
+            // Worker: explicit beats the config; provider resolves independently.
+            assert_eq!(config.worker_model(Some("glm-5.3")), Some("glm-5.3"));
+            assert_eq!(config.worker_model(None), Some("deepseek-v4-flash"));
+            assert_eq!(config.worker_provider(None), Some("opencode-go"));
+            // Limits: the configured cap wins over the default.
+            assert_eq!(config.max_workers_per_session(), 4);
+            // Nothing anywhere: the empty config still yields defaults.
+            assert_eq!(UserConfig::default().orchestrator_model(None, None), None);
+            assert_eq!(UserConfig::default().worker_model(None), None);
+            assert_eq!(UserConfig::default().worker_provider(None), None);
+            assert_eq!(
+                UserConfig::default().max_workers_per_session(),
+                DEFAULT_MAX_WORKERS_PER_SESSION
+            );
+        }
     }
 
     /// The config file lives directly in the user dir and is read once.
@@ -817,280 +780,227 @@ mod tests {
     }
 
     #[test]
-    fn user_config_reads_missing_empty_and_partial_files_as_defaults() {
-        let tmp = tmp_dir("pilotfish-cfg-missing-");
-        assert_eq!(load_user_config(None).unwrap(), UserConfig::default());
-        // No file at all.
-        assert_eq!(load_user_config(Some(&tmp)).unwrap(), UserConfig::default());
-        // An empty file.
-        write_config(&tmp, "");
-        assert_eq!(load_user_config(Some(&tmp)).unwrap(), UserConfig::default());
-        // Only one key of one section: the rest stay absent.
-        write_config(&tmp, "[worker]\nmodel = \"deepseek-v4-flash\"\n");
-        let config = load_user_config(Some(&tmp)).unwrap();
-        assert_eq!(config.worker.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(config.worker.provider, None);
-        assert_eq!(config.orchestrator.model, None);
-        // Unknown keys are tolerated, like every reader in this crate.
-        write_config(&tmp, "[orchestrator]\nmodel = \"opus\"\nfuture = 1\n");
-        let config = load_user_config(Some(&tmp)).unwrap();
-        assert_eq!(config.orchestrator.model.as_deref(), Some("opus"));
-    }
-
-    #[test]
-    fn user_config_reads_the_limits_section_and_defaults_the_cap() {
-        let tmp = tmp_dir("pilotfish-cfg-limits-");
-        // No file, an empty file, and a file with other sections alone all
-        // read as the default cap.
-        assert_eq!(
-            load_user_config(Some(&tmp)).unwrap().limits,
-            LimitsConfig::default()
-        );
-        assert_eq!(
-            load_user_config(Some(&tmp))
-                .unwrap()
-                .max_workers_per_session(),
-            DEFAULT_MAX_WORKERS_PER_SESSION
-        );
-        write_config(&tmp, "");
-        assert_eq!(
-            load_user_config(Some(&tmp))
-                .unwrap()
-                .max_workers_per_session(),
-            DEFAULT_MAX_WORKERS_PER_SESSION
-        );
-        write_config(&tmp, "[worker]\nmodel = \"deepseek-v4-flash\"\n");
-        assert_eq!(
-            load_user_config(Some(&tmp))
-                .unwrap()
-                .max_workers_per_session(),
-            DEFAULT_MAX_WORKERS_PER_SESSION
-        );
-        // The configured cap wins; zero is a real value (no spawning allowed).
-        write_config(&tmp, "[limits]\nmax_workers_per_session = 5\n");
-        let config = load_user_config(Some(&tmp)).unwrap();
-        assert_eq!(config.limits.max_workers_per_session, Some(5));
-        assert_eq!(config.max_workers_per_session(), 5);
-        write_config(&tmp, "[limits]\nmax_workers_per_session = 0\n");
-        assert_eq!(
-            load_user_config(Some(&tmp))
-                .unwrap()
-                .max_workers_per_session(),
-            0,
-            "zero means no spawning, not unlimited"
-        );
-        // All three sections parse together.
-        write_config(
-            &tmp,
-            "[orchestrator]\nmodel = \"claude-opus-5\"\n\n[worker]\nmodel = \"deepseek-v4-flash\"\n\n[limits]\nmax_workers_per_session = 7\n",
-        );
-        let config = load_user_config(Some(&tmp)).unwrap();
-        assert_eq!(config.orchestrator.model.as_deref(), Some("claude-opus-5"));
-        assert_eq!(config.max_workers_per_session(), 7);
-        // A negative cap is not a usize: a malformed config stays a hard
-        // error naming the path, never a silent fallback.
-        write_config(&tmp, "[limits]\nmax_workers_per_session = -1\n");
-        let err = load_user_config(Some(&tmp)).unwrap_err().to_string();
-        assert!(err.contains("config.toml"), "names the file: {err}");
-    }
-
-    #[test]
-    fn user_config_parses_both_sections() {
-        let tmp = tmp_dir("pilotfish-cfg-full-");
-        write_config(
-            &tmp,
-            "[orchestrator]\nmodel = \"claude-opus-5\"\n\n[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
-        );
-        let config = load_user_config(Some(&tmp)).unwrap();
-        assert_eq!(config.orchestrator.model.as_deref(), Some("claude-opus-5"));
-        assert_eq!(config.worker.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(config.worker.provider.as_deref(), Some("opencode-go"));
-    }
-
-    #[test]
-    fn a_malformed_user_config_names_the_path_and_the_problem() {
-        let tmp = tmp_dir("pilotfish-cfg-bad-");
-        write_config(&tmp, "[orchestrator\nmodel = \"x\"\n");
-        let err = load_user_config(Some(&tmp))
-            .expect_err("a malformed config errors, never silently defaults")
-            .to_string();
-        assert!(err.contains("config.toml"), "names the file: {err}");
-        assert!(err.contains("line 1"), "names the parse problem: {err}");
-    }
-
-    #[test]
-    fn a_confidence_threshold_outside_zero_to_one_is_refused_not_ignored() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            tmp.path().join("config.toml"),
-            "[routing]\nconfidence_threshold = 80\n",
-        )
-        .unwrap();
-        let err = load_user_config(Some(tmp.path())).unwrap_err().to_string();
-        assert!(err.contains("confidence_threshold"), "{err}");
-        assert!(err.contains("config.toml"), "names the file: {err}");
-
-        std::fs::write(
-            tmp.path().join("config.toml"),
-            "[routing]\nconfidence_threshold = 0.8\nmodels = [\"anthropic:claude-opus-5\"]\n",
-        )
-        .unwrap();
-        let config = load_user_config(Some(tmp.path())).unwrap();
-        assert!((config.routing.confidence_threshold() - 0.8).abs() < 1e-9);
-        assert_eq!(config.routing.models, vec!["anthropic:claude-opus-5"]);
-    }
-
-    #[test]
-    fn switching_routing_keeps_the_rest_of_a_hand_written_config() {
-        let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            "# my settings\n[worker]\nmodel = \"claude-opus-5\" # the good one\n\n[routing]\nmodel = \"jev-latest\"\n",
-        )
-        .unwrap();
-
-        set_routing(tmp.path(), "enabled", toml_edit::value(true)).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("# my settings"), "{raw}");
-        assert!(raw.contains("# the good one"), "{raw}");
-        let config = load_user_config(Some(tmp.path())).unwrap();
-        assert!(config.routing.enabled);
-        assert_eq!(config.routing.model, "jev-latest");
-        assert_eq!(config.worker.model.as_deref(), Some("claude-opus-5"));
-
-        set_routing(tmp.path(), "enabled", toml_edit::value(false)).unwrap();
-        assert!(!load_user_config(Some(tmp.path())).unwrap().routing.enabled);
-
-        set_routing(tmp.path(), "confidence_threshold", toml_edit::value(0.45)).unwrap();
-        let models = ["anthropic:claude-opus-5", "opencode-go:deepseek-v4-flash"];
-        set_routing(
-            tmp.path(),
-            "models",
-            toml_edit::value(models.iter().copied().collect::<toml_edit::Array>()),
-        )
-        .unwrap();
-        let config = load_user_config(Some(tmp.path())).unwrap();
-        assert!((config.routing.confidence_threshold() - 0.45).abs() < 1e-9);
-        assert_eq!(config.routing.models, models);
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("# the good one"), "{raw}");
-
-        set_routing(
-            tmp.path(),
-            "api_key",
-            toml_edit::value("ts_live_0123456789abcdef"),
-        )
-        .unwrap();
-        let config = load_user_config(Some(tmp.path())).unwrap();
-        assert_eq!(
-            config
-                .routing
-                .api_key
-                .as_ref()
-                .map(crate::secrets::Secret::expose),
-            Some("ts_live_0123456789abcdef")
-        );
-        #[cfg(unix)]
+    fn user_config() {
         {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600, "a file holding the key is its owner's alone");
+            let tmp = tmp_dir("pilotfish-cfg-missing-");
+            assert_eq!(load_user_config(None).unwrap(), UserConfig::default());
+            // No file at all.
+            assert_eq!(load_user_config(Some(&tmp)).unwrap(), UserConfig::default());
+            // An empty file.
+            write_config(&tmp, "");
+            assert_eq!(load_user_config(Some(&tmp)).unwrap(), UserConfig::default());
+            // Only one key of one section: the rest stay absent.
+            write_config(&tmp, "[worker]\nmodel = \"deepseek-v4-flash\"\n");
+            let config = load_user_config(Some(&tmp)).unwrap();
+            assert_eq!(config.worker.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(config.worker.provider, None);
+            assert_eq!(config.orchestrator.model, None);
+            // Unknown keys are tolerated, like every reader in this crate.
+            write_config(&tmp, "[orchestrator]\nmodel = \"opus\"\nfuture = 1\n");
+            let config = load_user_config(Some(&tmp)).unwrap();
+            assert_eq!(config.orchestrator.model.as_deref(), Some("opus"));
         }
-        set_routing(tmp.path(), "api_key", toml_edit::Item::None).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("api_key"), "removed, not blanked: {raw}");
-        assert!(raw.contains("# the good one"), "{raw}");
+        {
+            let tmp = tmp_dir("pilotfish-cfg-limits-");
+            // No file, an empty file, and a file with other sections alone all
+            // read as the default cap.
+            assert_eq!(
+                load_user_config(Some(&tmp)).unwrap().limits,
+                LimitsConfig::default()
+            );
+            assert_eq!(
+                load_user_config(Some(&tmp))
+                    .unwrap()
+                    .max_workers_per_session(),
+                DEFAULT_MAX_WORKERS_PER_SESSION
+            );
+            write_config(&tmp, "");
+            assert_eq!(
+                load_user_config(Some(&tmp))
+                    .unwrap()
+                    .max_workers_per_session(),
+                DEFAULT_MAX_WORKERS_PER_SESSION
+            );
+            write_config(&tmp, "[worker]\nmodel = \"deepseek-v4-flash\"\n");
+            assert_eq!(
+                load_user_config(Some(&tmp))
+                    .unwrap()
+                    .max_workers_per_session(),
+                DEFAULT_MAX_WORKERS_PER_SESSION
+            );
+            // The configured cap wins; zero is a real value (no spawning allowed).
+            write_config(&tmp, "[limits]\nmax_workers_per_session = 5\n");
+            let config = load_user_config(Some(&tmp)).unwrap();
+            assert_eq!(config.limits.max_workers_per_session, Some(5));
+            assert_eq!(config.max_workers_per_session(), 5);
+            write_config(&tmp, "[limits]\nmax_workers_per_session = 0\n");
+            assert_eq!(
+                load_user_config(Some(&tmp))
+                    .unwrap()
+                    .max_workers_per_session(),
+                0,
+                "zero means no spawning, not unlimited"
+            );
+            // All three sections parse together.
+            write_config(
+                &tmp,
+                "[orchestrator]\nmodel = \"claude-opus-5\"\n\n[worker]\nmodel = \"deepseek-v4-flash\"\n\n[limits]\nmax_workers_per_session = 7\n",
+            );
+            let config = load_user_config(Some(&tmp)).unwrap();
+            assert_eq!(config.orchestrator.model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(config.max_workers_per_session(), 7);
+            // A negative cap is not a usize: a malformed config stays a hard
+            // error naming the path, never a silent fallback.
+            write_config(&tmp, "[limits]\nmax_workers_per_session = -1\n");
+            let err = load_user_config(Some(&tmp)).unwrap_err().to_string();
+            assert!(err.contains("config.toml"), "names the file: {err}");
+        }
+        {
+            let tmp = tmp_dir("pilotfish-cfg-full-");
+            write_config(
+                &tmp,
+                "[orchestrator]\nmodel = \"claude-opus-5\"\n\n[worker]\nmodel = \"deepseek-v4-flash\"\nprovider = \"opencode-go\"\n",
+            );
+            let config = load_user_config(Some(&tmp)).unwrap();
+            assert_eq!(config.orchestrator.model.as_deref(), Some("claude-opus-5"));
+            assert_eq!(config.worker.model.as_deref(), Some("deepseek-v4-flash"));
+            assert_eq!(config.worker.provider.as_deref(), Some("opencode-go"));
+        }
+        {
+            let tmp = tmp_dir("pilotfish-cfg-bad-");
+            write_config(&tmp, "[orchestrator\nmodel = \"x\"\n");
+            let err = load_user_config(Some(&tmp))
+                .expect_err("a malformed config errors, never silently defaults")
+                .to_string();
+            assert!(err.contains("config.toml"), "names the file: {err}");
+            assert!(err.contains("line 1"), "names the parse problem: {err}");
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                tmp.path().join("config.toml"),
+                "[routing]\nconfidence_threshold = 80\n",
+            )
+            .unwrap();
+            let err = load_user_config(Some(tmp.path())).unwrap_err().to_string();
+            assert!(err.contains("confidence_threshold"), "{err}");
+            assert!(err.contains("config.toml"), "names the file: {err}");
+
+            std::fs::write(
+                tmp.path().join("config.toml"),
+                "[routing]\nconfidence_threshold = 0.8\nmodels = [\"anthropic:claude-opus-5\"]\n",
+            )
+            .unwrap();
+            let config = load_user_config(Some(tmp.path())).unwrap();
+            assert!((config.routing.confidence_threshold() - 0.8).abs() < 1e-9);
+            assert_eq!(config.routing.models, vec!["anthropic:claude-opus-5"]);
+        }
+        {
+            assert_eq!(
+                SessionConfig::default().auto_compact_turns(),
+                Some(DEFAULT_AUTO_COMPACT_TURNS)
+            );
+            assert_eq!(
+                SessionConfig {
+                    auto_compact_turns: Some(0)
+                }
+                .auto_compact_turns(),
+                None,
+                "zero is off, never every turn"
+            );
+            assert_eq!(
+                SessionConfig {
+                    auto_compact_turns: Some(12)
+                }
+                .auto_compact_turns(),
+                Some(12)
+            );
+        }
     }
 
     #[test]
-    fn switching_routing_creates_the_file_and_refuses_a_broken_one() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tmp.path().join("fresh");
-        set_routing(&home, "enabled", toml_edit::value(true)).unwrap();
-        assert!(load_user_config(Some(&home)).unwrap().routing.enabled);
+    fn set_routing_edits() {
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("config.toml");
+            std::fs::write(
+                &path,
+                "# my settings\n[worker]\nmodel = \"claude-opus-5\" # the good one\n\n[routing]\nmodel = \"jev-latest\"\n",
+            )
+            .unwrap();
 
-        let broken = tmp.path().join("broken");
-        std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(broken.join("config.toml"), "[routing\nenabled = ").unwrap();
-        assert!(set_routing(&broken, "enabled", toml_edit::value(true)).is_err());
-        assert_eq!(
-            std::fs::read_to_string(broken.join("config.toml")).unwrap(),
-            "[routing\nenabled = ",
-            "a config that does not parse is left exactly as it was"
-        );
-    }
+            set_routing(tmp.path(), "enabled", toml_edit::value(true)).unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.contains("# my settings"), "{raw}");
+            assert!(raw.contains("# the good one"), "{raw}");
+            let config = load_user_config(Some(tmp.path())).unwrap();
+            assert!(config.routing.enabled);
+            assert_eq!(config.routing.model, "jev-latest");
+            assert_eq!(config.worker.model.as_deref(), Some("claude-opus-5"));
 
-    #[test]
-    fn auto_compact_turns_reads_absent_as_the_default_and_zero_as_off() {
-        assert_eq!(
-            SessionConfig::default().auto_compact_turns(),
-            Some(DEFAULT_AUTO_COMPACT_TURNS)
-        );
-        assert_eq!(
-            SessionConfig {
-                auto_compact_turns: Some(0)
+            set_routing(tmp.path(), "enabled", toml_edit::value(false)).unwrap();
+            assert!(!load_user_config(Some(tmp.path())).unwrap().routing.enabled);
+
+            set_routing(tmp.path(), "confidence_threshold", toml_edit::value(0.45)).unwrap();
+            let models = ["anthropic:claude-opus-5", "opencode-go:deepseek-v4-flash"];
+            set_routing(
+                tmp.path(),
+                "models",
+                toml_edit::value(models.iter().copied().collect::<toml_edit::Array>()),
+            )
+            .unwrap();
+            let config = load_user_config(Some(tmp.path())).unwrap();
+            assert!((config.routing.confidence_threshold() - 0.45).abs() < 1e-9);
+            assert_eq!(config.routing.models, models);
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.contains("# the good one"), "{raw}");
+
+            set_routing(
+                tmp.path(),
+                "api_key",
+                toml_edit::value("ts_live_0123456789abcdef"),
+            )
+            .unwrap();
+            let config = load_user_config(Some(tmp.path())).unwrap();
+            assert_eq!(
+                config
+                    .routing
+                    .api_key
+                    .as_ref()
+                    .map(crate::secrets::Secret::expose),
+                Some("ts_live_0123456789abcdef")
+            );
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "a file holding the key is its owner's alone");
             }
-            .auto_compact_turns(),
-            None,
-            "zero is off, never every turn"
-        );
-        assert_eq!(
-            SessionConfig {
-                auto_compact_turns: Some(12)
-            }
-            .auto_compact_turns(),
-            Some(12)
-        );
+            set_routing(tmp.path(), "api_key", toml_edit::Item::None).unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(!raw.contains("api_key"), "removed, not blanked: {raw}");
+            assert!(raw.contains("# the good one"), "{raw}");
+        }
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let home = tmp.path().join("fresh");
+            set_routing(&home, "enabled", toml_edit::value(true)).unwrap();
+            assert!(load_user_config(Some(&home)).unwrap().routing.enabled);
+
+            let broken = tmp.path().join("broken");
+            std::fs::create_dir_all(&broken).unwrap();
+            std::fs::write(broken.join("config.toml"), "[routing\nenabled = ").unwrap();
+            assert!(set_routing(&broken, "enabled", toml_edit::value(true)).is_err());
+            assert_eq!(
+                std::fs::read_to_string(broken.join("config.toml")).unwrap(),
+                "[routing\nenabled = ",
+                "a config that does not parse is left exactly as it was"
+            );
+        }
     }
 
     #[test]
-    fn resolution_prefers_explicit_then_persisted_then_config_then_default() {
-        let config = UserConfig {
-            orchestrator: OrchestratorConfig {
-                model: Some("claude-fable-5".into()),
-            },
-            worker: WorkerConfig {
-                model: Some("deepseek-v4-flash".into()),
-                provider: Some("opencode-go".into()),
-            },
-            session: SessionConfig::default(),
-            routing: RoutingConfig::default(),
-            limits: LimitsConfig {
-                max_workers_per_session: Some(4),
-            },
-        };
-        // Orchestrator: explicit beats the persisted record beats the config.
-        assert_eq!(
-            config.orchestrator_model(Some("opus"), Some("sonnet")),
-            Some("opus")
-        );
-        assert_eq!(
-            config.orchestrator_model(None, Some("sonnet")),
-            Some("sonnet")
-        );
-        assert_eq!(
-            config.orchestrator_model(None, None),
-            Some("claude-fable-5")
-        );
-        // Worker: explicit beats the config; provider resolves independently.
-        assert_eq!(config.worker_model(Some("glm-5.3")), Some("glm-5.3"));
-        assert_eq!(config.worker_model(None), Some("deepseek-v4-flash"));
-        assert_eq!(config.worker_provider(None), Some("opencode-go"));
-        // Limits: the configured cap wins over the default.
-        assert_eq!(config.max_workers_per_session(), 4);
-        // Nothing anywhere: the empty config still yields defaults.
-        assert_eq!(UserConfig::default().orchestrator_model(None, None), None);
-        assert_eq!(UserConfig::default().worker_model(None), None);
-        assert_eq!(UserConfig::default().worker_provider(None), None);
-        assert_eq!(
-            UserConfig::default().max_workers_per_session(),
-            DEFAULT_MAX_WORKERS_PER_SESSION
-        );
-    }
-
-    #[test]
-    fn ensure_creates_layout_and_gitignores_once() {
+    fn ensure_layout() {
         let root = tmp_dir("pilotfish-paths-");
         // Both spawns transiently fail under full-suite parallel load; the
         // shared bounded retry covers them, and the rev-parse probe confirms

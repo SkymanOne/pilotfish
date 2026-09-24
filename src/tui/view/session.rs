@@ -552,290 +552,278 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_and_its_result_share_a_unit_and_results_start_new_ones() {
-        let blocks = vec![
-            block(BlockKind::Tool, "⚙ bash cargo test"),
-            block(BlockKind::ToolResult, "  ↳ bash: running"),
-            block(BlockKind::ToolResult, "      output line"),
-            block(BlockKind::ToolResult, "  ↳ bash: second"),
-        ];
-        let units = build_units(&blocks);
-        assert_eq!(
-            units.len(),
-            2,
-            "call+result+continuation, then the next result"
-        );
-        assert_eq!((units[0].start, units[0].end), (0, 3));
-        assert_eq!((units[1].start, units[1].end), (3, 4));
+    fn unit_grouping() {
+        {
+            let blocks = vec![
+                block(BlockKind::Tool, "⚙ bash cargo test"),
+                block(BlockKind::ToolResult, "  ↳ bash: running"),
+                block(BlockKind::ToolResult, "      output line"),
+                block(BlockKind::ToolResult, "  ↳ bash: second"),
+            ];
+            let units = build_units(&blocks);
+            assert_eq!(
+                units.len(),
+                2,
+                "call+result+continuation, then the next result"
+            );
+            assert_eq!((units[0].start, units[0].end), (0, 3));
+            assert_eq!((units[1].start, units[1].end), (3, 4));
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::Text, "line one"),
+                block(BlockKind::Text, "line two"),
+                block(BlockKind::System, ""),
+                block(BlockKind::Text, "next message"),
+            ];
+            let units = build_units(&blocks);
+            assert_eq!(units.len(), 3, "run, gap, run: {units:?}");
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::User, "> first"),
+                block(BlockKind::User, "> second"),
+            ];
+            let units = build_units(&blocks);
+            assert_eq!(units.len(), 1);
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::User, "> hi"),
+                block(BlockKind::System, ""), // an existing gap
+                block(BlockKind::Fleet, "⚑ settled db"),
+                block(BlockKind::Tool, "⚙ bash ls"),
+            ];
+            let pal = Palette::plain();
+            let rows = render_rows(&blocks, None, None, None, pane(80, 20, None), &pal);
+            let texts = plain(&rows);
+            assert_eq!(
+                texts,
+                vec!["> hi", "", "⚑ settled db", "", "⚙ bash ls",],
+                "one blank between units, no doubling: {texts:?}"
+            );
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::Thinking, "✻ first thought"),
+                block(BlockKind::Thinking, "  second thought"),
+                block(BlockKind::Tool, "⚙ Bash cargo test"),
+                block(BlockKind::ToolResult, "  ↳ Bash: ok"),
+                block(BlockKind::Text, "done"),
+            ];
+            // folded: everything before the cut collapses to its head plus a count
+            let folded = plain(&render_rows(
+                &blocks,
+                None,
+                None,
+                None,
+                pane(60, 20, Some(blocks.len())),
+                &Palette::plain(),
+            ));
+            assert!(
+                folded
+                    .iter()
+                    .any(|r| r.contains("✻ first thought") && r.contains("⋯ 1 more")),
+                "reasoning folds: {folded:?}"
+            );
+            assert!(
+                folded
+                    .iter()
+                    .any(|r| r.contains("⚙ Bash cargo test") && r.contains("⋯ 1 more")),
+                "the tool call keeps its command and counts its output: {folded:?}"
+            );
+            assert!(
+                !folded.iter().any(|r| r.contains("second thought")),
+                "the rest is not drawn: {folded:?}"
+            );
+            assert!(
+                folded.iter().any(|r| r.contains("done")),
+                "the model's own prose is never folded: {folded:?}"
+            );
+
+            // unfolded, every line is there again
+            let whole = plain(&render_rows(
+                &blocks,
+                None,
+                None,
+                None,
+                pane(60, 20, None),
+                &Palette::plain(),
+            ));
+            assert!(
+                whole.iter().any(|r| r.contains("second thought")),
+                "{whole:?}"
+            );
+            assert!(whole.iter().any(|r| r.contains("↳ Bash: ok")), "{whole:?}");
+        }
     }
 
     #[test]
-    fn an_older_turn_folds_its_reasoning_and_tool_output_to_one_row() {
-        let blocks = vec![
-            block(BlockKind::Thinking, "✻ first thought"),
-            block(BlockKind::Thinking, "  second thought"),
-            block(BlockKind::Tool, "⚙ Bash cargo test"),
-            block(BlockKind::ToolResult, "  ↳ Bash: ok"),
-            block(BlockKind::Text, "done"),
-        ];
-        // folded: everything before the cut collapses to its head plus a count
-        let folded = plain(&render_rows(
-            &blocks,
-            None,
-            None,
-            None,
-            pane(60, 20, Some(blocks.len())),
-            &Palette::plain(),
-        ));
-        assert!(
-            folded
+    fn hanging_indent() {
+        {
+            let blocks = vec![block(
+                BlockKind::User,
+                "> plan the development of the thing and present it to me",
+            )];
+            let rows = render_rows(
+                &blocks,
+                None,
+                None,
+                None,
+                pane(24, 20, None),
+                &Palette::plain(),
+            );
+            let rows = plain(&rows);
+            assert!(rows.len() > 1, "the prompt wrapped: {rows:?}");
+            assert!(
+                rows.iter()
+                    .all(|r| UnicodeWidthStr::width(r.as_str()) <= 24),
+                "no row overflows the pane: {rows:?}"
+            );
+            assert!(rows[0].starts_with("> "), "the marker leads: {rows:?}");
+            assert!(
+                rows[1..].iter().all(|r| r.starts_with("  ")),
+                "continuations hang under it: {rows:?}"
+            );
+            assert_eq!(
+                rows.join(" ").split_whitespace().collect::<Vec<_>>(),
+                blocks[0].text.split_whitespace().collect::<Vec<_>>(),
+                "nothing was lost to the wrap"
+            );
+        }
+        {
+            let blocks = vec![block(
+                BlockKind::ToolResult,
+                "  \u{21b3} bash: a b c d e f g h",
+            )];
+            let rows = plain(&render_rows(
+                &blocks,
+                None,
+                None,
+                None,
+                pane(16, 20, None),
+                &Palette::plain(),
+            ));
+            assert!(rows.len() > 1, "wrapped: {rows:?}");
+            assert!(
+                rows[1..].iter().all(|r| r.starts_with("    ")),
+                "the block's own indent plus the marker: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_and_search() {
+        {
+            let blocks: Vec<Block> = (0..30)
+                .map(|i| block(BlockKind::System, &format!("note {i}")))
+                .collect();
+            let pal = Palette::plain();
+            let rows = render_rows(&blocks, None, None, None, pane(80, 6, None), &pal);
+            let texts = plain(&rows);
+            assert_eq!(texts.len(), 6, "{texts:?}");
+            // the notice counts every line hidden above the window
+            assert_eq!(texts[0], "… 27 earlier lines", "{texts:?}");
+            assert_eq!(texts.last().unwrap(), "note 29");
+        }
+        {
+            let blocks: Vec<Block> = (0..30)
+                .map(|i| block(BlockKind::System, &format!("note {i}")))
+                .collect();
+            let pal = Palette::plain();
+            let rows = render_rows(&blocks, None, Some(10), None, pane(80, 4, None), &pal);
+            let texts = plain(&rows);
+            assert_eq!(texts[0], "… 10 earlier lines", "{texts:?}");
+            assert_eq!(texts[1], "note 10");
+            assert_eq!(texts.last().unwrap(), "… more below — G follows the tail");
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::System, "the quick fox"),
+                block(BlockKind::System, "another quick fox"),
+            ];
+            let pal = Palette::plain();
+            let search = Highlight {
+                matches: vec![0, 1],
+                current: Some(1),
+            };
+            let rows = render_rows(&blocks, None, None, Some(&search), pane(80, 10, None), &pal);
+            // blank separators sit between blocks: rows[0] block 0, rows[2] block 1
+            // the highlight patches over the block's own style
+            assert!(
+                rows[0].spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::UNDERLINED)
+            );
+            assert!(
+                rows[2].spans[0]
+                    .style
+                    .add_modifier
+                    .contains(Modifier::REVERSED)
+            );
+        }
+    }
+
+    #[test]
+    fn block_rendering() {
+        {
+            let blocks = vec![
+                block(BlockKind::Text, "# The plan"),
+                block(BlockKind::Text, "with **bold**"),
+            ];
+            let pal = Palette::plain();
+            let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
+            let texts = plain(&rows);
+            assert_eq!(texts[0], "The plan", "the heading marker is gone");
+            assert!(rows[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
+            let bold = rows
                 .iter()
-                .any(|r| r.contains("✻ first thought") && r.contains("⋯ 1 more")),
-            "reasoning folds: {folded:?}"
-        );
-        assert!(
-            folded
-                .iter()
-                .any(|r| r.contains("⚙ Bash cargo test") && r.contains("⋯ 1 more")),
-            "the tool call keeps its command and counts its output: {folded:?}"
-        );
-        assert!(
-            !folded.iter().any(|r| r.contains("second thought")),
-            "the rest is not drawn: {folded:?}"
-        );
-        assert!(
-            folded.iter().any(|r| r.contains("done")),
-            "the model's own prose is never folded: {folded:?}"
-        );
-
-        // unfolded, every line is there again
-        let whole = plain(&render_rows(
-            &blocks,
-            None,
-            None,
-            None,
-            pane(60, 20, None),
-            &Palette::plain(),
-        ));
-        assert!(
-            whole.iter().any(|r| r.contains("second thought")),
-            "{whole:?}"
-        );
-        assert!(whole.iter().any(|r| r.contains("↳ Bash: ok")), "{whole:?}");
-    }
-
-    #[test]
-    fn a_long_prompt_wraps_and_hangs_under_its_marker() {
-        let blocks = vec![block(
-            BlockKind::User,
-            "> plan the development of the thing and present it to me",
-        )];
-        let rows = render_rows(
-            &blocks,
-            None,
-            None,
-            None,
-            pane(24, 20, None),
-            &Palette::plain(),
-        );
-        let rows = plain(&rows);
-        assert!(rows.len() > 1, "the prompt wrapped: {rows:?}");
-        assert!(
-            rows.iter()
-                .all(|r| UnicodeWidthStr::width(r.as_str()) <= 24),
-            "no row overflows the pane: {rows:?}"
-        );
-        assert!(rows[0].starts_with("> "), "the marker leads: {rows:?}");
-        assert!(
-            rows[1..].iter().all(|r| r.starts_with("  ")),
-            "continuations hang under it: {rows:?}"
-        );
-        assert_eq!(
-            rows.join(" ").split_whitespace().collect::<Vec<_>>(),
-            blocks[0].text.split_whitespace().collect::<Vec<_>>(),
-            "nothing was lost to the wrap"
-        );
-    }
-
-    #[test]
-    fn an_indented_tool_result_keeps_its_indent_when_it_wraps() {
-        let blocks = vec![block(
-            BlockKind::ToolResult,
-            "  \u{21b3} bash: a b c d e f g h",
-        )];
-        let rows = plain(&render_rows(
-            &blocks,
-            None,
-            None,
-            None,
-            pane(16, 20, None),
-            &Palette::plain(),
-        ));
-        assert!(rows.len() > 1, "wrapped: {rows:?}");
-        assert!(
-            rows[1..].iter().all(|r| r.starts_with("    ")),
-            "the block's own indent plus the marker: {rows:?}"
-        );
-    }
-
-    #[test]
-    fn text_runs_group_and_gaps_break_them() {
-        let blocks = vec![
-            block(BlockKind::Text, "line one"),
-            block(BlockKind::Text, "line two"),
-            block(BlockKind::System, ""),
-            block(BlockKind::Text, "next message"),
-        ];
-        let units = build_units(&blocks);
-        assert_eq!(units.len(), 3, "run, gap, run: {units:?}");
-    }
-
-    #[test]
-    fn user_prompt_with_newlines_stays_one_unit() {
-        let blocks = vec![
-            block(BlockKind::User, "> first"),
-            block(BlockKind::User, "> second"),
-        ];
-        let units = build_units(&blocks);
-        assert_eq!(units.len(), 1);
-    }
-
-    #[test]
-    fn blank_lines_separate_units_but_never_double() {
-        let blocks = vec![
-            block(BlockKind::User, "> hi"),
-            block(BlockKind::System, ""), // an existing gap
-            block(BlockKind::Fleet, "⚑ settled db"),
-            block(BlockKind::Tool, "⚙ bash ls"),
-        ];
-        let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, pane(80, 20, None), &pal);
-        let texts = plain(&rows);
-        assert_eq!(
-            texts,
-            vec!["> hi", "", "⚑ settled db", "", "⚙ bash ls",],
-            "one blank between units, no doubling: {texts:?}"
-        );
-    }
-
-    #[test]
-    fn the_tail_is_followed_with_a_counted_notice() {
-        let blocks: Vec<Block> = (0..30)
-            .map(|i| block(BlockKind::System, &format!("note {i}")))
-            .collect();
-        let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, pane(80, 6, None), &pal);
-        let texts = plain(&rows);
-        assert_eq!(texts.len(), 6, "{texts:?}");
-        // the notice counts every line hidden above the window
-        assert_eq!(texts[0], "… 27 earlier lines", "{texts:?}");
-        assert_eq!(texts.last().unwrap(), "note 29");
-    }
-
-    #[test]
-    fn pinned_scroll_starts_at_the_block_and_counts_the_tail() {
-        let blocks: Vec<Block> = (0..30)
-            .map(|i| block(BlockKind::System, &format!("note {i}")))
-            .collect();
-        let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, Some(10), None, pane(80, 4, None), &pal);
-        let texts = plain(&rows);
-        assert_eq!(texts[0], "… 10 earlier lines", "{texts:?}");
-        assert_eq!(texts[1], "note 10");
-        assert_eq!(texts.last().unwrap(), "… more below — G follows the tail");
-    }
-
-    #[test]
-    fn search_matches_are_highlighted_and_the_current_one_distinctly() {
-        let blocks = vec![
-            block(BlockKind::System, "the quick fox"),
-            block(BlockKind::System, "another quick fox"),
-        ];
-        let pal = Palette::plain();
-        let search = Highlight {
-            matches: vec![0, 1],
-            current: Some(1),
-        };
-        let rows = render_rows(&blocks, None, None, Some(&search), pane(80, 10, None), &pal);
-        // blank separators sit between blocks: rows[0] block 0, rows[2] block 1
-        // the highlight patches over the block's own style
-        assert!(
-            rows[0].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::UNDERLINED)
-        );
-        assert!(
-            rows[2].spans[0]
-                .style
-                .add_modifier
-                .contains(Modifier::REVERSED)
-        );
-    }
-
-    #[test]
-    fn markdown_text_units_render_styled_lines() {
-        let blocks = vec![
-            block(BlockKind::Text, "# The plan"),
-            block(BlockKind::Text, "with **bold**"),
-        ];
-        let pal = Palette::plain();
-        let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
-        let texts = plain(&rows);
-        assert_eq!(texts[0], "The plan", "the heading marker is gone");
-        assert!(rows[0].spans[0].style.add_modifier.contains(Modifier::BOLD));
-        let bold = rows
-            .iter()
-            .flat_map(|l| l.spans.iter())
-            .find(|s| s.content.contains("bold"))
-            .unwrap();
-        assert!(bold.style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn block_kinds_take_their_theme_colors() {
-        let blocks = vec![
-            block(BlockKind::User, "> hello"),
-            block(BlockKind::Fleet, "⚑ settled"),
-            block(BlockKind::Tool, "⚙ bash"),
-            block(BlockKind::Error, "✖ boom"),
-        ];
-        let pal = Palette::colored();
-        let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
-        // blank separators sit between the four blocks
-        assert_eq!(rows[0].spans[0].style.fg, Some(ratatui::style::Color::Cyan));
-        assert_eq!(
-            rows[2].spans[0].style.fg,
-            Some(ratatui::style::Color::Yellow)
-        );
-        assert_eq!(rows[4].spans[0].style.fg, Some(ratatui::style::Color::Blue));
-        assert_eq!(rows[6].spans[0].style.fg, Some(ratatui::style::Color::Red));
-    }
-
-    #[test]
-    fn partial_streams_at_the_bottom_with_a_caret() {
-        let blocks = vec![block(BlockKind::System, "note")];
-        let pal = Palette::plain();
-        let rows = render_rows(
-            &blocks,
-            Some("streaming text"),
-            None,
-            None,
-            pane(80, 10, None),
-            &pal,
-        );
-        let texts = plain(&rows);
-        assert_eq!(texts[0], "note");
-        // the partial is its own block: a blank, then the stream with a caret
-        assert_eq!(texts[1], "", "{texts:?}");
-        assert!(texts[2].starts_with("streaming text"), "{texts:?}");
-        assert!(texts[2].ends_with("▍"), "{texts:?}");
-    }
-
-    #[test]
-    fn an_empty_transcript_says_so() {
-        let pal = Palette::plain();
-        let rows = render_rows(&[], None, None, None, pane(80, 10, None), &pal);
-        assert_eq!(plain(&rows), vec!["(no events captured yet)"]);
+                .flat_map(|l| l.spans.iter())
+                .find(|s| s.content.contains("bold"))
+                .unwrap();
+            assert!(bold.style.add_modifier.contains(Modifier::BOLD));
+        }
+        {
+            let blocks = vec![
+                block(BlockKind::User, "> hello"),
+                block(BlockKind::Fleet, "⚑ settled"),
+                block(BlockKind::Tool, "⚙ bash"),
+                block(BlockKind::Error, "✖ boom"),
+            ];
+            let pal = Palette::colored();
+            let rows = render_rows(&blocks, None, None, None, pane(80, 10, None), &pal);
+            // blank separators sit between the four blocks
+            assert_eq!(rows[0].spans[0].style.fg, Some(ratatui::style::Color::Cyan));
+            assert_eq!(
+                rows[2].spans[0].style.fg,
+                Some(ratatui::style::Color::Yellow)
+            );
+            assert_eq!(rows[4].spans[0].style.fg, Some(ratatui::style::Color::Blue));
+            assert_eq!(rows[6].spans[0].style.fg, Some(ratatui::style::Color::Red));
+        }
+        {
+            let blocks = vec![block(BlockKind::System, "note")];
+            let pal = Palette::plain();
+            let rows = render_rows(
+                &blocks,
+                Some("streaming text"),
+                None,
+                None,
+                pane(80, 10, None),
+                &pal,
+            );
+            let texts = plain(&rows);
+            assert_eq!(texts[0], "note");
+            // the partial is its own block: a blank, then the stream with a caret
+            assert_eq!(texts[1], "", "{texts:?}");
+            assert!(texts[2].starts_with("streaming text"), "{texts:?}");
+            assert!(texts[2].ends_with("▍"), "{texts:?}");
+        }
+        {
+            let pal = Palette::plain();
+            let rows = render_rows(&[], None, None, None, pane(80, 10, None), &pal);
+            assert_eq!(plain(&rows), vec!["(no events captured yet)"]);
+        }
     }
 }

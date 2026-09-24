@@ -320,280 +320,263 @@ impl Drop for ReapOnDrop {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn help_and_version_exit_zero_and_hide_the_internal_monitors() {
-    let help = pilotfish().arg("--help").output().unwrap();
-    assert_eq!(help.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&help.stdout);
-    for public in [
-        "spawn", "status", "wait", "output", "logs", "send", "followup", "answer", "stop",
-        "report", "diff", "merge", "cleanup", "attach", "mcp",
-    ] {
-        assert!(
-            stdout.contains(public),
-            "--help mentions {public}: {stdout}"
-        );
-    }
-    assert!(stdout.contains("Usage: pilotfish"), "{stdout}");
-    // The two internal monitors are hidden from the public help…
-    assert!(!stdout.contains("orchestrator-monitor"), "{stdout}");
-    assert!(!stdout.contains("fleet-dir"), "{stdout}");
-
-    let version = pilotfish().arg("--version").output().unwrap();
-    assert_eq!(version.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&version.stdout);
-    assert!(
-        stdout.contains("pilotfish") && stdout.contains("0.2.0"),
-        "{stdout}"
-    );
-
-    // …but respond to --help themselves: they parse.
-    let monitor = pilotfish().args(["monitor", "--help"]).output().unwrap();
-    assert_eq!(monitor.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&monitor.stdout);
-    assert!(
-        stdout.contains("--fleet-dir") && stdout.contains("--run"),
-        "{stdout}"
-    );
-    let orch = pilotfish()
-        .args(["orchestrator-monitor", "--help"])
-        .output()
-        .unwrap();
-    assert_eq!(orch.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&orch.stdout).contains("--fleet-dir"),
-        "{}",
-        String::from_utf8_lossy(&orch.stdout)
-    );
-}
-
-#[test]
-fn unknown_subcommand_and_missing_required_arguments_exit_one() {
-    let (code, _, stderr) = run(&std::env::temp_dir(), &["frobnicate"]);
-    assert_eq!(code, 1, "stderr: {stderr}");
-    assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
-
-    for args in [
-        vec!["wait"],          // <name> required
-        vec!["spawn"],         // <name> required
-        vec!["cleanup"],       // <name|all> required
-        vec!["send", "ghost"], // message required after --
-        vec!["monitor"],       // --run required for the internal monitor
-    ] {
-        let (code, _, stderr) = run(&std::env::temp_dir(), &args);
-        assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
-    }
-}
-
-/// Every public subcommand reaches its implementation and answers with a
-/// sane exit code even on an empty fleet: refusals name the missing run, and
-/// the read-only queries answer.
-#[test]
-fn every_public_subcommand_reaches_its_implementation() {
-    let (_tmp, root) = plain_dir();
-
-    let (code, stdout, _) = run(&root, &["status"]);
-    assert_eq!(code, 0);
-    assert_eq!(stdout.trim(), "(no runs)");
-    let (code, stdout, _) = run(&root, &["status", "--json"]);
-    assert_eq!(code, 0);
-    assert_eq!(stdout.trim(), "[]");
-
-    // spawn's refusals are ops results, not parse errors.
-    let (code, _, stderr) = run(&root, &["spawn", "x", "--", "  "]);
-    assert_eq!(code, 1);
-    assert!(stderr.contains("task brief required"), "{stderr}");
-    let (code, _, stderr) = run(&root, &["spawn", "!!!", "--", "b"]);
-    assert_eq!(code, 1);
-    assert!(stderr.contains("<name> required"), "{stderr}");
-    let (code, _, stderr) = run(
-        &root,
-        &["spawn", "x", "--model", "no-such-model", "--", "b"],
-    );
-    assert_eq!(
-        code, 2,
-        "an unknown model is refused with the NoReport code: {stderr}"
-    );
-    assert!(stderr.contains("unknown model"), "{stderr}");
-    // The model check happens before anything is created.
-    assert_eq!(
-        root.join(pilotfish::paths::STATE_DIR_NAME)
-            .join("runs")
-            .read_dir()
-            .map(std::iter::Iterator::count)
-            .unwrap_or(0),
-        0,
-        "no run was created"
-    );
-
-    // Everything that addresses a run refuses an unknown one with exit 1.
-    for args in [
-        vec!["status", "ghost"],
-        vec!["wait", "ghost"],
-        vec!["output", "ghost"],
-        vec!["logs", "ghost"],
-        vec!["report", "ghost"],
-        vec!["attach", "ghost"],
-        vec!["send", "ghost", "--", "m"],
-        vec!["followup", "ghost", "--", "m"],
-        vec!["answer", "ghost", "--", "m"],
-        vec!["stop", "ghost"],
-        vec!["diff", "ghost"],
-        vec!["merge", "ghost"],
-        vec!["cleanup", "ghost"],
-    ] {
-        let (code, _, stderr) = run(&root, &args);
-        assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
-        assert!(
-            stderr.contains("No run found matching \"ghost\""),
-            "pilotfish {args:?}: {stderr}"
-        );
-    }
-}
-
-/// The hidden worker monitor parses and reaches its implementation: a run
-/// without a readable run.json is a startup failure with exit 1.
-#[test]
-fn the_hidden_worker_monitor_reaches_its_implementation() {
-    let (_tmp, root) = plain_dir();
-    let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
-    std::fs::create_dir_all(&fleet_dir).unwrap();
-    let (code, _, stderr) = run(
-        &root,
-        &[
-            "monitor",
-            "--fleet-dir",
-            fleet_dir.to_str().unwrap(),
-            "--run",
-            "ghost-20260828141530",
-        ],
-    );
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("cannot start"), "{stderr}");
-}
-
-/// The hidden orchestrator monitor parses and reaches its implementation: an
-/// unspawnable claude is recorded (claude.log) and the monitor ends cleanly
-/// instead of hanging or crashing.
-#[test]
-fn the_hidden_orchestrator_monitor_reaches_its_implementation() {
-    let (_tmp, root) = plain_dir();
-    let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
-    let output = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
-        .env("PILOTFISH_HOME", NO_USER_HOME)
-        .args(["orchestrator-monitor", "--fleet-dir"])
-        .arg(&fleet_dir)
-        .env("PILOTFISH_DIR", &fleet_dir)
-        .env("PILOTFISH_CLAUDE_BIN", "definitely-not-a-real-claude")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "the monitor ends cleanly when claude cannot start"
-    );
-    // The boot state landed in the documented layout (the monitor's own
-    // session directory), and the failure was diagnosed in the raw
-    // protocol log.
-    let key = pilotfish::orch::session::resolve_session(&fleet_dir)
-        .expect("boot writes the session row")
-        .key();
-    assert!(
-        pilotfish::paths::FleetPaths::new(&fleet_dir)
-            .orchestrator_state(&key)
-            .is_file(),
-        "the boot state landed in the documented layout"
-    );
-    let claude_log =
-        std::fs::read_to_string(pilotfish::paths::FleetPaths::new(&fleet_dir).claude_log(&key))
-            .unwrap_or_default();
-    assert!(claude_log.contains("could not spawn"), "{claude_log}");
-}
-
-/// `pilotfish mcp` serves the fleet tools over stdio; a clean disconnect exits 0.
-#[test]
-fn mcp_serves_the_fleet_tools_over_stdio() {
-    let _serial = serial();
-    let (_tmp, root) = plain_dir();
-    let mut child = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
-        .env("PILOTFISH_HOME", NO_USER_HOME)
-        .arg("mcp")
-        .current_dir(&root)
-        .env(
-            "PILOTFISH_DIR",
-            root.canonicalize()
-                .unwrap()
-                .join(pilotfish::paths::STATE_DIR_NAME),
-        )
-        .env("PILOTFISH_PI_BIN", pi_spec(&fake_pi()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let send = |stdin: &mut ChildStdin, value: &Value| {
-        stdin.write_all(value.to_string().as_bytes()).unwrap();
-        stdin.write_all(b"\n").unwrap();
-        stdin.flush().unwrap();
-    };
-    send(
-        &mut stdin,
-        &json!({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18", "capabilities": {},
-                "clientInfo": {"name": "pilotfish-e2e", "version": "0"},
-            },
-        }),
-    );
-    let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
-    let response: Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(
-        response["result"]["serverInfo"]["name"], "fleet",
-        "{response}"
-    );
-    send(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
-    );
-    send(
-        &mut stdin,
-        &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
-    );
-    let mut line = String::new();
-    stdout.read_line(&mut line).unwrap();
-    let response: Value = serde_json::from_str(line.trim()).unwrap();
-    let mut names: Vec<&str> = response["result"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool["name"].as_str())
-        .collect();
-    names.sort_unstable();
-    let mut expected = pilotfish::mcp::server::FLEET_TOOL_NAMES.to_vec();
-    expected.sort_unstable();
-    assert_eq!(names, expected, "{names:?}");
-
-    // Disconnecting stdin ends the server cleanly.
-    drop(stdin);
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    let code = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status.code();
+fn cli_dispatch() {
+    {
+        let help = pilotfish().arg("--help").output().unwrap();
+        assert_eq!(help.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&help.stdout);
+        for public in [
+            "spawn", "status", "wait", "output", "logs", "send", "followup", "answer", "stop",
+            "report", "diff", "merge", "cleanup", "attach", "mcp",
+        ] {
+            assert!(
+                stdout.contains(public),
+                "--help mentions {public}: {stdout}"
+            );
         }
+        assert!(stdout.contains("Usage: pilotfish"), "{stdout}");
+        // The two internal monitors are hidden from the public help…
+        assert!(!stdout.contains("orchestrator-monitor"), "{stdout}");
+        assert!(!stdout.contains("fleet-dir"), "{stdout}");
+
+        let version = pilotfish().arg("--version").output().unwrap();
+        assert_eq!(version.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&version.stdout);
         assert!(
-            std::time::Instant::now() < deadline,
-            "the mcp server did not exit after stdin closed"
+            stdout.contains("pilotfish") && stdout.contains("0.2.0"),
+            "{stdout}"
         );
-        std::thread::sleep(POLL);
-    };
-    assert_eq!(code, Some(0));
+
+        // …but respond to --help themselves: they parse.
+        let monitor = pilotfish().args(["monitor", "--help"]).output().unwrap();
+        assert_eq!(monitor.status.code(), Some(0));
+        let stdout = String::from_utf8_lossy(&monitor.stdout);
+        assert!(
+            stdout.contains("--fleet-dir") && stdout.contains("--run"),
+            "{stdout}"
+        );
+        let orch = pilotfish()
+            .args(["orchestrator-monitor", "--help"])
+            .output()
+            .unwrap();
+        assert_eq!(orch.status.code(), Some(0));
+        assert!(
+            String::from_utf8_lossy(&orch.stdout).contains("--fleet-dir"),
+            "{}",
+            String::from_utf8_lossy(&orch.stdout)
+        );
+    }
+    {
+        let (code, _, stderr) = run(&std::env::temp_dir(), &["frobnicate"]);
+        assert_eq!(code, 1, "stderr: {stderr}");
+        assert!(stderr.contains("unrecognized subcommand"), "{stderr}");
+
+        for args in [
+            vec!["wait"],          // <name> required
+            vec!["spawn"],         // <name> required
+            vec!["cleanup"],       // <name|all> required
+            vec!["send", "ghost"], // message required after --
+            vec!["monitor"],       // --run required for the internal monitor
+        ] {
+            let (code, _, stderr) = run(&std::env::temp_dir(), &args);
+            assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
+        }
+    }
+    {
+        let (_tmp, root) = plain_dir();
+
+        let (code, stdout, _) = run(&root, &["status"]);
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), "(no runs)");
+        let (code, stdout, _) = run(&root, &["status", "--json"]);
+        assert_eq!(code, 0);
+        assert_eq!(stdout.trim(), "[]");
+
+        // spawn's refusals are ops results, not parse errors.
+        let (code, _, stderr) = run(&root, &["spawn", "x", "--", "  "]);
+        assert_eq!(code, 1);
+        assert!(stderr.contains("task brief required"), "{stderr}");
+        let (code, _, stderr) = run(&root, &["spawn", "!!!", "--", "b"]);
+        assert_eq!(code, 1);
+        assert!(stderr.contains("<name> required"), "{stderr}");
+        let (code, _, stderr) = run(
+            &root,
+            &["spawn", "x", "--model", "no-such-model", "--", "b"],
+        );
+        assert_eq!(
+            code, 2,
+            "an unknown model is refused with the NoReport code: {stderr}"
+        );
+        assert!(stderr.contains("unknown model"), "{stderr}");
+        // The model check happens before anything is created.
+        assert_eq!(
+            root.join(pilotfish::paths::STATE_DIR_NAME)
+                .join("runs")
+                .read_dir()
+                .map(std::iter::Iterator::count)
+                .unwrap_or(0),
+            0,
+            "no run was created"
+        );
+
+        // Everything that addresses a run refuses an unknown one with exit 1.
+        for args in [
+            vec!["status", "ghost"],
+            vec!["wait", "ghost"],
+            vec!["output", "ghost"],
+            vec!["logs", "ghost"],
+            vec!["report", "ghost"],
+            vec!["attach", "ghost"],
+            vec!["send", "ghost", "--", "m"],
+            vec!["followup", "ghost", "--", "m"],
+            vec!["answer", "ghost", "--", "m"],
+            vec!["stop", "ghost"],
+            vec!["diff", "ghost"],
+            vec!["merge", "ghost"],
+            vec!["cleanup", "ghost"],
+        ] {
+            let (code, _, stderr) = run(&root, &args);
+            assert_eq!(code, 1, "pilotfish {args:?} → {code}: {stderr}");
+            assert!(
+                stderr.contains("No run found matching \"ghost\""),
+                "pilotfish {args:?}: {stderr}"
+            );
+        }
+    }
+    {
+        let (_tmp, root) = plain_dir();
+        let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        let (code, _, stderr) = run(
+            &root,
+            &[
+                "monitor",
+                "--fleet-dir",
+                fleet_dir.to_str().unwrap(),
+                "--run",
+                "ghost-20260828141530",
+            ],
+        );
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("cannot start"), "{stderr}");
+    }
+    {
+        let (_tmp, root) = plain_dir();
+        let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
+        let output = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
+            .env("PILOTFISH_HOME", NO_USER_HOME)
+            .args(["orchestrator-monitor", "--fleet-dir"])
+            .arg(&fleet_dir)
+            .env("PILOTFISH_DIR", &fleet_dir)
+            .env("PILOTFISH_CLAUDE_BIN", "definitely-not-a-real-claude")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "the monitor ends cleanly when claude cannot start"
+        );
+        // The boot state landed in the documented layout (the monitor's own
+        // session directory), and the failure was diagnosed in the raw
+        // protocol log.
+        let key = pilotfish::orch::session::resolve_session(&fleet_dir)
+            .expect("boot writes the session row")
+            .key();
+        assert!(
+            pilotfish::paths::FleetPaths::new(&fleet_dir)
+                .orchestrator_state(&key)
+                .is_file(),
+            "the boot state landed in the documented layout"
+        );
+        let claude_log =
+            std::fs::read_to_string(pilotfish::paths::FleetPaths::new(&fleet_dir).claude_log(&key))
+                .unwrap_or_default();
+        assert!(claude_log.contains("could not spawn"), "{claude_log}");
+    }
+    {
+        let _serial = serial();
+        let (_tmp, root) = plain_dir();
+        let mut child = StdCommand::new(assert_cmd::cargo_bin!("pilotfish"))
+            .env("PILOTFISH_HOME", NO_USER_HOME)
+            .arg("mcp")
+            .current_dir(&root)
+            .env(
+                "PILOTFISH_DIR",
+                root.canonicalize()
+                    .unwrap()
+                    .join(pilotfish::paths::STATE_DIR_NAME),
+            )
+            .env("PILOTFISH_PI_BIN", pi_spec(&fake_pi()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let send = |stdin: &mut ChildStdin, value: &Value| {
+            stdin.write_all(value.to_string().as_bytes()).unwrap();
+            stdin.write_all(b"\n").unwrap();
+            stdin.flush().unwrap();
+        };
+        send(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18", "capabilities": {},
+                    "clientInfo": {"name": "pilotfish-e2e", "version": "0"},
+                },
+            }),
+        );
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(
+            response["result"]["serverInfo"]["name"], "fleet",
+            "{response}"
+        );
+        send(
+            &mut stdin,
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        );
+        send(
+            &mut stdin,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+        );
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let response: Value = serde_json::from_str(line.trim()).unwrap();
+        let mut names: Vec<&str> = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        names.sort_unstable();
+        let mut expected = pilotfish::mcp::server::FLEET_TOOL_NAMES.to_vec();
+        expected.sort_unstable();
+        assert_eq!(names, expected, "{names:?}");
+
+        // Disconnecting stdin ends the server cleanly.
+        drop(stdin);
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let code = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status.code();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mcp server did not exit after stdin closed"
+            );
+            std::thread::sleep(POLL);
+        };
+        assert_eq!(code, Some(0));
+    }
 }
 
 /// A spawned `pilotfish` writes only into the fleet dir it was given: `PILOTFISH_DIR`
@@ -602,7 +585,7 @@ fn mcp_serves_the_fleet_tools_over_stdio() {
 /// this suite once suffered: an inherited ambient `PILOTFISH_DIR` and a
 /// `<cwd>/.pilotfish` fallback.
 #[test]
-fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
+fn spawn_isolation() {
     let _serial = serial();
     let fleet = tempfile::tempdir().unwrap();
     let canary = tempfile::tempdir().unwrap();
@@ -659,308 +642,288 @@ fn spawn_writes_only_to_the_fleet_dir_it_was_given() {
 // 5. Requirements that travel inside the binary.
 // ---------------------------------------------------------------------------
 
-/// The orchestrator prompt is embedded in the binary and renders with every
-/// placeholder substituted.
 #[test]
-fn the_embedded_orchestrator_prompt_renders_with_placeholders_substituted() {
-    use pilotfish::orch::prompt::{PromptVars, render_orchestrator_prompt};
+fn spawn_side_effects() {
+    {
+        let _serial = serial();
+        let (_tmp, root) = init_repo();
+        let run_id = spawn_ok(&root, "copycat", "b", &fake_pi(), &[], &["--no-worktree"]);
+        reap_monitor(&root, &run_id);
 
-    assert!(
-        pilotfish::orch::prompt::ORCHESTRATOR_PROMPT_TEMPLATE.contains("{{FLEET_DIR}}"),
-        "the shipped template is the placeholdered source"
-    );
-    let rendered = render_orchestrator_prompt(&PromptVars {
-        fleet_dir: "/repo/.pilotfish".into(),
-        repo_root: "/repo".into(),
-        max_workers: Some(2),
-        bin_name: None,
-    });
-    assert!(rendered.starts_with("# Fleet orchestrator"), "{rendered}");
-    assert!(
-        !rendered.contains("{{"),
-        "all placeholders rendered: {rendered}"
-    );
-    assert!(rendered.contains("`/repo/.pilotfish`"), "{rendered}");
-    assert!(rendered.contains("`/repo`"), "{rendered}");
-    assert!(rendered.contains("At most 2 workers"), "{rendered}");
-    assert!(rendered.contains("`pilotfish`"), "{rendered}");
-}
+        let status = StdCommand::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "?? .gitignore",
+            "the only project change is the gitignore entry"
+        );
+        for outside in [
+            root.join("orchestrator.md"),
+            root.join("prompt.md"),
+            root.join("prompts"),
+        ] {
+            assert!(!path_exists(&outside), "{}", outside.display());
+        }
+    }
+    {
+        use pilotfish::worker::monitor::{FLEET_EXTENSION_TS, FLEET_SKILL_MD};
 
-/// The override chain: `$PILOTFISH_PROMPT` wins, then `<repo>/.pilotfish/orchestrator.md`,
-/// then `~/.config/parl/orchestrator.md`, then the embedded copy. A dangling
-/// `$PILOTFISH_PROMPT` is an error, never a silent fallback. The home directory is
-/// injected, so the real `$HOME` is never touched.
-#[test]
-fn the_prompt_override_chain_resolves_in_order() {
-    use pilotfish::orch::prompt::resolve_prompt_source;
+        let _serial = serial();
+        let (_tmp, root) = init_repo();
+        let fleet = root
+            .canonicalize()
+            .unwrap()
+            .join(pilotfish::paths::STATE_DIR_NAME);
+        let extension = fleet.join("pi/extensions/fleet-worker.ts");
+        let skill = fleet.join("pi/skills/fleet-worker-report/SKILL.md");
 
-    let (_tmp, repo) = plain_dir();
-    let pilotfish_dir = repo.join(pilotfish::paths::STATE_DIR_NAME);
-    std::fs::create_dir_all(&pilotfish_dir).unwrap();
-    // A legacy config home plus a new `~/.pilotfish`, both fabricated.
-    let home_tmp = tempfile::tempdir().unwrap();
-    let home = home_tmp.path();
-    let user_root = tempfile::tempdir().unwrap();
-    let user_dir = user_root.path().join(pilotfish::paths::STATE_DIR_NAME);
-    std::fs::create_dir_all(&user_dir).unwrap();
+        // A stale extension (different contents) must be rewritten; an identical
+        // skill must be left alone (content-identical, so no write, no mtime
+        // bump — the sleep guards against coarse-grained filesystem timestamps).
+        std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
+        std::fs::write(&extension, "// stale install\n").unwrap();
+        std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        std::fs::write(&skill, FLEET_SKILL_MD).unwrap();
+        let skill_mtime = std::fs::metadata(&skill).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(1200));
 
-    // Nothing anywhere: the embedded copy.
-    assert_eq!(
-        resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-        None
-    );
+        let argv_file = root.join("argv.json");
+        let run_id = spawn_ok(
+            &root,
+            "extworker",
+            "b",
+            &fake_pi(),
+            &[("FAKE_PI_ARGV_FILE", argv_file.to_str().unwrap())],
+            &["--no-worktree"],
+        );
+        settled(&root, "extworker");
+        reap_monitor(&root, &run_id);
 
-    // ~/.pilotfish/orchestrator.md next, the new user location.
-    let user = user_dir.join("orchestrator.md");
-    std::fs::write(&user, "user override").unwrap();
-    assert_eq!(
-        resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-        Some(user.clone())
-    );
+        // Rewritten from the embedded copy:
+        assert_eq!(
+            std::fs::read_to_string(&extension).unwrap(),
+            FLEET_EXTENSION_TS,
+            "a stale extension is replaced with the binary's copy"
+        );
+        // The identical skill was not touched:
+        assert_eq!(std::fs::read_to_string(&skill).unwrap(), FLEET_SKILL_MD);
+        assert_eq!(
+            std::fs::metadata(&skill).unwrap().modified().unwrap(),
+            skill_mtime,
+            "an identical file is left alone"
+        );
 
-    // The legacy ~/.config/parl location is no longer consulted at all,
-    // even when the new one is empty.
-    let legacy = home.join(".config/parl/orchestrator.md");
-    std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-    std::fs::write(&legacy, "legacy override").unwrap();
-    std::fs::remove_file(&user).unwrap();
-    assert_eq!(
-        resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-        None
-    );
-
-    // <repo>/.pilotfish/orchestrator.md beats the user config.
-    let repo_override = pilotfish_dir.join("orchestrator.md");
-    std::fs::write(&repo_override, "repo override").unwrap();
-    assert_eq!(
-        resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
-        Some(repo_override.clone())
-    );
-
-    // $PILOTFISH_PROMPT (a path) beats everything.
-    let env_file = repo.join("custom.md");
-    std::fs::write(&env_file, "env override").unwrap();
-    assert_eq!(
-        resolve_prompt_source(Some(env_file.to_str().unwrap()), &repo, Some(&user_dir)).unwrap(),
-        Some(env_file)
-    );
-
-    // A dangling $PILOTFISH_PROMPT is user intent gone wrong: an error.
-    let err = resolve_prompt_source(
-        Some(repo.join("missing.md").to_str().unwrap()),
-        &repo,
-        Some(&user_dir),
-    )
-    .unwrap_err();
-    assert!(err.to_string().contains("not a file"), "{err}");
-
-    // The rendered prompt honours the repo override (no $PILOTFISH_PROMPT in this
-    // environment), so what claude reads is the override, rendered.
-    if std::env::var_os(pilotfish::paths::env_var("PROMPT")).is_none() {
-        let rendered = pilotfish::orch::prompt::render_prompt(&pilotfish_dir, &repo).unwrap();
+        // pi was invoked with the materialized paths, which live under the
+        // fleet dir — not the source checkout's `pi/` tree.
+        let argv: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
+        let pair = |flag: &str| {
+            argv.iter()
+                .rposition(|a| a == flag)
+                .map(|at| argv[at + 1].as_str())
+        };
+        assert_eq!(
+            pair("--extension"),
+            Some(extension.to_str().unwrap()),
+            "{argv:?}"
+        );
+        assert_eq!(pair("--skill"), Some(skill.to_str().unwrap()), "{argv:?}");
+        assert!(extension.starts_with(&fleet), "{extension:?}");
+        // The materialized files are the worker protocol: the skill keeps the
+        // report template, the extension speaks the PILOTFISH layout.
         assert!(
-            rendered.contains("repo override") && !rendered.contains("{{"),
-            "{rendered}"
+            FLEET_SKILL_MD.starts_with("---\nname: fleet-worker-report\n"),
+            "the skill keeps its frontmatter"
+        );
+        assert!(
+            FLEET_SKILL_MD.contains("## Steering received"),
+            "the skill keeps the report template"
+        );
+        assert!(
+            FLEET_EXTENSION_TS.contains("PILOTFISH_RUN"),
+            "the extension speaks the PILOTFISH layout"
+        );
+        assert!(
+            !FLEET_EXTENSION_TS.contains("PI_FLEET"),
+            "old env names are gone from the extension"
         );
     }
-}
+    {
+        let _serial = serial();
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join(".gitignore"), "node_modules/\n*.log\n").unwrap();
+        git(&root, &["add", ".gitignore"]);
+        git(&root, &["commit", "-qm", "gitignore"]);
 
-/// Spawning copies nothing prompt-shaped into the project: the repo only
-/// gains the gitignored state dir and the `.gitignore` entry.
-#[test]
-fn spawning_copies_nothing_into_the_project() {
-    let _serial = serial();
-    let (_tmp, root) = init_repo();
-    let run_id = spawn_ok(&root, "copycat", "b", &fake_pi(), &[], &["--no-worktree"]);
-    reap_monitor(&root, &run_id);
+        let first = spawn_ok(&root, "ignored1", "b", &fake_pi(), &[], &["--no-worktree"]);
+        let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert!(gitignore.contains("node_modules/"), "{gitignore}");
+        assert!(gitignore.contains("*.log"), "{gitignore}");
+        assert!(
+            gitignore.contains("# pilotfish\n.pilotfish/"),
+            "{gitignore}"
+        );
+        assert_eq!(gitignore.matches(".pilotfish/").count(), 1, "{gitignore}");
+        reap_monitor(&root, &first);
 
-    let status = StdCommand::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert_eq!(
-        String::from_utf8_lossy(&status.stdout).trim(),
-        "?? .gitignore",
-        "the only project change is the gitignore entry"
-    );
-    for outside in [
-        root.join("orchestrator.md"),
-        root.join("prompt.md"),
-        root.join("prompts"),
-    ] {
-        assert!(!path_exists(&outside), "{}", outside.display());
+        let second = spawn_ok(&root, "ignored2", "b", &fake_pi(), &[], &["--no-worktree"]);
+        let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
+        assert_eq!(
+            gitignore.matches(".pilotfish/").count(),
+            1,
+            "still one entry: {gitignore}"
+        );
+        reap_monitor(&root, &second);
     }
-}
-
-/// The pi worker extension and report skill are materialized from the
-/// binary into the fleet dir — never read from a source checkout — and pi is
-/// invoked with those paths. A stale file is rewritten; an identical one is
-/// left alone.
-#[test]
-fn the_worker_extension_is_materialized_from_the_binary() {
-    use pilotfish::worker::monitor::{FLEET_EXTENSION_TS, FLEET_SKILL_MD};
-
-    let _serial = serial();
-    let (_tmp, root) = init_repo();
-    let fleet = root
-        .canonicalize()
-        .unwrap()
-        .join(pilotfish::paths::STATE_DIR_NAME);
-    let extension = fleet.join("pi/extensions/fleet-worker.ts");
-    let skill = fleet.join("pi/skills/fleet-worker-report/SKILL.md");
-
-    // A stale extension (different contents) must be rewritten; an identical
-    // skill must be left alone (content-identical, so no write, no mtime
-    // bump — the sleep guards against coarse-grained filesystem timestamps).
-    std::fs::create_dir_all(extension.parent().unwrap()).unwrap();
-    std::fs::write(&extension, "// stale install\n").unwrap();
-    std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
-    std::fs::write(&skill, FLEET_SKILL_MD).unwrap();
-    let skill_mtime = std::fs::metadata(&skill).unwrap().modified().unwrap();
-    std::thread::sleep(Duration::from_millis(1200));
-
-    let argv_file = root.join("argv.json");
-    let run_id = spawn_ok(
-        &root,
-        "extworker",
-        "b",
-        &fake_pi(),
-        &[("FAKE_PI_ARGV_FILE", argv_file.to_str().unwrap())],
-        &["--no-worktree"],
-    );
-    settled(&root, "extworker");
-    reap_monitor(&root, &run_id);
-
-    // Rewritten from the embedded copy:
-    assert_eq!(
-        std::fs::read_to_string(&extension).unwrap(),
-        FLEET_EXTENSION_TS,
-        "a stale extension is replaced with the binary's copy"
-    );
-    // The identical skill was not touched:
-    assert_eq!(std::fs::read_to_string(&skill).unwrap(), FLEET_SKILL_MD);
-    assert_eq!(
-        std::fs::metadata(&skill).unwrap().modified().unwrap(),
-        skill_mtime,
-        "an identical file is left alone"
-    );
-
-    // pi was invoked with the materialized paths, which live under the
-    // fleet dir — not the source checkout's `pi/` tree.
-    let argv: Vec<String> =
-        serde_json::from_str(&std::fs::read_to_string(&argv_file).unwrap()).unwrap();
-    let pair = |flag: &str| {
-        argv.iter()
-            .rposition(|a| a == flag)
-            .map(|at| argv[at + 1].as_str())
-    };
-    assert_eq!(
-        pair("--extension"),
-        Some(extension.to_str().unwrap()),
-        "{argv:?}"
-    );
-    assert_eq!(pair("--skill"), Some(skill.to_str().unwrap()), "{argv:?}");
-    assert!(extension.starts_with(&fleet), "{extension:?}");
-    // The materialized files are the worker protocol: the skill keeps the
-    // report template, the extension speaks the PILOTFISH layout.
-    assert!(
-        FLEET_SKILL_MD.starts_with("---\nname: fleet-worker-report\n"),
-        "the skill keeps its frontmatter"
-    );
-    assert!(
-        FLEET_SKILL_MD.contains("## Steering received"),
-        "the skill keeps the report template"
-    );
-    assert!(
-        FLEET_EXTENSION_TS.contains("PILOTFISH_RUN"),
-        "the extension speaks the PILOTFISH layout"
-    );
-    assert!(
-        !FLEET_EXTENSION_TS.contains("PI_FLEET"),
-        "old env names are gone from the extension"
-    );
 }
 
 // ---------------------------------------------------------------------------
 // 4. The `.pilotfish` layout — gitignore hygiene and the orchestrator's half.
 // ---------------------------------------------------------------------------
 
-/// `spawn` adds `.pilotfish/` to the repository `.gitignore` without disturbing
-/// existing entries, and never adds it twice.
 #[test]
-fn spawn_gitignores_the_state_dir_without_disturbing_existing_entries() {
-    let _serial = serial();
-    let (_tmp, root) = init_repo();
-    std::fs::write(root.join(".gitignore"), "node_modules/\n*.log\n").unwrap();
-    git(&root, &["add", ".gitignore"]);
-    git(&root, &["commit", "-qm", "gitignore"]);
+fn exit_codes() {
+    {
+        let _serial = serial();
+        let (tmp, root) = plain_dir();
+        let run_id = spawn_ok(
+            &root,
+            "slowpoke",
+            "long task",
+            &fake_pi(),
+            &[("FAKE_PI_DELAY_MS", "20000")],
+            &["--no-worktree"],
+        );
+        let _reap_guard = ReapOnDrop {
+            run_json: tmp
+                .path()
+                .join(pilotfish::paths::STATE_DIR_NAME)
+                .join("runs")
+                .join(&run_id)
+                .join("run.json"),
+        };
 
-    let first = spawn_ok(&root, "ignored1", "b", &fake_pi(), &[], &["--no-worktree"]);
-    let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-    assert!(gitignore.contains("node_modules/"), "{gitignore}");
-    assert!(gitignore.contains("*.log"), "{gitignore}");
-    assert!(
-        gitignore.contains("# pilotfish\n.pilotfish/"),
-        "{gitignore}"
-    );
-    assert_eq!(gitignore.matches(".pilotfish/").count(), 1, "{gitignore}");
-    reap_monitor(&root, &first);
+        // `spawn` returns before the monitor has reported its pid, and a run
+        // without one still reads as `starting`: wait for the state the
+        // assertions below are about.
+        poll_status(&root, "slowpoke", SETTLE, |state| {
+            state["status"] == "running"
+        });
 
-    let second = spawn_ok(&root, "ignored2", "b", &fake_pi(), &[], &["--no-worktree"]);
-    let gitignore = std::fs::read_to_string(root.join(".gitignore")).unwrap();
-    assert_eq!(
-        gitignore.matches(".pilotfish/").count(),
-        1,
-        "still one entry: {gitignore}"
-    );
-    reap_monitor(&root, &second);
-}
+        // A running run cannot be merged (1) and has nothing to answer (1).
+        let (code, _, stderr) = run(&root, &["merge", "slowpoke"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("is running"), "{stderr}");
+        assert!(
+            stderr.contains("only settled runs can be merged"),
+            "{stderr}"
+        );
+        let (code, _, stderr) = run(&root, &["answer", "slowpoke", "--", "argon2"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("no pending question"), "{stderr}");
 
-/// `cleanup` refuses a running worker without `--force`, and with it aborts
-/// the worker, removes the worktree, deletes the branch and archives.
-#[test]
-fn cleanup_refuses_a_running_worker_and_forces_with_the_flag() {
-    let _serial = serial();
-    let (_tmp, root) = init_repo();
-    let run_id = spawn_ok(
-        &root,
-        "sleeper",
-        "a long task",
-        &fake_pi(),
-        &[("FAKE_PI_DELAY_MS", "30000")],
-        &[],
-    );
-    let state = poll_status(&root, "sleeper", SETTLE, |state| {
-        state["status"] == "running"
-    });
-    let worktree = PathBuf::from(state["worktree"].as_str().unwrap());
-    let branch = state["branch"].as_str().unwrap().to_string();
+        // A wait that outlives its timeout is exit 3, not an error.
+        assert_eq!(wait_code(&root, "slowpoke", 1), 3, "timeout is exit 3");
+        let (code, _, stderr) = run(&root, &["wait", "slowpoke", "--timeout", "1"]);
+        assert_eq!(code, 3);
+        assert!(stderr.contains("timed out after 1s"), "{stderr}");
 
-    let (code, _, stderr) = run(&root, &["cleanup", "sleeper"]);
-    assert_eq!(code, 1, "a running worker is not cleaned up: {stderr}");
-    assert!(
-        stderr.contains("use --force to abort and clean"),
-        "{stderr}"
-    );
-    assert!(worktree.exists(), "the refusal left the worktree alone");
-    assert_ne!(status_json(&root, "sleeper")["status"], "archived");
+        // Stop settles the run as stopped; `wait` then reports the bad end (4).
+        let (code, _, stderr) = run(&root, &["stop", "slowpoke"]);
+        assert_eq!(code, 0, "{stderr}");
+        let state = settled(&root, "slowpoke");
+        assert_eq!(state["status"], "stopped", "{state}");
+        assert_eq!(
+            wait_code(&root, "slowpoke", 30),
+            4,
+            "a stopped run is exit 4"
+        );
 
-    let (code, stdout, stderr) = run(&root, &["cleanup", "sleeper", "--force"]);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stdout.contains(&format!("archived {run_id}")), "{stdout}");
-    assert!(!worktree.exists(), "the worktree is gone");
-    let listed = StdCommand::new("git")
-        .args(["branch", "--list", &branch])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
-        "the aborted, unmerged branch is deleted by --force"
-    );
-    assert_eq!(status_json(&root, "sleeper")["status"], "archived");
-    reap_monitor(&root, &run_id);
+        // A finished run refuses steering (1) with the resume hint.
+        let (code, _, stderr) = run(&root, &["send", "slowpoke", "--", "too late"]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("steering refused"), "{stderr}");
+        assert!(
+            stderr.contains("pilotfish spawn slowpoke-2 --session"),
+            "carries the resume hint: {stderr}"
+        );
+
+        reap_monitor(&root, &run_id);
+    }
+    {
+        let _serial = serial();
+        let (tmp, root) = plain_dir();
+        let run_id = spawn_ok(&root, "doomed", "b", &fail_pi(), &[], &["--no-worktree"]);
+        let _reap_guard = ReapOnDrop {
+            run_json: tmp
+                .path()
+                .join(pilotfish::paths::STATE_DIR_NAME)
+                .join("runs")
+                .join(&run_id)
+                .join("run.json"),
+        };
+
+        assert_eq!(wait_code(&root, "doomed", 30), 4, "an error run is exit 4");
+        let state = settled(&root, "doomed");
+        assert_eq!(state["status"], "error", "{state}");
+        let error = state["error"].as_str().unwrap_or_default();
+        assert!(error.contains("exited with code 1"), "{error}");
+        assert!(error.contains("model provider unreachable"), "{error}");
+
+        let (code, _, stderr) = run(&root, &["report", "doomed"]);
+        assert_eq!(code, 2, "no report and no captured text: {stderr}");
+        assert!(
+            stderr.contains("no report file and no captured output for doomed"),
+            "{stderr}"
+        );
+
+        reap_monitor(&root, &run_id);
+    }
+    {
+        let _serial = serial();
+        let (_tmp, root) = init_repo();
+        let run_id = spawn_ok(
+            &root,
+            "sleeper",
+            "a long task",
+            &fake_pi(),
+            &[("FAKE_PI_DELAY_MS", "30000")],
+            &[],
+        );
+        let state = poll_status(&root, "sleeper", SETTLE, |state| {
+            state["status"] == "running"
+        });
+        let worktree = PathBuf::from(state["worktree"].as_str().unwrap());
+        let branch = state["branch"].as_str().unwrap().to_string();
+
+        let (code, _, stderr) = run(&root, &["cleanup", "sleeper"]);
+        assert_eq!(code, 1, "a running worker is not cleaned up: {stderr}");
+        assert!(
+            stderr.contains("use --force to abort and clean"),
+            "{stderr}"
+        );
+        assert!(worktree.exists(), "the refusal left the worktree alone");
+        assert_ne!(status_json(&root, "sleeper")["status"], "archived");
+
+        let (code, stdout, stderr) = run(&root, &["cleanup", "sleeper", "--force"]);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stdout.contains(&format!("archived {run_id}")), "{stdout}");
+        assert!(!worktree.exists(), "the worktree is gone");
+        let listed = StdCommand::new("git")
+            .args(["branch", "--list", &branch])
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&listed.stdout).trim().is_empty(),
+            "the aborted, unmerged branch is deleted by --force"
+        );
+        assert_eq!(status_json(&root, "sleeper")["status"], "archived");
+        reap_monitor(&root, &run_id);
+    }
 }
 
 /// The orchestrator side completes the documented layout: booted exactly as
@@ -971,7 +934,7 @@ fn cleanup_refuses_a_running_worker_and_forces_with_the_flag() {
 /// and never the removed `orchestrator.json`. A `stop` command ends the
 /// monitor cleanly.
 #[test]
-fn the_orchestrator_side_writes_the_documented_fleet_layout() {
+fn orchestrator_layout() {
     let _serial = serial();
     let (tmp, root) = plain_dir();
     let fleet_dir = root.join(pilotfish::paths::STATE_DIR_NAME);
@@ -1111,6 +1074,80 @@ fn the_orchestrator_side_writes_the_documented_fleet_layout() {
         "the state records the ended child: {ended:?}"
     );
     let _ = tmp; // the tree outlives the monitor
+    {
+        use pilotfish::orch::prompt::resolve_prompt_source;
+
+        let (_tmp, repo) = plain_dir();
+        let pilotfish_dir = repo.join(pilotfish::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&pilotfish_dir).unwrap();
+        // A legacy config home plus a new `~/.pilotfish`, both fabricated.
+        let home_tmp = tempfile::tempdir().unwrap();
+        let home = home_tmp.path();
+        let user_root = tempfile::tempdir().unwrap();
+        let user_dir = user_root.path().join(pilotfish::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&user_dir).unwrap();
+
+        // Nothing anywhere: the embedded copy.
+        assert_eq!(
+            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+            None
+        );
+
+        // ~/.pilotfish/orchestrator.md next, the new user location.
+        let user = user_dir.join("orchestrator.md");
+        std::fs::write(&user, "user override").unwrap();
+        assert_eq!(
+            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+            Some(user.clone())
+        );
+
+        // The legacy ~/.config/parl location is no longer consulted at all,
+        // even when the new one is empty.
+        let legacy = home.join(".config/parl/orchestrator.md");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, "legacy override").unwrap();
+        std::fs::remove_file(&user).unwrap();
+        assert_eq!(
+            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+            None
+        );
+
+        // <repo>/.pilotfish/orchestrator.md beats the user config.
+        let repo_override = pilotfish_dir.join("orchestrator.md");
+        std::fs::write(&repo_override, "repo override").unwrap();
+        assert_eq!(
+            resolve_prompt_source(None, &repo, Some(&user_dir)).unwrap(),
+            Some(repo_override.clone())
+        );
+
+        // $PILOTFISH_PROMPT (a path) beats everything.
+        let env_file = repo.join("custom.md");
+        std::fs::write(&env_file, "env override").unwrap();
+        assert_eq!(
+            resolve_prompt_source(Some(env_file.to_str().unwrap()), &repo, Some(&user_dir))
+                .unwrap(),
+            Some(env_file)
+        );
+
+        // A dangling $PILOTFISH_PROMPT is user intent gone wrong: an error.
+        let err = resolve_prompt_source(
+            Some(repo.join("missing.md").to_str().unwrap()),
+            &repo,
+            Some(&user_dir),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a file"), "{err}");
+
+        // The rendered prompt honours the repo override (no $PILOTFISH_PROMPT in this
+        // environment), so what claude reads is the override, rendered.
+        if std::env::var_os(pilotfish::paths::env_var("PROMPT")).is_none() {
+            let rendered = pilotfish::orch::prompt::render_prompt(&pilotfish_dir, &repo).unwrap();
+            assert!(
+                rendered.contains("repo override") && !rendered.contains("{{"),
+                "{rendered}"
+            );
+        }
+    }
 }
 
 /// The one session directory under `<fleet>/orchestrators/`.
@@ -1135,7 +1172,7 @@ fn session_dir(fleet_dir: &Path) -> PathBuf {
 /// gone, the run reads `archived`, and `.pilotfish` holds exactly the documented
 /// tree — none of the removed one.
 #[test]
-fn full_worker_lifecycle_happy_path() {
+fn worker_lifecycle() {
     let _serial = serial();
     let (_tmp, root) = init_repo();
     let run_id = spawn_ok(
@@ -1397,195 +1434,3 @@ fn path_exists(path: &Path) -> bool {
 // ---------------------------------------------------------------------------
 // 2. The exit-code matrix — the contract scripts depend on.
 // ---------------------------------------------------------------------------
-
-/// One slow, running worker drives every refusal exit code: merging an
-/// unsettled run (1), answering with nothing pending (1), a wait timeout (3),
-/// then the run ends stopped (4 via `wait`), and steering a finished run is
-/// refused (1).
-#[test]
-fn refusal_exit_codes_on_a_running_then_stopped_run() {
-    let _serial = serial();
-    let (tmp, root) = plain_dir();
-    let run_id = spawn_ok(
-        &root,
-        "slowpoke",
-        "long task",
-        &fake_pi(),
-        &[("FAKE_PI_DELAY_MS", "20000")],
-        &["--no-worktree"],
-    );
-    let _reap_guard = ReapOnDrop {
-        run_json: tmp
-            .path()
-            .join(pilotfish::paths::STATE_DIR_NAME)
-            .join("runs")
-            .join(&run_id)
-            .join("run.json"),
-    };
-
-    // `spawn` returns before the monitor has reported its pid, and a run
-    // without one still reads as `starting`: wait for the state the
-    // assertions below are about.
-    poll_status(&root, "slowpoke", SETTLE, |state| {
-        state["status"] == "running"
-    });
-
-    // A running run cannot be merged (1) and has nothing to answer (1).
-    let (code, _, stderr) = run(&root, &["merge", "slowpoke"]);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("is running"), "{stderr}");
-    assert!(
-        stderr.contains("only settled runs can be merged"),
-        "{stderr}"
-    );
-    let (code, _, stderr) = run(&root, &["answer", "slowpoke", "--", "argon2"]);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("no pending question"), "{stderr}");
-
-    // A wait that outlives its timeout is exit 3, not an error.
-    assert_eq!(wait_code(&root, "slowpoke", 1), 3, "timeout is exit 3");
-    let (code, _, stderr) = run(&root, &["wait", "slowpoke", "--timeout", "1"]);
-    assert_eq!(code, 3);
-    assert!(stderr.contains("timed out after 1s"), "{stderr}");
-
-    // Stop settles the run as stopped; `wait` then reports the bad end (4).
-    let (code, _, stderr) = run(&root, &["stop", "slowpoke"]);
-    assert_eq!(code, 0, "{stderr}");
-    let state = settled(&root, "slowpoke");
-    assert_eq!(state["status"], "stopped", "{state}");
-    assert_eq!(
-        wait_code(&root, "slowpoke", 30),
-        4,
-        "a stopped run is exit 4"
-    );
-
-    // A finished run refuses steering (1) with the resume hint.
-    let (code, _, stderr) = run(&root, &["send", "slowpoke", "--", "too late"]);
-    assert_eq!(code, 1, "{stderr}");
-    assert!(stderr.contains("steering refused"), "{stderr}");
-    assert!(
-        stderr.contains("pilotfish spawn slowpoke-2 --session"),
-        "carries the resume hint: {stderr}"
-    );
-
-    reap_monitor(&root, &run_id);
-}
-
-/// A worker whose pi dies without settling reads `error`, its reason names
-/// the cause, `wait` is exit 4, and with no report and no captured text
-/// `report` is exit 2.
-#[test]
-fn an_error_run_names_its_cause_and_report_is_exit_two() {
-    let _serial = serial();
-    let (tmp, root) = plain_dir();
-    let run_id = spawn_ok(&root, "doomed", "b", &fail_pi(), &[], &["--no-worktree"]);
-    let _reap_guard = ReapOnDrop {
-        run_json: tmp
-            .path()
-            .join(pilotfish::paths::STATE_DIR_NAME)
-            .join("runs")
-            .join(&run_id)
-            .join("run.json"),
-    };
-
-    assert_eq!(wait_code(&root, "doomed", 30), 4, "an error run is exit 4");
-    let state = settled(&root, "doomed");
-    assert_eq!(state["status"], "error", "{state}");
-    let error = state["error"].as_str().unwrap_or_default();
-    assert!(error.contains("exited with code 1"), "{error}");
-    assert!(error.contains("model provider unreachable"), "{error}");
-
-    let (code, _, stderr) = run(&root, &["report", "doomed"]);
-    assert_eq!(code, 2, "no report and no captured text: {stderr}");
-    assert!(
-        stderr.contains("no report file and no captured output for doomed"),
-        "{stderr}"
-    );
-
-    reap_monitor(&root, &run_id);
-}
-
-/// A conflicting branch merges with exit 5: the merge is aborted, the
-/// checkout is left clean, and the message tells the caller to have the
-/// worker rebase — the orchestrator never edits files itself.
-#[test]
-fn a_conflicting_branch_merges_with_exit_five_and_a_clean_checkout() {
-    let _serial = serial();
-    let (_tmp, root) = init_repo();
-    let run_id = spawn_ok(
-        &root,
-        "conflicter",
-        "write hello.txt",
-        &fake_pi(),
-        &[("FAKE_PI_WRITE_HELLO", "1")],
-        &[],
-    );
-    let _reap_guard = ReapOnDrop {
-        run_json: root
-            .canonicalize()
-            .unwrap()
-            .join(pilotfish::paths::STATE_DIR_NAME)
-            .join("runs")
-            .join(&run_id)
-            .join("run.json"),
-    };
-
-    let state = settled(&root, "conflicter");
-    assert_eq!(state["status"], "settled", "{state}");
-    let branch = state["branch"].as_str().unwrap().to_string();
-    let worktree = PathBuf::from(state["worktree"].as_str().unwrap());
-    assert!(branch.starts_with("pilotfish/conflicter-"), "{branch}");
-
-    // The fake wrote hello.txt but did not commit; the worker commits.
-    git(&worktree, &["add", "."]);
-    git(&worktree, &["commit", "-qm", "worker hello"]);
-    let base = state["baseCommit"].as_str().unwrap().to_string();
-
-    // A conflicting change lands on the main checkout.
-    std::fs::write(root.join("hello.txt"), "different\n").unwrap();
-    git(&root, &["add", "hello.txt"]);
-    git(&root, &["commit", "-qm", "conflict"]);
-
-    let (code, stdout, stderr) = run(&root, &["merge", "conflicter"]);
-    assert_eq!(code, 5, "stdout: {stdout}\nstderr: {stderr}");
-    assert!(
-        stdout.is_empty(),
-        "a conflict prints to stderr only: {stdout:?}"
-    );
-    assert!(stderr.contains("conflicts in:\nhello.txt"), "{stderr}");
-    assert!(
-        stderr.contains("The merge was aborted; the checkout is clean"),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&format!("rebase its branch {branch}")),
-        "{stderr}"
-    );
-    assert!(
-        stderr.contains(&base[..7]),
-        "names the commit the branch was cut from: {stderr}"
-    );
-
-    // The abort left the checkout clean and the worker's file untouched.
-    let status = StdCommand::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(&root)
-        .output()
-        .unwrap();
-    let porcelain_text = String::from_utf8_lossy(&status.stdout).into_owned();
-    let porcelain: Vec<&str> = porcelain_text
-        .lines()
-        .filter(|line| !line.is_empty() && *line != "?? .gitignore")
-        .collect();
-    assert_eq!(porcelain, Vec::<&str>::new(), "{porcelain:?}");
-    assert!(
-        !root.join(".git").join("MERGE_HEAD").exists(),
-        "the merge abort removed MERGE_HEAD"
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join("hello.txt")).unwrap(),
-        "different\n"
-    );
-
-    reap_monitor(&root, &run_id);
-}

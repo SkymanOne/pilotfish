@@ -139,7 +139,7 @@ fn claude_pid(fleet_dir: &Path) -> Option<i32> {
 }
 
 #[tokio::test]
-async fn deleting_the_fleet_directory_ends_the_monitor_and_its_claude_child() {
+async fn dir_removal_ends_monitor() {
     if !node_available() {
         eprintln!("skipping: node is not available");
         return;
