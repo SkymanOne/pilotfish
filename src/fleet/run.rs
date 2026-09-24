@@ -787,10 +787,24 @@ pub fn find_session_file(run_dir: &Path) -> Option<PathBuf> {
     Some(newest.0)
 }
 
+/// The session file a run can be resumed from: the newest file under its
+/// `session/` dir, or — when that is empty, as for a resumed run whose pi
+/// keeps writing the resumed file — the recorded `--session` argument when
+/// it names an existing file.
+#[must_use]
+pub fn session_file_or_arg(run_dir: &Path, session_arg: Option<&str>) -> Option<PathBuf> {
+    find_session_file(run_dir).or_else(|| {
+        session_arg
+            .map(Path::new)
+            .filter(|p| p.is_file())
+            .map(Path::to_path_buf)
+    })
+}
+
 /// Copy-pasteable command to continue a finished run's session in a new run.
 #[must_use]
 pub fn resume_hint(state: &RunState, run_dir: &Path) -> String {
-    let session = find_session_file(run_dir).map_or_else(
+    let session = session_file_or_arg(run_dir, state.session_arg.as_deref()).map_or_else(
         || {
             run_dir
                 .join("session")
@@ -1336,5 +1350,31 @@ mod tests {
         // Without session files, a placeholder stands in.
         let hint2 = resume_hint(&s, &fleet.join("runs/none-20260828141530"));
         assert!(hint2.contains("session/<session-file>"), "{hint2}");
+    }
+
+    #[test]
+    fn session_file_falls_back_to_arg() {
+        let fleet = fleet_dir("pilotfish-run-");
+        // A resumed run: its own session/ dir stays empty, and the recorded
+        // --session argument (the original run's file) is what fleet_status
+        // and resume_hint name.
+        let original = fleet.join("other/session/orig.jsonl");
+        std::fs::create_dir_all(original.parent().unwrap()).unwrap();
+        std::fs::write(&original, "{}\n").unwrap();
+        let run_dir = fleet.join("runs/auth-20260828141530");
+        std::fs::create_dir_all(run_dir.join("session")).unwrap();
+        let arg = original.to_string_lossy().into_owned();
+        assert_eq!(session_file_or_arg(&run_dir, Some(&arg)), Some(original));
+        // An argument that names no file is not a session file.
+        assert_eq!(
+            session_file_or_arg(&run_dir, Some("/nope/none.jsonl")),
+            None
+        );
+        // A real file under session/ wins over the argument.
+        std::fs::write(run_dir.join("session").join("own.jsonl"), "{}\n").unwrap();
+        assert_eq!(
+            session_file_or_arg(&run_dir, Some(&arg)),
+            Some(run_dir.join("session").join("own.jsonl"))
+        );
     }
 }

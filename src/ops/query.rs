@@ -205,9 +205,10 @@ pub(crate) async fn status_core_with_env(
             // resumes, so it travels with the single-run state.
             map.insert(
                 "sessionFile".to_string(),
-                run::find_session_file(&target.run_dir).map_or(Value::Null, |p| {
-                    Value::String(p.to_string_lossy().into_owned())
-                }),
+                run::session_file_or_arg(&target.run_dir, target.state.session_arg.as_deref())
+                    .map_or(Value::Null, |p| {
+                        Value::String(p.to_string_lossy().into_owned())
+                    }),
             );
         }
         let rendered = serde_json::to_string_pretty(&derived).unwrap_or_else(|_| "{}".into());
@@ -482,7 +483,15 @@ pub(crate) async fn logs_core_with_env(
 ) -> anyhow::Result<CommandResult<TextData>> {
     let (paths, target) = resolve_run_with_env(name, cwd, pilotfish_dir).await?;
     let n = tail.filter(|&n| n > 0).unwrap_or(50);
-    let text = tail_text(&paths.pi_log(&target.run_id), n);
+    // pi.log holds single lines of hundreds of thousands of characters
+    // (whole model catalogues, system-prompt echoes); clip each line so a
+    // tail cannot flood a context.
+    const LOG_LINE_CLIP: usize = 4096;
+    let text = tail_text(&paths.pi_log(&target.run_id), n)
+        .lines()
+        .map(|l| clip_line(l, LOG_LINE_CLIP))
+        .collect::<Vec<_>>()
+        .join("\n");
     if text.trim().is_empty() {
         return Ok(ok(TextData::default(), vec!["(no pi.log yet)".to_string()]));
     }
@@ -1034,6 +1043,22 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(none.out, vec!["(no pi.log yet)"]);
+        }
+        // One enormous line (a model catalogue, a system-prompt echo) comes
+        // back clipped, so a tail cannot flood a context.
+        {
+            let (dir, paths, run_id) =
+                fleet_with_run("pilotfish-query-logs3-", RunStatus::Running, Some(1));
+            let log = paths.pi_log(&run_id);
+            crate::util::append_text(&log, &format!("x{}\nshort\n", "y".repeat(200_000))).unwrap();
+            let result = logs_core_with_env("auth", Some(&dir), Some(10), None)
+                .await
+                .unwrap();
+            assert_eq!(result.code, ExitCode::Ok);
+            let joined = result.out.join("\n");
+            assert!(joined.len() < 10_000, "clipped: {}", joined.len());
+            assert!(joined.contains('…'), "the clip is marked: {joined}");
+            assert!(joined.contains("short"), "{joined}");
         }
     }
 

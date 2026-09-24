@@ -102,6 +102,13 @@ pub(crate) async fn spawn_core_with_dirs(
     if request.brief.trim().is_empty() {
         anyhow::bail!("spawn: task brief required after \"--\"");
     }
+    // A session that cannot be resumed is refused before anything exists —
+    // no worktree, no run record, no monitor. (Exit 1, like the cap.)
+    if let Some(session) = request.session.as_deref()
+        && let Some(reason) = check_session(session)
+    {
+        return Ok(fail(ExitCode::Error, vec![format!("spawn: {reason}")]));
+    }
     let config = crate::paths::load_user_config(user_config_dir)?;
     // The per-session cap is enforced before a worktree, a branch or a
     // monitor exist: `[limits] max_workers_per_session` (default 3) limits
@@ -575,6 +582,60 @@ one live run; stop or clean it first, or use another name.",
         state,
         worktree_path,
     })
+}
+
+/// The `session` argument, checked before anything is created. A bare id
+/// (no path syntax, no such file) is left to pi; a path that names no file
+/// is refused; an existing file whose first line records a working
+/// directory that no longer exists is refused — pi exits at boot in both
+/// cases, and the usual cause is `fleet_cleanup` having removed the old
+/// run's worktree.
+fn check_session(session: &str) -> Option<String> {
+    let path = std::path::Path::new(session);
+    let looks_like_path = path.is_absolute()
+        || session.contains('/')
+        || session.starts_with('.')
+        || session.ends_with(".jsonl");
+    if !looks_like_path && !path.is_file() {
+        return None;
+    }
+    if !path.is_file() {
+        return Some(format!(
+            "session file not found: {session} — there is nothing to resume; spawn without --session instead."
+        ));
+    }
+    let Some(old_cwd) = session_cwd(path) else {
+        // Not a session header pi would choke on anyway.
+        return None;
+    };
+    if std::path::Path::new(&old_cwd).is_dir() {
+        return None;
+    }
+    Some(format!(
+        "session cannot be resumed: its recorded working directory no longer \
+exists ({old_cwd}) — the session's worktree was cleaned up. Spawn without \
+--session instead."
+    ))
+}
+
+/// The `cwd` of a pi session file's first line (a `session` header), read
+/// without loading the whole file; `None` when the file says nothing usable.
+fn session_cwd(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut head = String::new();
+    // ponytail: reads the first 1 MiB, not truly one line — a session header
+    // is far smaller; switch to a line-by-line reader if headers ever grow.
+    std::io::BufReader::new(file)
+        .take(1024 * 1024)
+        .read_to_string(&mut head)
+        .ok()?;
+    let line = head.lines().next()?;
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()?
+        .get("cwd")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// The non-archived runs sharing `name` — by exact id, by the legacy
@@ -1512,5 +1573,59 @@ mod tests {
             let state = run::load_state(&created.run_dir).unwrap();
             assert_eq!(state.orchestrator_id, Some(session));
         }
+    }
+
+    #[tokio::test]
+    async fn session_resume_refused() {
+        // A session file whose recorded cwd is gone — the usual mark of a
+        // cleaned-up worktree — is refused before anything is created.
+        {
+            let dir = tmp_dir("pilotfish-spawn-sesscwd-");
+            let session = dir.join("session").join("s.jsonl");
+            std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+            std::fs::write(
+                &session,
+                r#"{"type":"session","version":3,"cwd":"/tmp/pilotfish-gone-worktree-9x"}"#,
+            )
+            .unwrap();
+            let mut req = request("resume", "b", &dir, true);
+            req.session = Some(session.to_string_lossy().into_owned());
+            let result = spawn_core_with_dirs(req, None, None).await.unwrap();
+            assert_eq!(result.code, ExitCode::Error, "refused with exit 1");
+            let err = result.err.join("\n");
+            assert!(err.contains("cleaned up"), "{err}");
+            assert!(err.contains("pilotfish-gone-worktree-9x"), "{err}");
+            assert!(err.contains("without --session"), "{err}");
+        }
+        // A session that names no file is refused likewise.
+        {
+            let dir = tmp_dir("pilotfish-spawn-sessmiss-");
+            let mut req = request("resume2", "b", &dir, true);
+            req.session = Some(
+                dir.join("session")
+                    .join("nope.jsonl")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let result = spawn_core_with_dirs(req, None, None).await.unwrap();
+            assert_eq!(result.code, ExitCode::Error);
+            assert!(result.err.join("\n").contains("session file not found"));
+        }
+    }
+
+    #[test]
+    fn session_check_leaves_pi_its_ids() {
+        let dir = tmp_dir("pilotfish-spawn-sessid-");
+        // A bare id (no path syntax, no such file) is left to pi.
+        assert_eq!(check_session("abc-123"), None);
+        // A session file whose cwd still exists is fine.
+        let session = dir.join("session").join("live.jsonl");
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            &session,
+            format!("{{\"type\":\"session\",\"cwd\":\"{}\"}}", dir.display()),
+        )
+        .unwrap();
+        assert_eq!(check_session(&session.to_string_lossy()), None);
     }
 }
