@@ -40,7 +40,7 @@ Every non-text action in the conversation is a `ctrl` chord.
 
 ## The fleet
 
-![The fleet overlay: the orchestrator and two running workers](../imgs/fleet.png)
+![The fleet overlay: the orchestrator and its four workers](../imgs/fleet.png)
 
 `ctrl-f` opens the fleet over the conversation: the orchestrator first, then one two-line row per worker. The first line holds the state glyph, the name, and for workers the branch and diff statistics, with the session's age on the right. The dimmed second line describes the session's current activity.
 
@@ -65,6 +65,8 @@ Within the fleet, single letters are commands:
 | `?` | Help |
 
 ## The command palette
+
+![The command palette: console commands, the agent's commands, models and sessions](../imgs/palette.png)
 
 `ctrl-k` opens a fuzzy palette over everything the selected session can do, ranked as you type and grouped as follows:
 
@@ -95,7 +97,7 @@ With the orchestrator selected, the composer sends ordinary messages. With a wor
 | `/clear` | | Clear this session's transcript from the console; the file on disk is unchanged |
 | `/trim` | | Shorten the orchestrator's transcript file to its recent tail |
 | `/sessions` | | List every session: alias, short uuid, workers and health |
-| `/session <uuid-or-alias>` | | Switch to another session; `/session new [alias]` starts one, `/session remove <uuid-or-alias>` removes one (see below) |
+| `/session <uuid-or-alias>` | | Switch to another session; `/session new [alias]` starts one, `/session rename <name>` renames the open one (an empty name clears it), `/session remove <uuid-or-alias>` removes one (see below) |
 | `/mouse` | | Toggle mouse capture, as `ctrl-y` does |
 | `/help` | `/h` | Keys and commands |
 | `/quit` | `/q` | Close the console (workers keep running) |
@@ -192,7 +194,7 @@ Long sessions manage their own size. The transcript file is capped, and after `[
 
 ## Removing a session
 
-When a session's work is finished, `x` on the orchestrator's row (or `/remove` with the orchestrator selected) removes the session entirely: its orchestrator is stopped, every worker it spawned is aborted if still running and removed with its worktree and branch, and its transcript, run records and entry in `fleet.json` are deleted. Branches are deleted whether or not they were merged, so the confirmation lists each worker with its state and diff statistics before anything happens. The console then moves to the most recently used remaining session, or starts a new one. `/session remove <uuid-or-alias>` removes a session other than the current one; `/sessions` lists them. Other sessions and their workers are never touched.
+When a session's work is finished, `x` on the orchestrator's row (or `/remove` with the orchestrator selected) removes the session entirely: its orchestrator is stopped, every worker it spawned is aborted if still running and removed with its worktree and branch, and its transcript, run records and entry in `fleet.json` are deleted. Branches are deleted whether or not they were merged, so the confirmation lists each worker with its state and diff statistics before anything happens. The console then moves to the most recently used remaining session; when none is left, no session is open until you start one with `/session new`. `/session remove <uuid-or-alias>` removes a session other than the current one; `/sessions` lists them. Other sessions and their workers are never touched.
 
 Removal is forced. An orchestrator or worker that does not stop when asked is terminated, together with its child processes, and a worktree that git refuses to remove (a locked one, for example) is deleted directly. Before any process is signalled, pilotfish checks that the process ID still belongs to that session's monitor or that worker's monitor. Anything that still could not be deleted is reported.
 

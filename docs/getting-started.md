@@ -4,7 +4,7 @@
 
 * A current stable Rust toolchain (the crate uses edition 2024)
 * `pi` on your `PATH`
-* `claude` (Claude Code 2.1.x) on your `PATH` and signed in
+* `claude` (Claude Code 2.1.x) on your `PATH` and signed in. The orchestrator uses that login, so your subscription, unless `ANTHROPIC_API_KEY` is set, in which case claude uses the key. Workers use whichever providers pi is configured with.
 * For the optional desktop window: macOS with Xcode, and its Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 
 ## Installation
@@ -28,7 +28,15 @@ cd your-repo
 pilotfish
 ```
 
-Describe the task to the orchestrator, for example: *"Add token refresh to the auth module and update the tests."* It writes the briefs, spawns the workers, and reports as each one finishes.
+The console opens with no session. Start one, naming it if you like:
+
+```text
+/session new auth-rework
+```
+
+Then describe the task to its orchestrator, for example: *"Add token refresh to the auth module and update the tests."* It writes the briefs, spawns the workers, and reports as each one finishes. In [the desktop window](desktop.md), **New session** does the same.
+
+Sessions are only ever started by you. Nothing creates one on your behalf: not opening the console, not switching, and not removing the last one.
 
 ## Launch options
 
@@ -46,7 +54,7 @@ These choices are recorded, so a restarted orchestrator resumes with the same mo
 
 ## Closing and reopening
 
-Quitting closes only the console. Orchestrators and workers are detached processes that keep their state on disk, so `pilotfish` reopens the most recently used orchestrator session, with its transcript replayed and any turn in progress still running. A permission prompt raised while no console was open is still waiting when the console returns.
+Quitting closes only the console. Orchestrators and workers are detached processes that keep their state on disk, so `pilotfish` reopens the most recently used session, with its transcript replayed and any turn in progress still running. A permission prompt raised while no console was open is still waiting when the console returns.
 
 If the orchestrator is no longer running — after a reboot or a `/shutdown` — a new one resumes the same claude session beneath the existing transcript, and a line marks the point of resumption. `--fresh` starts over.
 
