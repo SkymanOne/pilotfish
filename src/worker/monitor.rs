@@ -231,6 +231,11 @@ struct Shared {
     archived_on_disk: bool,
     settled_handled: bool,
     pending_abort: bool,
+    /// The last `turn_end`'s error: pi retries on its own, so an errored
+    /// turn followed by a successful one settles normally — only the last
+    /// turn before `agent_settled` decides. Set on every `turn_end`, cleared
+    /// by a clean one.
+    last_turn_error: Option<String>,
     finished: bool,
     prompt_sent: bool,
     shutdown_started: bool,
@@ -318,6 +323,7 @@ impl Monitor {
                 archived_on_disk: false,
                 settled_handled: false,
                 pending_abort: false,
+                last_turn_error: None,
                 finished: false,
                 prompt_sent: false,
                 shutdown_started: false,
@@ -667,6 +673,13 @@ impl Monitor {
                 sh.state.activity = Some(WorkerActivity::Tool);
                 sh.dirty = true;
             }
+            "turn_end" => {
+                // Remember the last turn's outcome so `agent_settled` knows
+                // whether pi failed (a 402 or OAuth refresh error) or retried
+                // its way to a clean turn before settling.
+                let mut sh = self.shared();
+                sh.last_turn_error = last_turn_error(&event.raw);
+            }
             "agent_settled" => {
                 let already = self.shared().settled_handled;
                 if already {
@@ -680,11 +693,14 @@ impl Monitor {
                 {
                     let mut sh = self.shared();
                     sh.settled_handled = true;
-                    sh.state.status = if sh.pending_abort {
-                        RunStatus::Stopped
+                    if sh.pending_abort {
+                        sh.state.status = RunStatus::Stopped;
+                    } else if let Some(error) = sh.last_turn_error.clone() {
+                        sh.state.status = RunStatus::Error;
+                        sh.state.error = Some(error);
                     } else {
-                        RunStatus::Settled
-                    };
+                        sh.state.status = RunStatus::Settled;
+                    }
                     sh.state.settled_at = Some(now_iso());
                     sh.state.pending_question = None;
                     sh.state.pending_dialog = None;
@@ -1275,6 +1291,22 @@ impl Monitor {
         }
         self.flush_now();
     }
+}
+
+/// The error of a `turn_end` whose `message.stopReason` is `"error"`; `None`
+/// for a clean turn, which clears an earlier error — pi retries on its own,
+/// and only the last turn before `agent_settled` decides the run's fate.
+fn last_turn_error(event: &Value) -> Option<String> {
+    let message = event.get("message")?;
+    if message.get("stopReason").and_then(Value::as_str) != Some("error") {
+        return None;
+    }
+    let text = match message.get("errorMessage") {
+        Some(Value::String(s)) if !s.is_empty() => s.clone(),
+        Some(value) if !value.is_null() => value.to_string(),
+        _ => "turn ended with an error".to_string(),
+    };
+    Some(text)
 }
 
 #[cfg(test)]

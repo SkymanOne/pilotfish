@@ -97,7 +97,12 @@ removing its directory stops it"
                     "session remove: forcing {} — {note}",
                     target.run_id
                 ));
-                force_remove_run(&target).await;
+                let problems = force_remove_run(&target).await;
+                err.extend(
+                    problems
+                        .into_iter()
+                        .map(|note| format!("session remove: forcing {} — {note}", target.run_id)),
+                );
                 data.forced.push(target.run_id.clone());
             }
         }
@@ -174,8 +179,11 @@ async fn stop_orchestrator(paths: &FleetPaths, key: &SessionKey) -> bool {
 /// Force out a run that would not go cleanly: kill its monitor's process
 /// group (pi with it) if it still runs, then take the worktree and the
 /// branch by hand — `--force` twice removes even a locked worktree, and
-/// what `git` still refuses is deleted and pruned.
-async fn force_remove_run(target: &RunRef) {
+/// what `git` still refuses is deleted and pruned. A worktree or branch the
+/// run.json did not legitimately own is left alone and the refusal is
+/// returned, never read as success.
+async fn force_remove_run(target: &RunRef) -> Vec<String> {
+    let mut problems = Vec::new();
     if let Some(pid) = target.state.pid
         && runs_marked(pid, &format!("--run {}", target.run_id))
     {
@@ -187,24 +195,34 @@ async fn force_remove_run(target: &RunRef) {
     }
     let (Some(worktree), Some(repo_root)) = (&target.state.worktree, &target.state.repo_root)
     else {
-        return;
+        return problems;
     };
     let repo = Path::new(repo_root);
     let tree = Path::new(worktree);
-    if tree.exists() {
-        let _ = git::git_raw(
-            &["worktree", "remove", "--force", "--force", worktree],
-            repo,
-        )
-        .await;
+    let worktrees_dir = Path::new(&target.state.fleet_dir).join("worktrees");
+    if let Err(err) = git::check_worktree_path(&worktrees_dir, repo, tree) {
+        problems.push(format!("{err:#}"));
+    } else {
+        if tree.exists() {
+            let _ = git::git_raw(
+                &["worktree", "remove", "--force", "--force", worktree],
+                repo,
+            )
+            .await;
+        }
+        if tree.exists() {
+            let _ = std::fs::remove_dir_all(tree);
+        }
+        let _ = git::git_raw(&["worktree", "prune"], repo).await;
     }
-    if tree.exists() {
-        let _ = std::fs::remove_dir_all(tree);
-    }
-    let _ = git::git_raw(&["worktree", "prune"], repo).await;
     if let Some(branch) = &target.state.branch {
-        git::delete_branch(repo, branch, true).await;
+        if let Err(err) = git::check_branch(branch) {
+            problems.push(format!("{err:#}"));
+        } else {
+            git::delete_branch(repo, branch, true).await;
+        }
     }
+    problems
 }
 
 /// Whether `pid` is alive and its command line carries `marker` — the
@@ -435,5 +453,35 @@ mod tests {
             !runs_marked(me, "--run definitely-not-this-process"),
             "a live pid without the run's marker is someone else's"
         );
+    }
+
+    #[tokio::test]
+    async fn force_remove_refuses_hostile_run_json() {
+        let root = init_repo("pilotfish-session-hostile-");
+        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        let (run_id, _tree, _branch) =
+            finished_worker(&root, &fleet_dir, "hostile", uuid::Uuid::new_v4());
+        let run_dir = fleet_dir.join("runs").join(&run_id);
+        // A hand-edited run.json naming the human's checkout and branch.
+        let mut state = run::load_state(&run_dir).unwrap();
+        state.worktree = Some(root.to_string_lossy().into_owned());
+        state.branch = Some("main".to_string());
+        let target = RunRef {
+            run_id: run_id.clone(),
+            run_dir,
+            state,
+        };
+
+        let problems = force_remove_run(&target).await;
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems[0].contains("repo root"), "{problems:?}");
+        assert!(
+            problems[1].contains("not a pilotfish/ branch"),
+            "{problems:?}"
+        );
+        // The checkout and its branch survive.
+        assert!(root.join("seed.txt").is_file());
+        assert!(branch_exists(&root, "main"));
     }
 }

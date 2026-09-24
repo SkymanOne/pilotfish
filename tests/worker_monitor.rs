@@ -420,6 +420,43 @@ fn run_lifecycle() {
 }
 
 #[test]
+fn errored_turn_reads_error() {
+    {
+        // The last turn before settling errored (e.g. a 402): the run must
+        // read as error, not settled.
+        let mut fleet = Fleet::new("pf-turnerr-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[("FAKE_PI_TURN_ERROR", "1"), ("FAKE_PI_DELAY_MS", "100")]);
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Error);
+        let error = state.error.unwrap_or_default();
+        assert!(
+            error.contains("in_flight_budget_exhausted"),
+            "the turn's errorMessage is recorded: {error}"
+        );
+        assert!(
+            state.settled_at.is_some(),
+            "an errored settle is still stamped"
+        );
+        let code = fleet.wait_monitor_exit(Duration::from_secs(15));
+        assert_eq!(code, Some(0), "monitor exits cleanly");
+    }
+    {
+        // pi retries on its own: an errored turn followed by a successful
+        // turn settles normally.
+        let mut fleet = Fleet::new("pf-turnretry-");
+        fleet.write_state();
+        fleet.spawn_monitor(&[
+            ("FAKE_PI_RETRY_AFTER_ERROR", "1"),
+            ("FAKE_PI_DELAY_MS", "100"),
+        ]);
+        let state = settled_or(&fleet, Duration::from_secs(30));
+        assert_eq!(state.status, RunStatus::Settled);
+        assert_eq!(state.error, None);
+    }
+}
+
+#[test]
 fn commands_and_activity() {
     {
         let mut fleet = spawn_slow("pf-cmds-", &[("FAKE_PI_DELAY_MS", "20000")]);
