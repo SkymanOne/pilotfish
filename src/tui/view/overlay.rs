@@ -44,14 +44,16 @@ pub fn draw(
 /// The fleet: every session and what can be done to the one selected, as
 /// wide as the screen and as tall as the fleet.
 fn fleet(frame: &mut Frame, area: Rect, console: &crate::tui::app::Console, pal: &Palette) {
-    let width = area.width.saturating_sub(4).max(20);
     // as tall as the fleet, not as tall as the screen: header, two rows per
     // session, a blank and the footer, plus the borders
     let wanted = u16::try_from(console.rows().len() * 2 + 5).unwrap_or(u16::MAX);
     let height = wanted.min(area.height.saturating_sub(2)).max(6);
+    // edge to edge: a panel this wide with a sliver of transcript showing
+    // down each side reads as a drawing glitch, not as a popup
+    let y = area.y + area.height.saturating_sub(height) / 2;
     let inner = panel(
         frame,
-        centered(area, width, height),
+        Rect::new(area.x, y, area.width, height),
         "fleet",
         OverlayRole::Fleet,
         pal,

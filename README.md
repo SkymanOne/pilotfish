@@ -4,23 +4,7 @@ A fleet of [pi](https://github.com/earendil-works/pi-mono) coding agents in your
 
 You describe the work. The orchestrator plans it, briefs a pi worker for each step, runs them side by side in their own git worktrees, and merges what they finish. You talk to it in one conversation and open the fleet whenever you want to see or touch a worker.
 
-```text
- > add token refresh to the auth module and update the tests
-
- ✻ two independent steps, so two workers  ⋯ 6 more
-
-   I'll split this into the refresh itself and its tests.
-
- ⚙ mcp__fleet__fleet_spawn add-auth
-   ↳ mcp__fleet__fleet_spawn: Spawned add-auth-1f2e3d4
-
- ⚑ settled add-auth  +12 −3
-
- ╭ orchestrator > ─────────────────────────────────────────────────╮
- │ ▍                                                               │
- ╰─────────────────────────────────────────────────────────────────╯
- sonnet · 4f2a91cc · $0.42 · 6 turns          ctrl+f fleet · ctrl+k commands
-```
+![The parl console: a conversation with the orchestrator, which has spawned two workers and answered one of their questions](imgs/main.png)
 
 * **Watch and interrupt anything.** Open any worker, steer it, or answer its question yourself. The orchestrator is told what you did and works with it instead of undoing it.
 * **The console is disposable.** Every agent runs under a detached monitor that keeps its state on disk, so you can close the console mid-run and reopen it where you left off.
@@ -63,6 +47,8 @@ The composer always has focus, so any key you press is text. `shift-enter` adds 
 | `/help` | everything else |
 
 ### Look at a worker
+
+![The fleet overlay over the conversation, listing the orchestrator and two running workers](imgs/fleet.png)
 
 `ctrl-f` opens the fleet over the conversation. Each row is a session with its state, branch, diff stat and what it is doing right now. Move with `j`/`k` or `1`–`9` and press `enter` to open that worker's conversation. In the fleet, single letters act on the selected row:
 

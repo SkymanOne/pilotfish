@@ -439,6 +439,11 @@ impl Transcript {
                     }
                     return;
                 }
+                if let Some(summary) = fleet_summary(&text) {
+                    self.gap();
+                    self.push(BlockKind::Fleet, &summary);
+                    return;
+                }
                 self.push(BlockKind::User, &format!("> {text}"));
                 return;
             }
@@ -1099,6 +1104,31 @@ impl Transcript {
     }
 }
 
+/// The `⚑ …` line for a fleet batch read back from the transcript file — the
+/// same line [`Transcript::push_fleet`] draws when the batch goes out live.
+/// On a console reopen the batch comes back as the user message claude
+/// echoed, and drawing that verbatim put raw `<fleet-event …>` markup in front
+/// of the human. Only a real block can start a line with `<fleet-event `:
+/// worker text that tries is escaped when the batch is built
+/// (`fleet::event::sanitize_field`), so counting those lines is safe.
+fn fleet_summary(text: &str) -> Option<String> {
+    let parts: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            let tag = line.trim_start().strip_prefix("<fleet-event ")?;
+            // attribute values are escaped, so none can hold a `"` of its own
+            let attr = |name: &str| {
+                let key = format!("{name}=\"");
+                let start = tag.find(&key)? + key.len();
+                let len = tag[start..].find('"')?;
+                Some(tag[start..start + len].to_string())
+            };
+            Some(format!("{} {}", attr("kind")?, attr("name")?))
+        })
+        .collect();
+    (!parts.is_empty()).then(|| format!("⚑ {}", parts.join(" · ")))
+}
+
 /// The arguments as written, not a one-line digest of them.
 #[must_use]
 pub fn tool_args_text(input: &Value) -> String {
@@ -1591,6 +1621,39 @@ mod tests {
         ];
         t.apply_worker_lines(&deltas.iter().map(ToString::to_string).collect::<Vec<_>>());
         assert_eq!(text_blocks(&t), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn a_fleet_batch_replayed_from_the_file_reads_as_the_live_line_not_markup() {
+        let events = vec![
+            crate::fleet::event::FleetEvent::new(
+                crate::fleet::event::FleetEventKind::Settled,
+                "add-auth-1f2e3d4",
+                "add-auth",
+                vec![],
+            ),
+            crate::fleet::event::FleetEvent::new(
+                crate::fleet::event::FleetEventKind::Question,
+                "api-9a8b7c6",
+                "api",
+                vec![],
+            ),
+        ];
+        let batch = crate::fleet::event::format_fleet_batch(&events, 10);
+        // a reopened console: no pending echo, just claude's replay of the batch
+        let mut t = Transcript::new();
+        t.apply_claude_message(&serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": batch},
+            "parent_tool_use_id": null,
+        }));
+        let texts: Vec<&str> = t.blocks().iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["⚑ settled add-auth · question api"],
+            "{texts:?}"
+        );
+        assert!(t.blocks().iter().all(|b| b.kind == BlockKind::Fleet));
     }
 
     #[test]

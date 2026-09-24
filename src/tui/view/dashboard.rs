@@ -167,15 +167,15 @@ fn row_style(row: &DashboardRow, selected: bool, pal: &Palette) -> Style {
 
 /// The dimmed second line: what the session is doing right now.
 fn secondary_line(row: &DashboardRow, selected: bool, pal: &Palette) -> Line<'static> {
+    // The selection bar is the primary row's. Under it the detail brightens
+    // instead of taking the bar's background, which is the dim colour itself:
+    // dim on the bar drew the text invisible.
     let base = if row.attention {
         pal.attention()
+    } else if selected {
+        Style::default()
     } else {
         pal.dim()
-    };
-    let base = if selected {
-        base.patch(pal.selected())
-    } else {
-        base
     };
     Line::from(vec![
         Span::styled("    ".to_string(), base),
@@ -256,7 +256,7 @@ mod tests {
             let line = primary_line(&orch, selected, 30, &pal);
             assert!(
                 line.spans.iter().all(|s| s.style.fg == accent),
-                "the session that owns the conversation keeps its colour                  (selected: {selected}): {line:?}"
+                "the session that owns the conversation keeps its colour (selected: {selected}): {line:?}"
             );
             let line = primary_line(&worker, selected, 30, &pal);
             assert!(
@@ -292,6 +292,33 @@ mod tests {
         assert!(
             line.spans.iter().all(|s| s.style.fg == pal.attention().fg),
             "selection must not hide a pending question: {line:?}"
+        );
+    }
+
+    #[test]
+    fn the_selected_rows_detail_stays_readable() {
+        let pal = Palette::colored();
+        let row = DashboardRow {
+            key: "orchestrator".into(),
+            glyph: "○",
+            name: "orchestrator".into(),
+            detail: "idle".into(),
+            age: String::new(),
+            target: SessionTarget::Orchestrator(uuid::Uuid::nil()),
+            attention: false,
+            branch: None,
+            diff_stat: None,
+        };
+        let line = secondary_line(&row, true, &pal);
+        assert!(
+            line.spans
+                .iter()
+                .all(|s| s.style.fg.is_none() || s.style.fg != s.style.bg),
+            "text drawn in its own background colour is invisible: {line:?}"
+        );
+        assert_ne!(
+            line.spans[1].style,
+            secondary_line(&row, false, &pal).spans[1].style
         );
     }
 }
