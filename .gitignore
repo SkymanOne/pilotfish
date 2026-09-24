@@ -11,3 +11,4 @@ node_modules
 # the previous name's state; a fleet may still be running out of it
 .parl/
 .lavish/
+.zed/
