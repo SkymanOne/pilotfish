@@ -1193,6 +1193,8 @@ fn open_routing(c: &mut Console, enabled: bool, key: KeyState) {
             enabled,
             key,
             candidates: Ok(3),
+            threshold: 0.6,
+            models: vec!["deepseek-v4-flash".into(), "gone:retired-model".into()],
         });
     }
 }
@@ -1955,4 +1957,204 @@ fn is_terminal_view_covers_the_graveyard() {
     assert!(!is_terminal_view(DerivedView::Starting));
     assert!(is_terminal_view(DerivedView::Settled));
     assert!(is_terminal_view(DerivedView::Archived));
+}
+
+fn model_question(id: &str) -> crate::route::ModelQuestion {
+    let option = |key: &str, p: f64| crate::route::ModelOption {
+        key: key.into(),
+        probability: Some(p),
+        detail: String::new(),
+    };
+    crate::route::ModelQuestion {
+        id: id.into(),
+        name: "add-auth".into(),
+        brief: "add token refresh".into(),
+        confidence: 0.3,
+        threshold: 0.6,
+        options: vec![
+            option("anthropic:claude-opus-5", 0.4),
+            option("opencode-go:deepseek-v4-flash", 0.3),
+            option("anthropic:claude-haiku-4-5", 0.1),
+        ],
+        fallback: Some("claude-sonnet-5".into()),
+        asked_at: crate::util::now_iso(),
+        pid: std::process::id(),
+        deadline_ms: crate::util::now_ms() + 600_000,
+    }
+}
+
+#[test]
+fn a_model_question_raises_itself_and_is_answered_from_the_list() {
+    let mut c = setup_with_worker();
+    c.set_model_questions(vec![model_question("q1")]);
+    assert!(
+        matches!(c.overlay(), Some(Overlay::ModelChoice(s)) if s.id == "q1" && s.selected == 0),
+        "the spawn is waiting, so the prompt comes to the human"
+    );
+    read_the_prompt(&mut c);
+    c.handle_key(ch('j'));
+    assert_eq!(
+        c.handle_key(enter()),
+        vec![Effect::AnswerModelQuestion {
+            id: "q1".into(),
+            model: Some("opencode-go:deepseek-v4-flash".into()),
+        }]
+    );
+    assert!(c.overlay().is_none());
+}
+
+#[test]
+fn a_digit_picks_d_keeps_the_default_and_esc_answers_later() {
+    let mut c = setup_with_worker();
+    c.set_model_questions(vec![model_question("q1")]);
+    read_the_prompt(&mut c);
+    assert_eq!(
+        c.handle_key(ch('3')),
+        vec![Effect::AnswerModelQuestion {
+            id: "q1".into(),
+            model: Some("anthropic:claude-haiku-4-5".into()),
+        }]
+    );
+
+    let mut c = setup_with_worker();
+    c.set_model_questions(vec![model_question("q2")]);
+    read_the_prompt(&mut c);
+    assert_eq!(
+        c.handle_key(ch('d')),
+        vec![Effect::AnswerModelQuestion {
+            id: "q2".into(),
+            model: None,
+        }]
+    );
+
+    let mut c = setup_with_worker();
+    c.set_model_questions(vec![model_question("q3")]);
+    read_the_prompt(&mut c);
+    assert!(c.handle_key(esc()).is_empty());
+    assert!(c.overlay().is_none());
+    // the next poll does not throw it straight back up …
+    c.last_key_at = 0;
+    c.set_model_questions(vec![model_question("q3")]);
+    assert!(c.overlay().is_none(), "dismissed once, it stays dismissed");
+    // … and `a` on the orchestrator's row brings it back
+    select_row(&mut c, 0);
+    fleet_key(&mut c, 'a');
+    assert!(matches!(c.overlay(), Some(Overlay::ModelChoice(s)) if s.id == "q3"));
+}
+
+#[test]
+fn a_model_question_never_rises_under_typing_and_closes_when_it_goes() {
+    let mut c = setup_with_worker();
+    type_text(&mut c, "half a thought");
+    c.set_model_questions(vec![model_question("q1")]);
+    assert!(c.overlay().is_none(), "not while the composer holds text");
+    c.composer.input.clear();
+    c.last_key_at = 0;
+    c.set_model_questions(vec![model_question("q1")]);
+    assert!(matches!(c.overlay(), Some(Overlay::ModelChoice(_))));
+    // the spawn gave up (or was answered elsewhere): nothing to answer
+    c.set_model_questions(Vec::new());
+    assert!(c.overlay().is_none());
+}
+
+#[test]
+fn the_routing_panel_steps_the_ask_limit_within_zero_and_one() {
+    let mut c = setup_with_worker();
+    open_routing(&mut c, true, KeyState::None);
+    assert_eq!(
+        c.handle_key(ch('+')),
+        vec![Effect::SetRoutingThreshold(0.65)]
+    );
+    assert_eq!(
+        c.handle_key(ch('-')),
+        vec![Effect::SetRoutingThreshold(0.55)]
+    );
+    if let Some(Overlay::Routing(panel)) = &mut c.overlay {
+        panel.status.as_mut().unwrap().threshold = 1.0;
+    }
+    assert!(c.handle_key(ch('+')).is_empty(), "1 is as high as it goes");
+}
+
+fn priced_model(provider: &str, id: &str) -> WorkerModel {
+    WorkerModel::new(provider, id)
+}
+
+#[test]
+fn the_shortlist_ticks_filters_and_saves_keeping_what_it_cannot_see() {
+    let mut c = setup_with_worker();
+    let catalogue = vec![
+        priced_model("anthropic", "claude-opus-5"),
+        priced_model("openrouter", "deepseek-v4-flash"),
+        priced_model("opencode-go", "deepseek-v4-flash"),
+    ];
+    crate::fleet::run::write_pi_cache(
+        c.fleet.root(),
+        &crate::fleet::run::PiCache {
+            available_models: catalogue,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    open_routing(&mut c, true, KeyState::None);
+    c.handle_key(ch('m'));
+    let editor = |c: &Console| match c.overlay() {
+        Some(Overlay::Routing(panel)) => panel.shortlist.clone().unwrap(),
+        other => panic!("not the shortlist: {other:?}"),
+    };
+    let opened = editor(&c);
+    assert_eq!(
+        opened.chosen.iter().cloned().collect::<Vec<_>>(),
+        vec![
+            "opencode-go:deepseek-v4-flash",
+            "openrouter:deepseek-v4-flash"
+        ],
+        "a bare id ticks every provider of it"
+    );
+    assert_eq!(opened.kept, vec!["gone:retired-model"]);
+    // letters are the filter, not commands
+    type_text(&mut c, "opus");
+    assert_eq!(editor(&c).visible, vec![0]);
+    c.handle_key(enter());
+    assert!(editor(&c).chosen.contains("anthropic:claude-opus-5"));
+    assert_eq!(
+        c.handle_key(esc()),
+        vec![Effect::SetRoutingModels(vec![
+            "anthropic:claude-opus-5".into(),
+            "opencode-go:deepseek-v4-flash".into(),
+            "openrouter:deepseek-v4-flash".into(),
+            "gone:retired-model".into(),
+        ])]
+    );
+    assert!(
+        matches!(c.overlay(), Some(Overlay::Routing(panel)) if panel.shortlist.is_none()),
+        "back on the panel"
+    );
+}
+
+#[test]
+fn the_shortlist_refuses_a_model_past_the_limit() {
+    let mut c = setup_with_worker();
+    let catalogue: Vec<WorkerModel> = (0..=crate::route::MAX_CHOICES)
+        .map(|i| priced_model("openrouter", &format!("m-{i:03}")))
+        .collect();
+    let all: Vec<String> = catalogue
+        .iter()
+        .take(crate::route::MAX_CHOICES)
+        .map(WorkerModel::key)
+        .collect();
+    let mut editor = ShortlistEditor::new(catalogue, &all);
+    assert_eq!(editor.count(), crate::route::MAX_CHOICES);
+    editor.selected = crate::route::MAX_CHOICES; // the one left unticked
+    c.overlay = Some(Overlay::Routing(RoutingPanel {
+        shortlist: Some(editor),
+        ..RoutingPanel::default()
+    }));
+    c.handle_key(enter());
+    let Some(Overlay::Routing(panel)) = c.overlay() else {
+        panic!("still editing");
+    };
+    let editor = panel.shortlist.as_ref().unwrap();
+    assert_eq!(editor.count(), crate::route::MAX_CHOICES, "not ticked");
+    assert!(!editor.changed);
+    assert!(c.flash().is_some_and(|f| f.error && f.text.contains("255")));
 }

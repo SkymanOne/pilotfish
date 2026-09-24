@@ -1,88 +1,98 @@
 # parl
 
-A fleet of [pi](https://github.com/earendil-works/pi-mono) coding agents in your terminal, with Claude Code as the orchestrator.
+`parl` runs a fleet of [pi](https://github.com/earendil-works/pi-mono) coding agents from the terminal, coordinated by Claude Code.
 
-You describe the work. The orchestrator plans it, briefs a pi worker for each step, runs them side by side in their own git worktrees, and merges what they finish. You talk to it in one conversation and open the fleet whenever you want to see or touch a worker.
+You describe the work to an orchestrator. It plans the change, writes a brief for each step, and runs one pi worker per step, each in its own git worktree. It then reviews and merges what the workers produce. The whole exchange happens in a single conversation, and the fleet view can be opened at any time to inspect or direct an individual worker.
 
 ![The parl console: a conversation with the orchestrator, which has spawned two workers and answered one of their questions](imgs/main.png)
 
-* **Watch and interrupt anything.** Open any worker, steer it, or answer its question yourself. The orchestrator is told what you did and works with it instead of undoing it.
-* **The console is disposable.** Every agent runs under a detached monitor that keeps its state on disk, so you can close the console mid-run and reopen it where you left off.
-* **The orchestrator never types code.** It reads, plans, merges and verifies; `Edit` and `Write` are disabled for it. Workers do the writing, each on its own branch.
-* **Nothing to install on either agent.** The orchestrator is a plain `claude -p` process this app owns, and the pi worker extension ships inside the binary.
-* **Scriptable.** The console is one client. `parl spawn`, `status`, `merge` and friends drive the same fleet from a shell.
+## Features
 
-## Install
+* **Full oversight.** Any worker can be opened, steered, stopped, or answered directly. The orchestrator is informed of each intervention and incorporates it rather than reversing it.
+* **Durable sessions.** Every agent runs under a detached monitor that records its state on disk. The console can be closed mid-run and reopened later without interrupting any work.
+* **Separation of duties.** The orchestrator reads, plans, merges and verifies; `Edit` and `Write` are disabled for it. Only workers modify code, each on a dedicated branch.
+* **No agent-side setup.** The orchestrator is a `claude -p` process managed by `parl`, and the pi worker extension is embedded in the binary.
+* **Model routing.** Optionally, each worker's model and reasoning level are chosen from its brief, weighing capability against cost. Uncertain choices are referred to you.
+* **Scriptable.** The console is one client among several. `parl spawn`, `status`, `merge` and related commands operate on the same fleet from a shell.
 
-You need a current Rust toolchain, `pi` on your PATH, and `claude` (Claude Code 2.1.x) logged in. The orchestrator runs on your Claude Code login — your subscription, unless `ANTHROPIC_API_KEY` is set, which claude then uses instead. Workers use whatever providers pi is set up with.
+## Installation
+
+Requirements: a current stable Rust toolchain, `pi` on your `PATH`, and `claude` (Claude Code 2.1.x) signed in. The orchestrator uses your Claude Code login — your subscription, unless `ANTHROPIC_API_KEY` is set, in which case claude uses the key. Workers use whichever providers pi is configured with.
 
 ```bash
-cargo install --git https://github.com/SkymanOne/parl
+cargo install --locked --git https://github.com/SkymanOne/parl
 parl --help
 ```
 
+`--locked` builds against the dependency versions recorded in `Cargo.lock`, which are the versions the test suite runs against.
+
 ## Usage
 
-### Start a session
+### Starting a session
 
 ```bash
 cd your-repo
 parl
 ```
 
-Type what you want done and press `enter`: *"Add token refresh to the auth module and update the tests."* The orchestrator plans the work, tells you what it is spawning, and reports back as each worker finishes — status, what changed, how it was verified. When a worker's branch is merged and checked, the orchestrator cleans it up.
+Describe the task and press `enter`, for example: *"Add token refresh to the auth module and update the tests."* The orchestrator states its plan, spawns the workers it needs, and reports on each as it finishes: its status, what changed, and how the change was verified. Once a worker's branch has been merged and checked, the orchestrator removes it.
 
-The composer always has focus, so any key you press is text. `shift-enter` adds a line (`alt-enter` or `ctrl-j` on terminals that cannot tell them apart), and a pasted multi-line brief stays one message until you send it. `esc` closes whatever is open, clears the line, and with nothing left interrupts the orchestrator's turn.
+The composer always has keyboard focus, so every printable key is text. `shift-enter` inserts a newline (`alt-enter` or `ctrl-j` on terminals that cannot distinguish it), and a pasted multi-line brief is kept as a single message. `esc` closes the open panel, then clears the line, and finally interrupts the orchestrator's current turn.
 
-### Keys worth knowing
+### Keyboard shortcuts
 
-| Keys | What they do |
+| Keys | Action |
 | --- | --- |
-| `ctrl-f` | the fleet: every session, and what you can do to the selected one |
-| `ctrl-k` | the command palette: console commands, the agent's own, models, sessions |
-| `ctrl-r` | search the conversation; again for the next match |
-| `ctrl-o` | unfold older reasoning and tool output |
-| `ctrl-y` | release the mouse so you can select and copy text |
-| `pgup` / `pgdn` | scroll (the wheel does too) |
-| `/help` | everything else |
+| `ctrl-f` | Open the fleet: every session and the actions available for the selected one |
+| `ctrl-k` | Open the command palette: console commands, the agent's own commands, models, sessions |
+| `ctrl-r` | Search the conversation; press again for the next match |
+| `ctrl-o` | Expand older reasoning and tool output |
+| `ctrl-y` | Release the mouse to select and copy text |
+| `pgup` / `pgdn` | Scroll (the mouse wheel also scrolls) |
+| `/help` | Show all keys and commands |
 
-### Look at a worker
+### Inspecting a worker
 
 ![The fleet overlay over the conversation, listing the orchestrator and two running workers](imgs/fleet.png)
 
-`ctrl-f` opens the fleet over the conversation. Each row is a session with its state, branch, diff stat and what it is doing right now. Move with `j`/`k` or `1`–`9` and press `enter` to open that worker's conversation. In the fleet, single letters act on the selected row:
+`ctrl-f` opens the fleet over the conversation. Each row shows a session's state, branch, diff statistics and current activity. Select a row with `j`/`k` or `1`–`9`, and press `enter` to open that session's conversation. Within the fleet, single letters act on the selected row:
 
 | Key | Action |
 | --- | --- |
-| `a` | answer the question or dialog it is blocked on |
-| `s` | stop it |
-| `x` | remove it: worktree, branch and row (asks first) |
-| `t` / `m` | cycle its thinking level / switch its model, live |
-| `b` | read its full brief |
+| `a` | Answer the question or dialog the worker is blocked on |
+| `s` | Stop the worker |
+| `x` | Remove the worker, its worktree and its branch (asks for confirmation) |
+| `t` / `m` | Cycle the thinking level / switch the model, without restarting |
+| `b` | Show the full brief |
 
-With a worker open, what you type steers it, delivered after its current tool call. `/answer <text>`, `/followup <text>` and `/stop` do the rest; `ctrl-f`, `1`, `enter` takes you back to the orchestrator.
+While a worker is open, anything you type is delivered to it as steering after its current tool call. `/answer <text>`, `/followup <text>` and `/stop` cover the remaining interactions. To return to the orchestrator, press `ctrl-f`, `1`, `enter`.
 
 ### Permissions
 
-The orchestrator runs reads and read-only git freely. Anything else raises a prompt in the console: `y` allows once, `a` allows it for the session, `n` denies with a reason. Choose how often that happens with `--permission-mode`:
+The orchestrator may read files and run read-only git commands without approval. Any other action raises a prompt in the console: `y` allows it once, `a` allows it for the rest of the session, and `n` denies it with a reason. The frequency of these prompts is set with `--permission-mode`:
 
 ```bash
-parl --permission-mode auto      # a classifier handles routine approvals
+parl --permission-mode auto      # a classifier approves routine actions
 ```
 
-`p` in the fleet cycles the mode mid-session; `default`, `auto`, `acceptEdits`, `dontAsk` and `plan` are on offer.
+`p` in the fleet cycles the mode during a session. The available modes are `default`, `auto`, `acceptEdits`, `dontAsk` and `plan`.
 
-### Come back later
+### Resuming a session
 
-`/quit` (or `ctrl-c`) closes the console and nothing else: the orchestrator and its workers keep running. Run `parl` again in the same repository and you are back where you were, mid-thought if it was working, with any permission prompt that came up meanwhile still waiting for you. `parl --fresh` starts a new orchestrator session instead; `/shutdown` stops everything.
+`/quit` (or `ctrl-c`) closes the console only; the orchestrator and its workers continue to run. Running `parl` again in the same repository restores the session, including any turn in progress and any permission prompt raised while the console was closed. `parl --fresh` starts a new orchestrator session, and `/shutdown` stops all agents.
 
-### Choose models
+### Model selection
 
 ```bash
-parl --model opus                # the orchestrator's model; /model switches it live
+parl --model opus                # the orchestrator's model; /model changes it during a session
 ```
 
-A worker gets `[worker] model` from `~/.parl/config.toml` unless the orchestrator names one. Or let routing pick: `/routing` switches it on and asks for a [TypeSafe](https://docs.typesafe.ai) key, which goes to your operating system's keychain and nowhere else. With routing on, a worker spawned without a model has one chosen from its brief, among the models you allow:
+By default a worker runs on `[worker] model` from `~/.parl/config.toml`, unless the orchestrator specifies another. Routing can choose instead: `/routing` enables it and stores a [TypeSafe](https://docs.typesafe.ai) API key in the operating system's credential store, and nowhere else. With routing enabled, a worker spawned without a model is routed in two steps:
+
+1. **Model.** TypeSafe's System One (Jev) selects the model that gives the best result for its cost from your shortlist. Each candidate is presented with its price relative to the cheapest option, and where two candidates are nearly tied, the cheaper one is chosen. If Jev's confidence is below your limit, the console asks you to choose, and the spawn waits for your answer for up to ten minutes before falling back to the configured model.
+2. **Thinking level.** Jev then selects a reasoning level from those the chosen model supports.
+
+The shortlist (`m` in the `/routing` panel) and the confidence limit (`-` / `+` in the same panel) are saved to the user configuration:
 
 ```toml
 # ~/.parl/config.toml
@@ -91,16 +101,19 @@ model = "claude-sonnet-5"
 
 [routing]
 enabled = true
-models = ["anthropic:claude-opus-5", "anthropic:claude-sonnet-5", "deepseek-v4-flash"]
+confidence_threshold = 0.6       # below this, you choose the model
+models = ["anthropic:claude-opus-5", "anthropic:claude-sonnet-5", "opencode-go:deepseek-v4-flash"]
 ```
 
-### Keep long sessions small
+A single decision can weigh at most 255 models, so the shortlist is capped at 255 entries.
 
-A session that runs for hours compacts itself: after `[session] auto_compact_turns` turns (60 by default, `0` to turn it off) the orchestrator's context is summarised with claude's own `/compact`, and its transcript file is capped on disk. Older reasoning and tool output fold to one line each; `ctrl-o` unfolds them. `/clear` empties the view, `/trim` shortens the file.
+### Long-running sessions
 
-### Script it
+Sessions manage their own size. After `[session] auto_compact_turns` turns (60 by default; `0` disables it), the orchestrator's context is summarised with claude's `/compact`, and the transcript file is capped on disk. Older reasoning and tool output are collapsed to one line each, and `ctrl-o` expands them. `/clear` empties the view and `/trim` shortens the file.
 
-The same fleet, without the console:
+### Scripting
+
+The same fleet can be driven without the console:
 
 ```bash
 parl spawn add-auth -- "Add token refresh to src/auth. Run cargo test. Commit your work."
@@ -108,15 +121,15 @@ parl status                      # the fleet table
 parl wait add-auth               # exit 0 settled, 3 timed out, 4 stopped/error/dead
 parl report add-auth             # the worker's report; exit 2 if there is none
 parl diff add-auth
-parl merge add-auth              # exit 5 on conflicts, with the checkout left clean
+parl merge add-auth              # exit 5 on conflicts, leaving the checkout clean
 parl cleanup add-auth
 ```
 
-Every command has `--help`; exit codes are the same numbers the orchestrator branches on.
+Every command accepts `--help`. The exit codes are the same values the orchestrator acts on.
 
-## Docs
+## Documentation
 
-* [Getting started](docs/getting-started.md): install, launch options, the user config, where the state lives
-* [The console](docs/console.md): every key and command, the fleet, the palette, permissions, routing, the transcript
-* [Headless commands](docs/cli.md): the CLI surface, its exit codes, and how routing chooses
-* [AGENTS.md](AGENTS.md): the map for anyone working on the code, human or agent. Module layout, the on-disk contract, what was verified about the pi and claude protocols, and why things are the way they are.
+* [Getting started](docs/getting-started.md): installation, launch options, user configuration, and where state is stored
+* [The console](docs/console.md): keys and commands, the fleet, the palette, permissions, routing, and the transcript
+* [Headless commands](docs/cli.md): the CLI, its exit codes, and how routing decides
+* [AGENTS.md](AGENTS.md): the reference for contributors, human or agent — module layout, the on-disk contract, verified facts about the pi and claude protocols, and the reasoning behind the design

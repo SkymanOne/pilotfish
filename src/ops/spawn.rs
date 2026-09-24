@@ -119,7 +119,14 @@ pub(crate) async fn spawn_core_with_dirs(
     // What it picks is what gets validated below.
     let mut request = request;
     let in_flight = super::live_runs_for_session(&fleet_dir, session);
-    let routing = route_request(&mut request, &config, &fleet_dir, &in_flight).await;
+    let routing = route_request(
+        &mut request,
+        &config,
+        &fleet_dir,
+        &in_flight,
+        model_ask_timeout_ms(),
+    )
+    .await;
     let cap = config.max_workers_per_session();
     let live = super::live_runs_for_session(&fleet_dir, session);
     if live.len() >= cap {
@@ -207,9 +214,31 @@ per-session cap is {cap} ([limits] max_workers_per_session):\n{holders}\n{hint}"
     })
 }
 
+/// How long a spawn waits for the human to choose a model Jev was unsure
+/// of, unless `$PARL_ASK_TIMEOUT_MS` says otherwise: the same ten minutes a
+/// worker's `fleet_ask` waits.
+const MODEL_ASK_TIMEOUT_MS: i64 = 10 * 60_000;
+
+/// How often the waiting spawn looks for the console's answer.
+const MODEL_ASK_POLL_MS: u64 = 200;
+
+fn model_ask_timeout_ms() -> i64 {
+    std::env::var(crate::paths::env_var("ASK_TIMEOUT_MS"))
+        .ok()
+        .and_then(|raw| raw.trim().parse::<i64>().ok())
+        .filter(|ms| *ms > 0)
+        .unwrap_or(MODEL_ASK_TIMEOUT_MS)
+}
+
 /// Ask Jev which model, thinking level and worktree this brief wants, and
 /// fold the answer into the request. Anything the caller pinned explicitly
 /// wins: routing fills gaps, it never overrides a decision already made.
+///
+/// Two cycles. The first chooses the model; when Jev is less sure than
+/// `[routing] confidence_threshold`, the human is asked in the console and
+/// the spawn waits up to `ask_timeout_ms` for the answer, keeping the
+/// configured model if none comes. The second chooses the thinking level
+/// among the levels of the model that will run, whoever chose it.
 ///
 /// Returns what was decided, for the run record and the spawn's output.
 /// `None` means routing did not run — off, unkeyed, or nothing to choose
@@ -219,6 +248,7 @@ async fn route_request(
     config: &crate::paths::UserConfig,
     fleet_dir: &Path,
     in_flight: &[RunState],
+    ask_timeout_ms: i64,
 ) -> Option<crate::route::Routing> {
     let mut routing_config = config.routing.clone();
     if let Some(explicit) = request.route {
@@ -234,21 +264,6 @@ async fn route_request(
     if !routing_config.enabled {
         return None;
     }
-    let catalogue = run::read_pi_cache(fleet_dir)
-        .map(|cache| cache.available_models)
-        .unwrap_or_default();
-    let repo_root = fleet_dir.parent().unwrap_or(fleet_dir).to_path_buf();
-    let provider = config.worker_provider(request.provider.as_deref());
-    let fallback_model = config.worker_model(request.model.as_deref());
-    let brief = crate::route::Brief {
-        name: &request.name,
-        brief: &request.brief,
-        repo_root: &repo_root,
-        in_flight,
-        catalogue: &catalogue,
-        provider,
-        fallback_model,
-    };
     // routing is on, so a missing key is said rather than silently skipped
     let key = match tokio::task::spawn_blocking(crate::secrets::typesafe_key).await {
         Ok(Ok(Some((key, _)))) => key,
@@ -268,7 +283,96 @@ or $PARL_TYPESAFE_API_KEY"
         }
         Err(_) => return None,
     };
-    let routing = crate::route::route(&brief, &routing_config, Some(key.expose())).await?;
+    route_with_key(
+        request,
+        config,
+        &routing_config,
+        fleet_dir,
+        in_flight,
+        key.expose(),
+        ask_timeout_ms,
+    )
+    .await
+}
+
+/// [`route_request`] once routing is on and the key is in hand — the part
+/// the tests drive, since the key otherwise comes from the environment or
+/// the credential store.
+async fn route_with_key(
+    request: &mut SpawnRequest,
+    config: &crate::paths::UserConfig,
+    routing_config: &crate::paths::RoutingConfig,
+    fleet_dir: &Path,
+    in_flight: &[RunState],
+    key: &str,
+    ask_timeout_ms: i64,
+) -> Option<crate::route::Routing> {
+    let catalogue = run::read_pi_cache(fleet_dir)
+        .map(|cache| cache.available_models)
+        .unwrap_or_default();
+    let repo_root = fleet_dir.parent().unwrap_or(fleet_dir).to_path_buf();
+    let provider = config.worker_provider(request.provider.as_deref());
+    let fallback_model = config.worker_model(request.model.as_deref());
+    let brief = crate::route::Brief {
+        name: &request.name,
+        brief: &request.brief,
+        repo_root: &repo_root,
+        in_flight,
+        catalogue: &catalogue,
+        provider,
+        fallback_model,
+        model_pinned: request.model.is_some(),
+    };
+    let judgment = crate::route::judge(&brief, routing_config, Some(key)).await?;
+    let mut routing = judgment.routing;
+    if let Some(options) = judgment.ask {
+        let question = crate::route::ModelQuestion {
+            id: format!(
+                "{}-{}",
+                sanitize_name(&request.name),
+                crate::util::short_uuid(&uuid::Uuid::new_v4())
+            ),
+            name: request.name.clone(),
+            brief: crate::util::first_line(&request.brief).to_string(),
+            confidence: routing.confidence,
+            threshold: routing_config.confidence_threshold(),
+            options,
+            fallback: fallback_model.map(str::to_string),
+            asked_at: crate::util::now_iso(),
+            pid: std::process::id(),
+            deadline_ms: now_ms() + ask_timeout_ms,
+        };
+        let kept = fallback_model.map_or_else(
+            || "pi's default model".to_string(),
+            |model| format!("the configured {model}"),
+        );
+        let outcome = match ask_human(&FleetPaths::new(fleet_dir), &question).await {
+            Asked::Chose(chosen) => match catalogue.iter().find(|m| m.key() == chosen) {
+                Some(model) => {
+                    routing.model = Some(model.id.clone());
+                    routing.provider = Some(model.provider.clone());
+                    format!("you chose {chosen}")
+                }
+                None => format!("the answer named no candidate; kept {kept}"),
+            },
+            Asked::KeptFallback => format!("you kept {kept}"),
+            Asked::NoAnswer => format!(
+                "no answer within {}; kept {kept}",
+                wait_words(ask_timeout_ms)
+            ),
+            Asked::NoConsole => format!("no console open to ask; kept {kept}"),
+        };
+        routing.note = format!("{}; {outcome}", routing.note);
+    }
+    // the second cycle: thinking, for whichever model will actually run
+    if request.thinking.is_none()
+        && let Some(runs) = crate::route::model_that_runs(&brief, &routing)
+        && let Some((level, confidence)) =
+            crate::route::choose_thinking(&brief, runs, routing_config, key).await
+    {
+        routing.note = format!("{}; thinking {level} ({confidence:.2})", routing.note);
+        routing.thinking = Some(level);
+    }
     // the candidates were already narrowed to any pinned provider, so the
     // routed model's own provider can never contradict it
     if request.model.is_none()
@@ -288,6 +392,56 @@ or $PARL_TYPESAFE_API_KEY"
         request.worktree = false;
     }
     Some(routing)
+}
+
+/// How a model question put to the human ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Asked {
+    /// A candidate, as `provider:id`.
+    Chose(String),
+    /// The human chose to keep the configured model.
+    KeptFallback,
+    NoAnswer,
+    /// Nobody to ask: no console is open on this fleet.
+    NoConsole,
+}
+
+/// Put `question` to the human in the console and wait for the answer, up
+/// to its deadline. The question is taken down however this ends —
+/// including when the spawn itself is cancelled mid-wait, which is what the
+/// guard is for.
+async fn ask_human(paths: &FleetPaths, question: &crate::route::ModelQuestion) -> Asked {
+    struct Posted<'a>(&'a FleetPaths, &'a str);
+    impl Drop for Posted<'_> {
+        fn drop(&mut self) {
+            crate::route::remove_question(self.0, self.1);
+        }
+    }
+    if crate::paths::console_holder(&paths.console_lock()).is_none() {
+        return Asked::NoConsole;
+    }
+    if crate::route::post_question(paths, question).is_err() {
+        return Asked::NoConsole;
+    }
+    let _posted = Posted(paths, &question.id);
+    loop {
+        if let Some(answer) = crate::route::read_answer(paths, &question.id) {
+            return answer.model.map_or(Asked::KeptFallback, Asked::Chose);
+        }
+        if now_ms() >= question.deadline_ms {
+            return Asked::NoAnswer;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(MODEL_ASK_POLL_MS)).await;
+    }
+}
+
+/// A wait in words: "10 min", or seconds for the short waits tests use.
+fn wait_words(ms: i64) -> String {
+    if ms >= 60_000 {
+        format!("{} min", ms / 60_000)
+    } else {
+        format!("{} s", (ms / 1000).max(1))
+    }
 }
 
 /// Create the run: sanitise the name, stamp the run id, cut the worktree on
@@ -585,10 +739,241 @@ mod tests {
             },
             ..crate::paths::UserConfig::default()
         };
-        let decided = route_request(&mut with_route, &config, &fleet_dir, &[]).await;
+        let decided = route_request(&mut with_route, &config, &fleet_dir, &[], 1_000).await;
         assert_eq!(decided, None, "nothing to route");
         assert_eq!(with_route.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(with_route.thinking.as_deref(), Some("high"));
+    }
+
+    /// A repository whose fleet dir holds pi's catalogue, as a worker's boot
+    /// would have left it: two models with different reasoning levels.
+    fn fleet_with_catalogue(name: &str) -> (PathBuf, PathBuf) {
+        use crate::fleet::run::{ModelCost, PiCache, WorkerModel};
+        let root = init_repo(name);
+        let fleet_dir = root.join(crate::paths::STATE_DIR_NAME);
+        std::fs::create_dir_all(&fleet_dir).unwrap();
+        let levels = |l: &[&str]| l.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let opus = WorkerModel {
+            thinking_levels: levels(&["off", "high", "max"]),
+            cost: Some(ModelCost {
+                input: 5.0,
+                output: 25.0,
+            }),
+            ..WorkerModel::new("anthropic", "claude-opus-5")
+        };
+        let flash = WorkerModel {
+            thinking_levels: levels(&["off", "high", "xhigh"]),
+            cost: Some(ModelCost {
+                input: 0.5,
+                output: 2.0,
+            }),
+            ..WorkerModel::new("opencode-go", "deepseek-v4-flash")
+        };
+        run::write_pi_cache(
+            &fleet_dir,
+            &PiCache {
+                available_models: vec![opus, flash],
+                ..PiCache::default()
+            },
+        )
+        .unwrap();
+        (root, fleet_dir)
+    }
+
+    fn routing_on(endpoint: String) -> crate::paths::UserConfig {
+        crate::paths::UserConfig {
+            routing: crate::paths::RoutingConfig {
+                enabled: true,
+                endpoint: Some(endpoint),
+                ..crate::paths::RoutingConfig::default()
+            },
+            worker: crate::paths::WorkerConfig {
+                model: Some("claude-opus-5".into()),
+                provider: None,
+            },
+            ..crate::paths::UserConfig::default()
+        }
+    }
+
+    fn unsure() -> serde_json::Value {
+        serde_json::json!({"answers": {
+            "model": {"choice": "anthropic:claude-opus-5", "confidence": 0.2},
+            "needs_worktree": {"noul": 0.9},
+        }})
+    }
+
+    fn thinking(level: &str) -> serde_json::Value {
+        serde_json::json!({"answers": {"thinking": {"choice": level, "confidence": 0.7}}})
+    }
+
+    /// A console holding the fleet: the lock a live console keeps fresh.
+    fn open_console(fleet_dir: &Path) {
+        std::fs::write(
+            fleet_dir.join("console.lock"),
+            serde_json::json!({"pid": std::process::id(), "ts": crate::util::now_iso()})
+                .to_string(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_confident_route_sets_the_model_and_then_its_thinking() {
+        let (root, fleet_dir) = fleet_with_catalogue("parl-route-sure-");
+        let (url, _requests) = crate::route::test_support::stub(vec![
+            serde_json::json!({"answers": {
+                "model": {"choice": "opencode-go:deepseek-v4-flash", "confidence": 0.9},
+            }}),
+            thinking("xhigh"),
+        ])
+        .await;
+        let config = routing_on(url);
+        let mut req = request("sure", "do a thing", &root, true);
+        let routing = route_with_key(
+            &mut req,
+            &config,
+            &config.routing,
+            &fleet_dir,
+            &[],
+            "k",
+            5_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(req.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(req.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(req.thinking.as_deref(), Some("xhigh"));
+        assert!(routing.note.contains("thinking xhigh"), "{}", routing.note);
+    }
+
+    #[tokio::test]
+    async fn an_unsure_model_is_put_to_the_console_and_the_answer_runs() {
+        let (root, fleet_dir) = fleet_with_catalogue("parl-route-ask-");
+        open_console(&fleet_dir);
+        let (url, _requests) =
+            crate::route::test_support::stub(vec![unsure(), thinking("xhigh")]).await;
+        let config = routing_on(url);
+        let paths = FleetPaths::new(&fleet_dir);
+        let console = {
+            let paths = paths.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Some(question) = crate::route::pending_questions(&paths).first() {
+                        crate::route::answer_question(
+                            &paths,
+                            &question.id,
+                            &crate::route::ModelAnswer {
+                                model: Some("opencode-go:deepseek-v4-flash".into()),
+                            },
+                        )
+                        .unwrap();
+                        return question.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+        };
+        let mut req = request("ask", "do a thing\nin detail", &root, true);
+        let routing = route_with_key(
+            &mut req,
+            &config,
+            &config.routing,
+            &fleet_dir,
+            &[],
+            "k",
+            10_000,
+        )
+        .await
+        .unwrap();
+        let asked = console.await.unwrap();
+        assert_eq!(asked.name, "ask");
+        assert_eq!(asked.brief, "do a thing");
+        assert_eq!(asked.fallback.as_deref(), Some("claude-opus-5"));
+        assert_eq!(
+            asked.options[0].key, "anthropic:claude-opus-5",
+            "jev's leaning first"
+        );
+        assert_eq!(req.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(req.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(
+            req.thinking.as_deref(),
+            Some("xhigh"),
+            "the level is chosen for the model the human picked"
+        );
+        assert!(
+            routing
+                .note
+                .contains("you chose opencode-go:deepseek-v4-flash"),
+            "{}",
+            routing.note
+        );
+        assert_eq!(
+            std::fs::read_dir(paths.routing_dir()).unwrap().count(),
+            0,
+            "the question and its answer are taken down"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_model_question_keeps_the_configured_model() {
+        let (root, fleet_dir) = fleet_with_catalogue("parl-route-wait-");
+        open_console(&fleet_dir);
+        let (url, _requests) =
+            crate::route::test_support::stub(vec![unsure(), thinking("max")]).await;
+        let config = routing_on(url);
+        let mut req = request("wait", "do a thing", &root, true);
+        let routing = route_with_key(
+            &mut req,
+            &config,
+            &config.routing,
+            &fleet_dir,
+            &[],
+            "k",
+            300,
+        )
+        .await
+        .unwrap();
+        assert_eq!(req.model, None, "the configured model stands");
+        assert_eq!(
+            req.thinking.as_deref(),
+            Some("max"),
+            "and its own levels are chosen from"
+        );
+        assert!(
+            routing
+                .note
+                .contains("no answer within 1 s; kept the configured claude-opus-5"),
+            "{}",
+            routing.note
+        );
+        let paths = FleetPaths::new(&fleet_dir);
+        assert!(crate::route::pending_questions(&paths).is_empty());
+    }
+
+    #[tokio::test]
+    async fn with_no_console_open_nobody_is_waited_for() {
+        let (root, fleet_dir) = fleet_with_catalogue("parl-route-alone-");
+        let (url, _requests) =
+            crate::route::test_support::stub(vec![unsure(), thinking("high")]).await;
+        let config = routing_on(url);
+        let mut req = request("alone", "do a thing", &root, true);
+        let started = Instant::now();
+        let routing = route_with_key(
+            &mut req,
+            &config,
+            &config.routing,
+            &fleet_dir,
+            &[],
+            "k",
+            60_000,
+        )
+        .await
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "no ten-minute wait"
+        );
+        assert_eq!(req.model, None);
+        assert!(routing.note.contains("no console open"), "{}", routing.note);
     }
 
     #[tokio::test]

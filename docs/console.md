@@ -1,196 +1,191 @@
 # The console
 
-The console is one conversation: the selected session's transcript filling the pane, a composer at the bottom, and a status line. The fleet is an overlay you open when you want it, not a column that takes width away from what you are reading.
+The console presents one conversation: the selected session's transcript fills the screen, with a composer below it and a status line at the bottom. The fleet is an overlay, opened on demand, rather than a permanent column beside the transcript.
 
-```text
- parl · orchestrator + 2 workers
-
- › add token refresh to the auth module
-
- ✻ two independent steps, so two workers
-   ⋯ 6 more
-
-   I'll split this into `refresh` and its tests.
-
- ⚙ fleet_spawn add-auth
-   → add-auth-1f2e3d4 · parl/add-auth-1f2e3d
-
- ⚑ settled add-auth  +12 −3
-
- ╭ orchestrator > ────────────────────────────────╮
- │ ▍                                              │
- ╰────────────────────────────────────────────────╯
- sonnet · 4f2a91cc · $0.42 · 6 turns   ctrl+f fleet · ctrl+k commands
-```
+![The console: the orchestrator's conversation, with the composer and status line below](../imgs/main.png)
 
 ## Typing
 
-The composer always has focus, so there is no mode to be in and no letter that a message cannot start with. Type and press `enter`.
+The composer always has keyboard focus. There are no modes, and every printable key is text. Type a message and press `enter`.
 
-| Keys | What they do |
+| Keys | Action |
 | --- | --- |
-| type + `enter` | message the orchestrator, or steer the selected worker |
-| `shift-enter` | a newline, not a send — `alt-enter` or `ctrl-j` on a terminal without the kitty keyboard protocol |
-| `/` | console commands, and whatever the agent on the other end offers |
-| `@` | workers and repository files |
-| `tab` | accept the highlighted suggestion |
-| `up` / `down` | move through suggestions, or recall what you sent that session before |
-| `esc` | close what is open, else clear the line, else stop the orchestrator's turn |
+| type + `enter` | Message the orchestrator, or steer the selected worker |
+| `shift-enter` | Insert a newline — `alt-enter` or `ctrl-j` on terminals without the kitty keyboard protocol |
+| `/` | Console commands, and the commands the connected agent offers |
+| `@` | Workers and repository files |
+| `tab` | Accept the highlighted suggestion |
+| `up` / `down` | Move through suggestions, or recall earlier messages from the session |
+| `esc` | Close what is open, then clear the line, then stop the orchestrator's turn |
 
-`esc` walks outwards one step at a time: a suggestion popup, then an answer you were composing, then the line itself, then a search highlight. With nothing left to clear it interrupts the orchestrator's turn, which claude resumes from. It never stops a worker — that is `/stop`, or `s` in the fleet — because a key you press reflexively to close things must not be one that throws work away.
+`esc` works outwards one step at a time: the suggestion popup, an answer being composed, the line itself, and a search highlight. When nothing remains to clear, it interrupts the orchestrator's turn, which claude can resume. It never stops a worker; that requires `/stop` or `s` in the fleet, so that a key pressed reflexively to close something cannot discard work.
 
-Pasting works the way you expect: a multi-line brief pasted into the composer stays one message until you press `enter`, rather than being sent a line at a time.
+A multi-line brief pasted into the composer remains a single message until `enter` is pressed.
 
-## The chords
+## Shortcuts
 
-Everything in the conversation that is not text is a `ctrl` chord, and there are only a handful.
+Every non-text action in the conversation is a `ctrl` chord.
 
-| Keys | What they do |
+| Keys | Action |
 | --- | --- |
-| `ctrl-f` | the fleet: every session, and what you can do to the selected one |
-| `ctrl-k` | the command palette |
-| `ctrl-r` | search this session; press it again to step to the next match |
-| `ctrl-o` | unfold an older turn's reasoning and tool output |
-| `ctrl-y` | release the mouse so you can select and copy; again takes it back |
-| `pgup` / `pgdn` | scroll the transcript (so does the wheel, half a page a notch) |
-| `ctrl-home` / `ctrl-end` | the top of the transcript / back to the tail |
+| `ctrl-f` | The fleet: every session and the actions available for the selected one |
+| `ctrl-k` | The command palette |
+| `ctrl-r` | Search the session; press again to move to the next match |
+| `ctrl-o` | Expand an older turn's reasoning and tool output |
+| `ctrl-y` | Release the mouse to select and copy; press again to recapture it |
+| `pgup` / `pgdn` | Scroll the transcript (the mouse wheel scrolls half a page per notch) |
+| `ctrl-home` / `ctrl-end` | The top of the transcript / return to the latest output |
 
-`/help` shows all of this in a panel sized to your terminal.
+`/help` lists all keys and commands in a panel sized to the terminal.
 
 ## The fleet
 
-`ctrl-f` opens the whole fleet over the conversation: the orchestrator first, one two-line row per session. The primary line has the state glyph, the name, and for workers the branch and diff stat, with the age on the right. The dimmed second line is what that session is doing right now.
+![The fleet overlay: the orchestrator and two running workers](../imgs/fleet.png)
 
-```text
-┌ fleet ───────────────────────────────────────────────────────────────────┐
-│ parl · orchestrator + 2 workers · ● running 1 · ? needs an answer 1       │
-│                                                                          │
-│ ▸ ○ orchestrator                                                   3m    │
-│     ✻ thinking… 12s                                                      │
-│   ● add-auth      parl/add-auth-9123456  +12 −3                    2m    │
-│     ⚙ bash                                                               │
-│   ? add-tests     parl/add-tests-9123457                           1m    │
-│     needs an answer                                                      │
-│                                                                          │
-│ j/k move · enter open · a answer · s stop · x remove · … · esc back      │
-└──────────────────────────────────────────────────────────────────────────┘
-```
+`ctrl-f` opens the fleet over the conversation: the orchestrator first, then one two-line row per worker. The first line holds the state glyph, the name, and for workers the branch and diff statistics, with the session's age on the right. The dimmed second line describes the session's current activity.
 
-The glyph carries the state: `○` idle, `…` starting, `●` running, `?` blocked or waiting on you, `✓` done, `■` stopped, `!` failed, `·` archived. The detail line says what the session is in: `✻ thinking… 12s`, `✎ replying…`, `⚙ bash` for a tool call, `needs an answer`, the first line of its error, or `monitor gone` when a worker's monitor is no longer alive.
+The glyph indicates state: `○` idle, `…` starting, `●` running, `?` blocked or waiting for input, `✓` done, `■` stopped, `!` failed, `·` archived. The activity line shows `✻ thinking… 12s`, `✎ replying…`, `⚙ bash` for a tool call, `needs an answer`, the first line of an error, or `monitor gone` when a worker's monitor has stopped.
 
-Single letters are commands in here, because nothing is being typed:
+Within the fleet, single letters are commands:
 
-| Keys | What they do |
+| Keys | Action |
 | --- | --- |
-| `j` `k` / arrows | move the selection |
-| `g` / `G` | first / last row |
-| `1`–`9` | jump to the nth session |
-| `enter` | show that session's conversation |
-| `esc` | back to the conversation, selection unchanged |
-| `a` | answer the pending question or dialog |
-| `s` | stop the selected worker |
-| `x` | remove the selected worker (asks first) |
-| `t` | cycle the thinking level |
-| `m` | switch the model (palette, over models) |
-| `p` | permission mode (orchestrator only) |
-| `b` | the selected session's full brief |
-| `?` | help |
+| `j` `k` / arrows | Move the selection |
+| `g` / `G` | First / last row |
+| `1`–`9` | Select the nth session |
+| `enter` | Show that session's conversation |
+| `esc` | Return to the conversation, keeping the selection |
+| `a` | Answer the pending question, dialog or model choice |
+| `s` | Stop the selected worker |
+| `x` | Remove the selected worker (asks for confirmation) |
+| `t` | Cycle the thinking level |
+| `m` | Switch the model (the palette, restricted to models) |
+| `p` | Cycle the permission mode (orchestrator only) |
+| `b` | Show the selected session's full brief |
+| `?` | Help |
 
 ## The command palette
 
-`ctrl-k` opens a fuzzy palette over everything the selected session can do, ranked as you type, grouped in this order:
+`ctrl-k` opens a fuzzy palette over everything the selected session can do, ranked as you type and grouped as follows:
 
-* `console`, the commands the console runs itself, listed below.
-* `agent`, whatever the agent on the other end offers, passed through verbatim. For the orchestrator that is Claude Code's slash commands and skills (`/model`, `/usage`, any skill you have installed). For a worker it is pi's commands, skills, prompt templates and extension commands, labelled by source. An entry that takes an argument prefills the composer so you can type it.
-* `mcp`, the orchestrator's MCP servers and their tools, with each server's connection status, for reference.
-* `models`, the real list from pi for a worker (with the provider named), or the aliases claude accepts for the orchestrator. Selecting one switches the session's model, live.
-* `sessions`, to jump to another session.
+* `console`: commands the console handles itself, listed below.
+* `agent`: commands offered by the connected agent, passed through unchanged. For the orchestrator these are Claude Code's slash commands and skills (`/model`, `/usage`, and any installed skill). For a worker they are pi's commands, skills, prompt templates and extension commands, labelled by source. Entries that take an argument prefill the composer.
+* `mcp`: the orchestrator's MCP servers and their tools, with each server's connection status, for reference.
+* `models`: the models pi reports for a worker (with the provider named), or the aliases claude accepts for the orchestrator. Selecting one switches the session's model immediately.
+* `sessions`: other sessions to switch to.
 
-The lists come from the agent itself, and the console asks it again whenever what it is showing has gone stale — install a skill mid-session and it appears the next time you open the palette. `m` in the fleet overlay opens the palette directly over models.
+These lists are requested from the agent itself and refreshed whenever they become stale, so a skill installed during a session appears the next time the palette opens. `m` in the fleet opens the palette restricted to models.
 
-## Talking to your agents
+## Commands
 
-With the orchestrator selected the composer is a normal message. With a worker selected:
+With the orchestrator selected, the composer sends ordinary messages. With a worker selected, text is delivered to that worker. The following commands are available:
 
-| You type | Short | What happens |
+| Command | Short | Effect |
 | --- | --- | --- |
-| any text | | steers that worker (delivered after its current tool call) |
-| `/answer <text>` | `/a` | answers the question or dialog it is blocked on |
-| `/followup <text>` | `/f` | queues a message for after it finishes its current work |
-| `/stop` | `/s` | aborts it |
-| `/remove` | `/rm` | removes it: worktree, branch and fleet row (asks first if that would destroy work) |
-| `/thinking <level>` | `/t` | sets the reasoning level: pi's `off…max` for a worker, claude's `low…max` for the orchestrator |
-| `/model <model>` | | switches its model, live |
-| `/permissions <mode>` | `/perm` | how the orchestrator's tool use is approved. With no argument it says what is in force |
-| `/routing` | `/jev` | model routing: switch it on or off, and set the TypeSafe key it uses (see below) |
-| `/verbose` | | unfold an older turn's reasoning and tool output, or fold it again |
-| `/clear` | | forget this session's transcript in the console; the file on disk is untouched |
-| `/trim` | | cut the orchestrator's transcript file down to its recent tail |
-| `/mouse` | | the same toggle as `ctrl-y`, for the palette |
-| `/help` | `/h` | keys and commands |
-| `/quit` | `/q` | leave the console (workers keep running) |
-| `/shutdown` | `/sd` | stop the orchestrator and every worker, then exit. Asks first, and worktrees and branches are kept |
+| any text | | Steer the selected worker (delivered after its current tool call) |
+| `/answer <text>` | `/a` | Answer the question or dialog the worker is blocked on |
+| `/followup <text>` | `/f` | Queue a message for after the worker finishes its current work |
+| `/stop` | `/s` | Abort the worker |
+| `/remove` | `/rm` | Remove the worker, its worktree, branch and fleet row (asks first if work would be lost) |
+| `/thinking <level>` | `/t` | Set the reasoning level: pi's `off…max` for a worker, claude's `low…max` for the orchestrator |
+| `/model <model>` | | Switch the model without restarting |
+| `/permissions <mode>` | `/perm` | Set how the orchestrator's tool use is approved; without an argument, show the current mode |
+| `/routing` | `/jev` | Model routing: enable or disable it, set the API key, the shortlist and the confidence limit (see below) |
+| `/verbose` | | Expand or collapse older turns' reasoning and tool output |
+| `/clear` | | Clear this session's transcript from the console; the file on disk is unchanged |
+| `/trim` | | Shorten the orchestrator's transcript file to its recent tail |
+| `/mouse` | | Toggle mouse capture, as `ctrl-y` does |
+| `/help` | `/h` | Keys and commands |
+| `/quit` | `/q` | Close the console (workers keep running) |
+| `/shutdown` | `/sd` | Stop the orchestrator and every worker, then exit. Asks first; worktrees and branches are kept |
 
-`/compact` is deliberately not one of ours: it is claude's own command and passes straight through.
+`/compact` is intentionally not a console command: it belongs to claude and is passed through unchanged.
+
+`/model` and `/thinking` take effect on a running session without a restart and without spending a turn, on either side. For the orchestrator, claude validates the model name, so an unknown name produces claude's own error message. For a worker, the console resolves the id against the models pi reported: an ambiguous or unknown id is rejected with an explanation, while an explicit `provider:model` is passed through.
 
 ## Copying text
 
-The console captures the mouse so the wheel scrolls the transcript, and that is exactly what stops your terminal from ever seeing a drag — while it is on, the terminal's own click-and-drag selection cannot run.
+The console captures the mouse so that the wheel scrolls the transcript. While capture is on, the terminal does not receive drag events, so its own text selection is unavailable.
 
-`ctrl-y` (or `/mouse`) hands the mouse back. Select and copy the way you would in any other program, then press `ctrl-y` again to take it back. The status line says `select` for as long as the mouse is the terminal's, so a wheel that has stopped scrolling is never a mystery, and keyboard scrolling works in both states. The setting is deliberately not remembered across launches.
+`ctrl-y` (or `/mouse`) releases the mouse. Select and copy text as in any other program, then press `ctrl-y` again to recapture it. The status line shows `select` while the mouse is released, and keyboard scrolling works in both states. The setting is not persisted across launches.
 
-Most terminals also let you bypass mouse capture by holding a modifier while dragging — `option` in iTerm2 and Terminal.app, `shift` in kitty, Ghostty and WezTerm — which needs no toggle at all.
-
-`/model` and `/thinking` change a running session without restarting it and without spending a turn, on either side. For the orchestrator, claude validates the model name itself, so an unknown one shows claude's own error rather than a list of ours. For a worker the console resolves the id against the models pi reported. An ambiguous or unknown id sends nothing and says so, while an explicit `provider:model` passes straight through.
+Most terminals also bypass mouse capture while a modifier is held during a drag — `option` in iTerm2 and Terminal.app, `shift` in kitty, Ghostty and WezTerm — which requires no toggle.
 
 ## Model routing
 
-`/routing` opens a small panel: whether routing is on, where its key comes from, and what it has to choose between. With routing on, a worker spawned without a model has one picked for it from its brief — see [the CLI](cli.md#choosing-a-model-for-a-brief) for how it decides.
+`/routing` opens the routing panel. It shows whether routing is enabled, where the API key comes from, how many models routing chooses from, the shortlist, and the confidence limit below which you are asked to choose. With routing enabled, a worker spawned without a model has its model and reasoning level chosen from its brief; [the CLI reference](cli.md#routing-a-brief) describes how.
 
 ```text
-╭ model routing ─────────────────────────────────────────────────╮
-│ routing   on                                                   │
-│ api key   ••••cdef, in the macOS Keychain                       │
-│ choosing  between 12 models                                    │
-│                                                                │
-│ r routing on/off · s set key · d delete key · esc close        │
-╰────────────────────────────────────────────────────────────────╯
+╭ model routing ───────────────────────────────────────────────────────╮
+│ routing   on                                                         │
+│ api key   ••••cdef, in the macOS Keychain                            │
+│ choosing  between 12 models                                          │
+│ shortlist 12 models                                                  │
+│ ask me    when jev is less than 60% sure of the model                │
+│                                                                      │
+│ r routing on/off · s set key · m shortlist · -/+ ask limit ·         │
+│ d delete key · esc close                                             │
+╰──────────────────────────────────────────────────────────────────────╯
 ```
 
-`s` asks for your TypeSafe API key; paste it or type it, and it is drawn as dots, never as text. `enter` saves it to your operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.parl`, not the transcript, not your history. The panel only ever shows its last four characters. `r` switches routing on or off in `~/.parl/config.toml`, leaving the rest of that file as you wrote it.
+| Key | Action |
+| --- | --- |
+| `r` | Enable or disable routing |
+| `s` | Enter the TypeSafe API key |
+| `d` | Delete the stored key (asks for confirmation) |
+| `m` | Edit the shortlist |
+| `-` / `+` | Lower or raise the confidence limit in steps of 5% (0% never asks, 100% always asks) |
 
-A key in `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` wins over the stored one, and the panel says so. On a machine with no credential store (a headless Linux box without a Secret Service) the environment variable is the way — the key is never written to a file instead. On macOS the first time a newly built `parl` reads the key, the system may ask whether to allow it.
+All settings are written to `~/.parl/config.toml`, and the rest of that file, including comments, is left as it was.
+
+**The API key.** `s` prompts for the key; it can be pasted or typed, and is displayed as dots. `enter` saves it to the operating system's credential store — the macOS Keychain, the Windows Credential Manager, or the Secret Service on Linux — and nowhere else: not `~/.parl`, the transcript, or the command history. The panel displays only its last four characters. A key in `$PARL_TYPESAFE_API_KEY` or `$TYPESAFE_API_KEY` takes precedence over the stored one, and the panel indicates this. On a machine without a credential store, such as a headless Linux host without a Secret Service, the environment variable is the only option; the key is never written to a file. On macOS, the system may ask for permission the first time a newly built `parl` reads the key.
+
+**The shortlist.** `m` lists every model in pi's catalogue as `provider:id`, with its name and price. Typing filters the list, `up` and `down` move, `enter` adds or removes the selected model, and `esc` saves the shortlist and returns to the panel. One routing decision can weigh at most 255 models, so the shortlist cannot exceed 255 entries. Entries in the configuration that no longer match any model in the catalogue are preserved. The catalogue is recorded when a worker starts, so the shortlist can be edited once at least one worker has run.
+
+## Choosing a model
+
+When routing is less confident about a worker's model than your limit, a prompt opens on its own, as a permission prompt does, because the spawn is waiting for the answer. It lists every shortlisted model with Jev's preference first, the probability Jev assigned to each, and its price relative to the cheapest option.
+
+| Key | Action |
+| --- | --- |
+| `j` `k` / arrows | Move the selection |
+| `enter` | Use the selected model |
+| `1`–`9` | Use the nth model |
+| `d` | Keep the configured model |
+| `esc` | Answer later; `a` on the orchestrator's row in the fleet reopens the prompt |
+
+The status line counts pending model choices. Without an answer within ten minutes, the spawn continues on the configured model. Once the model is settled, the reasoning level is chosen for it automatically.
 
 ## Permissions
 
-When the orchestrator wants to run something outside its allowlist, or asks you a question, an overlay appears on its own — it is blocking the orchestrator, so it does not wait to be found. It never pops up under your fingers, though: while you are typing it waits for you to finish, so a keystroke meant for your message cannot answer it. `y` allows once, `a` allows it for the session, `n` denies with a reason, and questions get an option picker. Dismissing one with `esc` leaves it pending; the status line keeps counting it, and `a` in the fleet overlay brings it back.
+When the orchestrator requests an action outside its allowlist, or asks a question, a prompt opens on its own, since the orchestrator is blocked until it is answered. It does not open while you are typing, so a keystroke intended for a message cannot answer it. `y` allows the action once, `a` allows it for the session, `n` denies it with a reason, and questions present a list of options. Dismissing the prompt with `esc` leaves it pending; the status line continues to count it, and `a` in the fleet reopens it.
 
-How often that happens is up to you:
+The frequency of these prompts depends on the permission mode:
 
-| Mode | What it does |
+| Mode | Behaviour |
 | --- | --- |
-| `default` | asks about everything outside the allowlist |
-| `auto` | hands routine approvals to a classifier and escalates only what it is unsure about |
-| `acceptEdits` | lets file edits and common filesystem commands through |
-| `dontAsk` | denies anything not already allowed instead of asking |
-| `plan` | makes the orchestrator read-only |
+| `default` | Asks about every action outside the allowlist |
+| `auto` | Passes routine approvals to a classifier and escalates only uncertain cases |
+| `acceptEdits` | Allows file edits and common filesystem commands |
+| `dontAsk` | Denies any action not already allowed, instead of asking |
+| `plan` | Makes the orchestrator read-only |
 
-Start in a mode with `parl --permission-mode auto`. The mode shows in the status line whenever it is not the default, survives a console restart, and `p` in the fleet overlay cycles it mid-session. `bypassPermissions` is deliberately not offered, since it would skip the overlay altogether.
+Start in a given mode with `parl --permission-mode auto`. The status line shows the mode whenever it is not the default; the mode persists across console restarts, and `p` in the fleet cycles it during a session. `bypassPermissions` is not offered, because it would bypass the prompt entirely.
 
-## When a worker needs an answer
+## Worker questions
 
-A worker can block on a question of its own, or on a pi dialog (`select`, `confirm`, `input`, `editor`). Either way the fleet shows it as `needs an answer`, and `a` (or `/answer`) answers it from the console. So can the orchestrator. Nothing stalls: an unanswered dialog is cancelled just before pi's own timeout, and an unanswered question releases the worker after ten minutes to carry on with its own judgment, which it writes down in its report.
+A worker can block on its own question or on a pi dialog (`select`, `confirm`, `input` or `editor`). In both cases the fleet shows `needs an answer`, and `a` (or `/answer`) answers it from the console; the orchestrator can also answer it. Nothing stalls indefinitely: an unanswered dialog is cancelled shortly before pi's own timeout, and an unanswered question releases the worker after ten minutes to proceed on its own judgment, which it records in its report.
 
 ## The transcript
 
-The transcript separates the parts of a turn: your prompts in cyan, the model's reasoning dimmed and abridged, its answer as rendered markdown, tool calls in blue with their results dimmed under them, fleet events in yellow, errors in red, each block set off by a blank line. Tool calls are shown as written rather than clipped, so a long command stays readable. Tool output is a preview: the first few lines, then a count of what was left out, since output can run to megabytes.
+The transcript distinguishes the parts of a turn: your prompts in cyan, the model's reasoning dimmed and abridged, its answer as rendered markdown, tool calls in blue with their results dimmed beneath, fleet events in yellow, and errors in red, each separated by a blank line. Tool calls are shown in full so that long commands remain readable. Tool output is shown as a preview — the first few lines and a count of the remainder — since output can be very large.
 
-Replies are drawn once: every line is rendered as markdown the moment it arrives, rather than shown raw and redrawn when the turn ends. Reasoning streams the same way, so it appears while the model is thinking rather than all at once afterwards.
+Replies are rendered once: each line is rendered as markdown as it arrives, rather than displayed raw and redrawn at the end of the turn. Reasoning is streamed in the same way.
 
-Once a turn is behind you its reasoning and tool output fold to a single row each — `✻ two independent steps  ⋯ 6 more` — because that is the part least worth re-reading. `ctrl-o` (or `/verbose`) unfolds everything; the model's prose, your prompts, fleet events and errors are never folded.
+When a turn is complete, its reasoning and tool output collapse to a single row each, such as `✻ two independent steps  ⋯ 6 more`. `ctrl-o` (or `/verbose`) expands them. The model's prose, your prompts, fleet events and errors are never collapsed.
 
-`ctrl-r` searches it. Scrolling follows the tail until you scroll up, then pins there while you read — and stays on the same content as older blocks age out.
+`ctrl-r` searches the transcript. Scrolling follows the latest output until you scroll up, then holds its position, and stays on the same content as older blocks are discarded.
 
-A session that runs for hours keeps itself small on its own. The transcript file is capped, and once a session has run `[session] auto_compact_turns` turns (60 by default, `0` to switch it off) the orchestrator's context is compacted with claude's own `/compact`, with a line in the transcript marking the seam. `/clear` forgets a transcript in the console without touching the file; `/trim` shortens the file itself.
+Long sessions manage their own size. The transcript file is capped, and after `[session] auto_compact_turns` turns (60 by default; `0` disables it) the orchestrator's context is compacted with claude's `/compact`, with a line in the transcript marking the point. `/clear` clears a transcript from the console without changing the file; `/trim` shortens the file itself.
 
-Workers disappear from the fleet when they are done: the orchestrator cleans each one up after it merges and verifies it, and the console removes any settled worker whose branch is already merged. Nothing unmerged, dirty or still running is ever removed for you. That waits for `/remove` or `parl cleanup`, which tell you exactly what would be lost before they do anything.
+Workers are removed from the fleet when they are finished: the orchestrator removes each worker after merging and verifying its work, and the console removes any settled worker whose branch has already been merged. Unmerged, modified or running workers are never removed automatically; that requires `/remove` or `parl cleanup`, both of which report exactly what would be lost before acting.

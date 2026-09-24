@@ -412,7 +412,13 @@ mod tests {
                 masked: crate::secrets::Secret::new(key).masked(),
             },
             candidates: Ok(12),
+            threshold: 0.6,
+            models: vec!["anthropic:claude-opus-5".into(), "deepseek-v4-flash".into()],
         });
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 100, 30);
+        assert_visible(&buf, "2 models");
+        assert_visible(&buf, "less than 60% sure");
+        assert_visible(&buf, "m shortlist");
         for c in "s".chars().chain(key.chars()) {
             console.handle_key(ch(c));
         }
@@ -429,6 +435,49 @@ mod tests {
             !drawn.contains("0123456789"),
             "the key is never drawn: {drawn}"
         );
+    }
+
+    #[test]
+    fn the_model_choice_shows_each_candidate_with_its_odds_and_price() {
+        let (mut console, runs, orch) = fleet();
+        let option = |key: &str, p: f64, detail: &str| crate::route::ModelOption {
+            key: key.into(),
+            probability: Some(p),
+            detail: detail.into(),
+        };
+        console.set_model_questions(vec![crate::route::ModelQuestion {
+            id: "q1".into(),
+            name: "add-auth".into(),
+            brief: "add token refresh to the auth module".into(),
+            confidence: 0.41,
+            threshold: 0.6,
+            options: vec![
+                option(
+                    "anthropic:claude-opus-5",
+                    0.38,
+                    "Opus 5 · $5.00 / $25.00 · 11.4× the cheapest option",
+                ),
+                option(
+                    "opencode-go:deepseek-v4-flash",
+                    0.31,
+                    "$0.50 / $2.00 · the cheapest option",
+                ),
+            ],
+            fallback: Some("claude-sonnet-5".into()),
+            asked_at: crate::util::now_iso(),
+            pid: std::process::id(),
+            deadline_ms: crate::util::now_ms() + 540_000,
+        }]);
+        let buf = draw_to_buffer(&mut console, &runs, &orch, 110, 30);
+        assert_visible(&buf, "choose a model");
+        assert_visible(&buf, "should run add-auth (41% sure");
+        assert_visible(&buf, "add token refresh to the auth module");
+        assert_visible(&buf, "anthropic:claude-opus-5");
+        assert_visible(&buf, "38%");
+        assert_visible(&buf, "11.4× the cheapest option");
+        assert_visible(&buf, "d keep claude-sonnet-5");
+        let status = row_text(&buf, buf.area.height - 1);
+        assert!(status.contains("1 model choice pending"), "{status}");
     }
 
     #[test]

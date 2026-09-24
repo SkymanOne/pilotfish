@@ -115,6 +115,17 @@ pub fn draw(frame: &mut Frame, area: Rect, console: &Console, feeds: &Feeds<'_>,
             pal.attention(),
         );
     }
+    let choices = console.model_questions().len();
+    if choices > 0 {
+        part(
+            &mut spans,
+            format!(
+                "{choices} model choice{} pending",
+                if choices == 1 { "" } else { "s" }
+            ),
+            pal.attention(),
+        );
+    }
 
     // the chords ride on the right, so the way out of here is always on
     // screen; the facts on the left win the row when it is tight

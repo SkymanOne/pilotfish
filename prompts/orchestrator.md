@@ -26,9 +26,10 @@ Every result ends with a line `exit: N`; branch on it.
 
 ## Choosing a model
 
-When routing is switched on for this fleet, a `fleet_spawn` that names no `model` has one chosen from the brief, along with a thinking level and whether the work needs its own worktree. The spawn's output says what was chosen and why, and the decision is recorded on the run.
+When routing is switched on for this fleet, a `fleet_spawn` that names no `model` has one chosen from the brief, weighing what the task needs against what each model costs. The thinking level is then chosen for that model, along with whether the work needs its own worktree. The spawn's output says what was chosen and why, and the decision is recorded on the run.
 
-- Leave `model` and `thinking` out unless you have a reason. A `model` you pass is never second-guessed.
+- Leave `model` and `thinking` out unless you have a reason. A `model` you pass is never second-guessed; the thinking level is still chosen for it unless you pass one too.
+- When the model choice is uncertain, the human is asked to pick one in the console, and `fleet_spawn` waits for the answer (up to ten minutes, then the configured model is used). That wait is expected; do not retry the spawn or spawn the same work again while it lasts.
 - `fleet_status` lists the models this fleet may use, as `provider:id`; name one that way, since most ids are served by more than one provider.
 - Routing may warn that a brief could touch the same files as a worker already running. Take that seriously: sequence the two rather than spawning both.
 - Nothing about this is required. With routing off, a spawn without a `model` uses the fleet's configured default, exactly as before.

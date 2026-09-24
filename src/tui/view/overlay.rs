@@ -13,12 +13,14 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::orch::protocol::is_ask_user_question;
 use crate::tui::app::{
-    BriefState, ConfirmState, Overlay, PaletteState, PermissionOverlay, SearchState, questions_of,
+    BriefState, ConfirmState, ModelChoiceState, Overlay, PaletteState, PermissionOverlay,
+    SearchState, ShortlistEditor, questions_of,
 };
 use crate::tui::keys::help_sections;
 use crate::tui::theme::{OverlayRole, Palette};
 use crate::tui::transcript::tool_args_text;
 use crate::tui::view::Feeds;
+use crate::tui::view::clip_to;
 
 /// Draw whichever overlay is up, centred over the full frame.
 pub fn draw(
@@ -37,7 +39,11 @@ pub fn draw(
         Overlay::Palette(state) => palette(frame, area, state, pal),
         Overlay::Search(state) => search(frame, area, state, pal),
         Overlay::Brief(state) => brief(frame, area, state, pal),
-        Overlay::Routing(panel) => routing(frame, area, panel, pal),
+        Overlay::Routing(panel) => match &panel.shortlist {
+            Some(editor) => shortlist(frame, area, editor, pal),
+            None => routing(frame, area, panel, pal),
+        },
+        Overlay::ModelChoice(state) => model_choice(frame, area, console, state, pal),
     }
 }
 
@@ -320,8 +326,8 @@ fn routing(frame: &mut Frame, area: Rect, state: &crate::tui::app::RoutingPanel,
     let width = 72u16.min(area.width.saturating_sub(4));
     let inner_width = width.saturating_sub(4) as usize;
     let mut lines: Vec<Line<'static>> = wrap(
-        "Jev picks each worker's model, thinking level and worktree from its brief, \
-when a spawn does not name a model itself.",
+        "Jev picks each worker's model from the shortlist for value, asking you when it is \
+unsure, then a thinking level that model has.",
         inner_width,
     )
     .into_iter()
@@ -371,6 +377,23 @@ when a spawn does not name a model itself.",
                 ),
                 Err(why) => row("choosing", why.clone(), pal.attention()),
             });
+            lines.extend(row(
+                "shortlist",
+                match status.models.len() {
+                    0 => "none — every model pi offers".to_string(),
+                    1 => "1 model".to_string(),
+                    n => format!("{n} models"),
+                },
+                pal.dim(),
+            ));
+            lines.extend(row(
+                "ask me",
+                format!(
+                    "when jev is less than {:.0}% sure of the model",
+                    status.threshold * 100.0
+                ),
+                pal.dim(),
+            ));
             if status.enabled && status.key == KeyState::None {
                 lines.push(Line::default());
                 lines.push(Line::styled(
@@ -410,12 +433,16 @@ when a spawn does not name a model itself.",
             state.status.as_ref().map(|s| &s.key),
             Some(KeyState::Store { .. })
         );
-        let mut hint = String::from("r routing on/off · s set key");
+        let mut hint = String::from("r routing on/off · s set key · m shortlist · -/+ ask limit");
         if stored {
             hint.push_str(" · d delete key");
         }
         hint.push_str(" · esc close");
-        lines.push(Line::styled(hint, pal.dim()));
+        lines.extend(
+            wrap(&hint, inner_width)
+                .into_iter()
+                .map(|l| Line::styled(l, pal.dim())),
+        );
     }
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let inner = panel(
@@ -573,6 +600,219 @@ fn option_rows(label: &str, selected: bool, width: usize, pal: &Palette) -> Vec<
             Line::from(vec![Span::styled(head, style), Span::styled(text, style)])
         })
         .collect()
+}
+
+// -- routing: the shortlist and the model choice ----------------------------
+
+/// The rows of a list that fit in `rows` lines with `selected` among them.
+fn window(count: usize, selected: usize, rows: usize) -> std::ops::Range<usize> {
+    let rows = rows.max(1);
+    let start = (selected + 1)
+        .saturating_sub(rows)
+        .min(count.saturating_sub(rows));
+    start..(start + rows).min(count)
+}
+
+/// Choosing which of pi's models routing may weigh: every model, ticked or
+/// not, filtered by what is typed.
+fn shortlist(frame: &mut Frame, area: Rect, editor: &ShortlistEditor, pal: &Palette) {
+    let width = 100u16.min(area.width.saturating_sub(4));
+    let height = area.height.saturating_sub(4).max(8);
+    let inner = panel(
+        frame,
+        centered(area, width, height),
+        "routing shortlist",
+        OverlayRole::Palette,
+        pal,
+    );
+    let inner_width = inner.width.saturating_sub(1) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let count = format!(
+        "{} of {} shortlisted · at most {}",
+        editor.count(),
+        editor.catalogue.len(),
+        crate::route::MAX_CHOICES
+    );
+    let query = clip_to(&editor.query, inner_width.saturating_sub(count.width() + 6));
+    let gap = inner_width.saturating_sub(query.width() + 3 + count.width());
+    lines.push(Line::from(vec![
+        Span::styled("▶ ".to_string(), pal.accent()),
+        Span::raw(query),
+        Span::styled("▍".to_string(), pal.dim()),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(count, pal.dim()),
+    ]));
+    let rows = (inner.height as usize).saturating_sub(3);
+    if editor.visible.is_empty() {
+        lines.push(Line::styled("no model matches".to_string(), pal.dim()));
+    }
+    let key_width = editor
+        .catalogue
+        .iter()
+        .map(|m| m.key().width())
+        .max()
+        .unwrap_or(0)
+        .min(inner_width / 2);
+    for at in window(editor.visible.len(), editor.selected, rows) {
+        let Some(model) = editor.catalogue.get(editor.visible[at]) else {
+            continue;
+        };
+        let selected = at == editor.selected;
+        let ticked = editor.chosen.contains(&model.key());
+        let style = if selected {
+            pal.accent().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let mut detail = Vec::new();
+        if let Some(name) = &model.name
+            && *name != model.id
+        {
+            detail.push(name.clone());
+        }
+        if let Some(cost) = model.cost {
+            detail.push(format!("${:.2} / ${:.2}", cost.input, cost.output));
+        }
+        let key = clip_to(&model.key(), key_width);
+        let pad = key_width.saturating_sub(key.width());
+        let used = 2 + 4 + key_width + 2;
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "▸ " } else { "  " }.to_string(), style),
+            Span::styled(
+                if ticked { "[x] " } else { "[ ] " }.to_string(),
+                if ticked { pal.accent() } else { pal.dim() },
+            ),
+            Span::styled(key, style),
+            Span::raw(" ".repeat(pad + 2)),
+            Span::styled(
+                clip_to(&detail.join(" · "), inner_width.saturating_sub(used)),
+                pal.dim(),
+            ),
+        ]));
+    }
+    let footer_at = inner.height.saturating_sub(1);
+    draw_lines(frame, inner, lines);
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "enter tick · ↑/↓ move · type to filter · esc save and close".to_string(),
+            pal.dim(),
+        )),
+        Rect::new(inner.x, inner.y + footer_at, inner.width, 1),
+    );
+}
+
+/// A model Jev was unsure of: every candidate, its leaning first, with how
+/// likely it thought each and what each costs. The spawn waits on this.
+fn model_choice(
+    frame: &mut Frame,
+    area: Rect,
+    console: &crate::tui::app::Console,
+    state: &ModelChoiceState,
+    pal: &Palette,
+) {
+    let Some(question) = console.model_questions().iter().find(|q| q.id == state.id) else {
+        return;
+    };
+    let width = 100u16.min(area.width.saturating_sub(4));
+    let inner_width = width.saturating_sub(4) as usize;
+    let fallback = question
+        .fallback
+        .clone()
+        .unwrap_or_else(|| "pi's default model".to_string());
+    let mut lines: Vec<Line<'static>> = wrap(
+        &format!(
+            "Jev is not sure which model should run {} ({:.0}% sure; you asked to choose \
+below {:.0}%).",
+            question.name,
+            question.confidence * 100.0,
+            question.threshold * 100.0
+        ),
+        inner_width,
+    )
+    .into_iter()
+    .map(Line::raw)
+    .collect();
+    lines.extend(
+        wrap(&question.brief, inner_width)
+            .into_iter()
+            .map(|l| Line::styled(l, pal.dim())),
+    );
+    lines.push(Line::default());
+
+    let count = question.options.len();
+    let rows = (area.height as usize)
+        .saturating_sub(lines.len() + 8)
+        .clamp(3, 12);
+    let key_width = question
+        .options
+        .iter()
+        .map(|o| o.key.width())
+        .max()
+        .unwrap_or(0)
+        .min(inner_width / 2);
+    let shown = window(count, state.selected, rows);
+    let more = count.saturating_sub(shown.end);
+    for at in shown {
+        let option = &question.options[at];
+        let selected = at == state.selected;
+        let style = if selected {
+            pal.accent().add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let number = if at < 9 {
+            format!("{} ", at + 1)
+        } else {
+            "  ".to_string()
+        };
+        let likely = option
+            .probability
+            .map_or_else(|| "    ".to_string(), |p| format!("{:>3.0}%", p * 100.0));
+        let key = clip_to(&option.key, key_width);
+        let pad = key_width.saturating_sub(key.width());
+        let used = 2 + 2 + key_width + 2 + 4 + 2;
+        lines.push(Line::from(vec![
+            Span::styled(if selected { "▸ " } else { "  " }.to_string(), style),
+            Span::styled(number, pal.dim()),
+            Span::styled(key, style),
+            Span::raw(" ".repeat(pad + 2)),
+            Span::styled(likely, style),
+            Span::raw("  ".to_string()),
+            Span::styled(
+                clip_to(&option.detail, inner_width.saturating_sub(used)),
+                pal.dim(),
+            ),
+        ]));
+    }
+    if more > 0 {
+        lines.push(Line::styled(format!("    … {more} more"), pal.dim()));
+    }
+    lines.push(Line::default());
+    let left_ms = question.deadline_ms - crate::util::now_ms();
+    let left = if left_ms >= 60_000 {
+        format!("{} min", left_ms / 60_000)
+    } else {
+        format!("{} s", (left_ms / 1000).max(0))
+    };
+    lines.extend(
+        wrap(
+            &format!(
+                "enter choose · 1–9 pick · d keep {fallback} · esc later · {left} before {fallback} is kept"
+            ),
+            inner_width,
+        )
+        .into_iter()
+        .map(|l| Line::styled(l, pal.dim())),
+    );
+    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
+    let inner = panel(
+        frame,
+        centered(area, width, height),
+        "choose a model",
+        OverlayRole::Permission,
+        pal,
+    );
+    draw_lines(frame, inner, lines);
 }
 
 // -- palette ----------------------------------------------------------------

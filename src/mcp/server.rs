@@ -20,7 +20,7 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    JsonObject, ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer, ServiceExt as _};
 use serde::Serialize;
@@ -351,8 +351,8 @@ impl FleetServer {
 }
 
 impl ServerHandler for FleetServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::new(ServerCapabilities::builder().enable_tools().build());
         info.server_info = Implementation::new(SERVER_NAME, env!("CARGO_PKG_VERSION"));
         info
     }
@@ -440,7 +440,9 @@ fn spawn_status_tools() -> Vec<Tool> {
              set worktree=false for read-only steps (research, review). The brief must be self-contained: the worker \
              sees nothing else. Returns the run id; fleet events arrive as the run progresses. Each orchestrator \
              session may hold at most [limits] max_workers_per_session live workers (default 3); exit 1 with the \
-             holders named when this session is at its cap. exit 0 on success.",
+             holders named when this session is at its cap. With routing on, a spawn without a model has one \
+             chosen from the brief; when that choice is uncertain the human is asked in the console, and the call \
+             can wait up to ten minutes for the answer. exit 0 on success.",
             properties([
                 (
                     "name",

@@ -78,8 +78,20 @@ pub enum Overlay {
     Search(SearchState),
     /// The selected session's full brief, scrollable.
     Brief(BriefState),
-    /// Model routing: on or off, and the TypeSafe key it uses.
+    /// Model routing: on or off, the TypeSafe key it uses, the confidence
+    /// limit and the shortlist.
     Routing(RoutingPanel),
+    /// A model Jev was unsure of, put to the human while its spawn waits.
+    ModelChoice(ModelChoiceState),
+}
+
+/// The model-choice prompt's own state. The question itself stays in
+/// [`Console::model_questions`], refreshed on every poll, so a question the
+/// spawn has since given up on closes the prompt instead of being answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelChoiceState {
+    pub id: String,
+    pub selected: usize,
 }
 
 /// The `/routing` panel: whether routing is on, where its key lives, what it
@@ -92,6 +104,88 @@ pub struct RoutingPanel {
     pub entering: Option<Secret>,
     /// `d` was pressed: the next `y` deletes the stored key.
     pub confirm_delete: bool,
+    /// The shortlist being edited (`m`), a text field over pi's catalogue.
+    pub shortlist: Option<ShortlistEditor>,
+}
+
+/// Choosing which of pi's models routing may pick between. Every model is a
+/// row named `provider:id`; typing filters them, `enter` toggles one, and
+/// closing saves the list to `[routing] models`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ShortlistEditor {
+    pub catalogue: Vec<crate::fleet::run::WorkerModel>,
+    /// The shortlisted `provider:id` keys.
+    pub chosen: std::collections::BTreeSet<String>,
+    /// Config entries that name nothing in the catalogue, kept as written:
+    /// a catalogue that is out of date must not cost the user their list.
+    pub kept: Vec<String>,
+    pub query: String,
+    /// Indices into `catalogue` that match `query`, in catalogue order.
+    pub visible: Vec<usize>,
+    pub selected: usize,
+    pub changed: bool,
+}
+
+impl ShortlistEditor {
+    /// An editor over `catalogue`, with `models` (as the config writes them,
+    /// bare ids included) already ticked.
+    #[must_use]
+    pub fn new(catalogue: Vec<crate::fleet::run::WorkerModel>, models: &[String]) -> Self {
+        let chosen = crate::route::narrow(&catalogue, None, models)
+            .iter()
+            .map(crate::fleet::run::WorkerModel::key)
+            .collect();
+        let kept = models
+            .iter()
+            .filter(|want| {
+                !catalogue
+                    .iter()
+                    .any(|m| m.key() == **want || m.id == **want)
+            })
+            .cloned()
+            .collect();
+        let mut editor = Self {
+            catalogue,
+            chosen,
+            kept,
+            ..Self::default()
+        };
+        editor.refilter();
+        editor
+    }
+
+    /// How many entries the saved list will hold — what the 255 limit counts.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.chosen.len() + self.kept.len()
+    }
+
+    /// The list to save: the ticked keys, then the entries kept as written.
+    #[must_use]
+    pub fn models(&self) -> Vec<String> {
+        self.chosen.iter().chain(&self.kept).cloned().collect()
+    }
+
+    /// Recompute which rows match the query: every word has to appear in the
+    /// row's key or name, case aside.
+    pub fn refilter(&mut self) {
+        let words: Vec<String> = self
+            .query
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect();
+        self.visible = self
+            .catalogue
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                let hay = format!("{} {}", m.key(), m.name.as_deref().unwrap_or("")).to_lowercase();
+                words.iter().all(|w| hay.contains(w.as_str()))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = self.selected.min(self.visible.len().saturating_sub(1));
+    }
 }
 
 /// What the panel reports, gathered off the UI thread because reading the
@@ -102,6 +196,10 @@ pub struct RoutingStatus {
     pub key: KeyState,
     /// What routing would choose between, or why it would decline.
     pub candidates: Result<usize, String>,
+    /// Below this confidence the human is asked to choose the model.
+    pub threshold: f64,
+    /// `[routing] models` as the config writes it.
+    pub models: Vec<String>,
 }
 
 /// Where the key in force comes from — never the key itself.
@@ -313,6 +411,13 @@ pub enum Effect {
     DeleteTypesafeKey,
     /// Switch `[routing] enabled` in `~/.parl/config.toml`.
     SetRouting(bool),
+    /// Set `[routing] confidence_threshold`: below it, the human chooses.
+    SetRoutingThreshold(f64),
+    /// Save the shortlist as `[routing] models`.
+    SetRoutingModels(Vec<String>),
+    /// Answer a model question a spawn is waiting on: a candidate's
+    /// `provider:id`, or none to keep the configured model.
+    AnswerModelQuestion { id: String, model: Option<String> },
     /// Stop the orchestrator for good (`/shutdown`).
     StopOrchestrator,
     /// Stop one named session's orchestrator (`/shutdown <key>`); its
@@ -432,6 +537,10 @@ pub struct Console {
     /// Permission requests already raised on their own, so dismissing one
     /// does not have it pop straight back up.
     raised_permissions: std::collections::HashSet<String>,
+    /// Model choices spawns are waiting on the human for, oldest first.
+    model_questions: Vec<crate::route::ModelQuestion>,
+    /// Model questions already raised on their own, as with permissions.
+    raised_model_questions: std::collections::HashSet<String>,
     /// Show every line of an old turn's reasoning and tool output, rather
     /// than folding each to a summary row (`ctrl-o`, `/verbose`).
     verbose: bool,
@@ -490,6 +599,8 @@ impl Console {
             scroll: None,
             scroll_base: 0,
             raised_permissions: std::collections::HashSet::new(),
+            model_questions: Vec::new(),
+            raised_model_questions: std::collections::HashSet::new(),
             verbose: false,
             last_key_at: 0,
             raised_at: None,
@@ -544,34 +655,61 @@ impl Console {
         self.orch = state;
         self.pending_effort = None;
         self.refresh_rows();
-        self.raise_pending_permission();
+        self.raise_waiting();
     }
 
-    /// A permission prompt blocks the orchestrator, so it opens itself rather
-    /// than waiting to be found. Once per request: dismissing one with `esc`
+    /// The model choices spawns are waiting on, from `routing/`. A question
+    /// that is no longer there — answered, given up on, its spawn gone —
+    /// closes its prompt rather than taking an answer nobody will read.
+    pub fn set_model_questions(&mut self, questions: Vec<crate::route::ModelQuestion>) {
+        if let Some(Overlay::ModelChoice(state)) = &self.overlay
+            && !questions.iter().any(|q| q.id == state.id)
+        {
+            self.overlay = None;
+            self.toast("· that model question is no longer waiting", false);
+        }
+        self.model_questions = questions;
+        self.raise_waiting();
+    }
+
+    /// The model choices waiting on the human, oldest first.
+    #[must_use]
+    pub fn model_questions(&self) -> &[crate::route::ModelQuestion] {
+        &self.model_questions
+    }
+
+    /// A permission prompt blocks the orchestrator, and so does a model
+    /// question — the spawn that asked it waits — so both open themselves
+    /// rather than waiting to be found. Once each: dismissing one with `esc`
     /// to go and look something up must not trap the console in a loop, and
-    /// the approvals count in the status line is the reminder.
-    fn raise_pending_permission(&mut self) {
+    /// the count in the status line is the reminder.
+    fn raise_waiting(&mut self) {
         if self.overlay.is_some() {
             return;
         }
         // Never under someone's fingers: a prompt that opened mid-word would
         // read the next `a` as allow-always. While the composer holds text or
-        // a key went down just now, the approval waits — the status line
+        // a key went down just now, the prompt waits — the status line
         // counts it — and it rises on the first quiet poll after.
         let typing = !self.composer.input.is_empty()
             || now_ms().saturating_sub(self.last_key_at) < TYPING_QUIET_MS;
         if typing {
             return;
         }
-        let Some(request) = self.orch.pending_requests.first() else {
-            return;
-        };
-        if !self.raised_permissions.insert(request.request_id.clone()) {
+        if let Some(request) = self.orch.pending_requests.first() {
+            if !self.raised_permissions.insert(request.request_id.clone()) {
+                return;
+            }
+            self.open_permission_overlay();
+            self.raised_at = Some(now_ms());
             return;
         }
-        self.open_permission_overlay();
-        self.raised_at = Some(now_ms());
+        if let Some(question) = self.model_questions.first()
+            && self.raised_model_questions.insert(question.id.clone())
+        {
+            self.open_model_choice();
+            self.raised_at = Some(now_ms());
+        }
     }
 
     /// Whether a key reaching a prompt that raised itself landed too soon
@@ -985,17 +1123,16 @@ impl Console {
     /// Turn a key press into view-model changes plus effects to carry out.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         self.last_key_at = now_ms();
-        // The palette and the search box are text fields, so they read keys
-        // the way the composer does. Every other overlay is a list, and reads
-        // single letters as its own commands.
         // The palette and the search box are text fields, and so is a
         // permission overlay while a deny reason or a custom answer is being
-        // written — a reason starting with "just" must not lose its letters
-        // to the list navigation.
+        // written, a key being entered, or the shortlist's filter — a reason
+        // starting with "just" must not lose its letters to the list
+        // navigation. Every other overlay is a list, and reads single letters
+        // as its own commands.
         let typed = match &self.overlay {
             None | Some(Overlay::Palette(_) | Overlay::Search(_)) => true,
             Some(Overlay::Permission(state)) => state.denying || state.custom,
-            Some(Overlay::Routing(panel)) => panel.entering.is_some(),
+            Some(Overlay::Routing(panel)) => panel.entering.is_some() || panel.shortlist.is_some(),
             Some(_) => false,
         };
         let action = if typed {
@@ -1034,6 +1171,9 @@ impl Console {
             Some(Overlay::Routing(panel)) => {
                 if let Some(key) = panel.entering.as_mut() {
                     key.push_str(&text);
+                } else if let Some(editor) = panel.shortlist.as_mut() {
+                    editor.query.push_str(&one_line());
+                    editor.refilter();
                 }
             }
             Some(Overlay::Palette(state)) => {
@@ -1605,32 +1745,43 @@ impl Console {
             Err(err) => KeyState::Unavailable(err.to_string()),
         };
         let user_dir = crate::paths::user_dir();
-        let (enabled, candidates) = match crate::paths::load_user_config(user_dir.as_deref()) {
-            Ok(config) => {
-                let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
-                    .map(|cache| cache.available_models)
-                    .unwrap_or_default();
-                let root = self.fleet.root().to_path_buf();
-                let brief = crate::route::Brief {
-                    name: "",
-                    brief: "",
-                    repo_root: &root,
-                    in_flight: &[],
-                    catalogue: &catalogue,
-                    provider: config.worker_provider(None),
-                    fallback_model: config.worker_model(None),
-                };
-                (
-                    config.routing.enabled,
-                    crate::route::candidates(&brief, &config.routing).map(|list| list.len()),
-                )
-            }
-            Err(err) => (false, Err(format!("{err:#}"))),
-        };
+        let (enabled, candidates, threshold, models) =
+            match crate::paths::load_user_config(user_dir.as_deref()) {
+                Ok(config) => {
+                    let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
+                        .map(|cache| cache.available_models)
+                        .unwrap_or_default();
+                    let root = self.fleet.root().to_path_buf();
+                    let brief = crate::route::Brief {
+                        name: "",
+                        brief: "",
+                        repo_root: &root,
+                        in_flight: &[],
+                        catalogue: &catalogue,
+                        provider: config.worker_provider(None),
+                        fallback_model: config.worker_model(None),
+                        model_pinned: false,
+                    };
+                    (
+                        config.routing.enabled,
+                        crate::route::candidates(&brief, &config.routing).map(|list| list.len()),
+                        config.routing.confidence_threshold(),
+                        config.routing.models.clone(),
+                    )
+                }
+                Err(err) => (
+                    false,
+                    Err(format!("{err:#}")),
+                    crate::paths::DEFAULT_ROUTING_CONFIDENCE,
+                    Vec::new(),
+                ),
+            };
         self.set_routing_status(RoutingStatus {
             enabled,
             key,
             candidates,
+            threshold,
+            models,
         });
     }
 
@@ -1686,7 +1837,7 @@ impl Console {
                     let Some(dir) = crate::paths::user_dir() else {
                         anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
                     };
-                    crate::paths::set_routing_enabled(&dir, on)?;
+                    crate::paths::set_routing(&dir, "enabled", toml_edit::value(on))?;
                     self.toast(
                         if on {
                             "· routing on — spawns without a model are routed"
@@ -1696,6 +1847,63 @@ impl Console {
                         false,
                     );
                     self.reload_routing_status().await;
+                }
+                Effect::SetRoutingThreshold(limit) => {
+                    let Some(dir) = crate::paths::user_dir() else {
+                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                    };
+                    crate::paths::set_routing(
+                        &dir,
+                        "confidence_threshold",
+                        toml_edit::value(limit),
+                    )?;
+                    self.reload_routing_status().await;
+                }
+                Effect::SetRoutingModels(models) => {
+                    let Some(dir) = crate::paths::user_dir() else {
+                        anyhow::bail!("no home directory to keep ~/.parl/config.toml in");
+                    };
+                    let count = models.len();
+                    crate::paths::set_routing(
+                        &dir,
+                        "models",
+                        toml_edit::value(models.into_iter().collect::<toml_edit::Array>()),
+                    )?;
+                    self.toast(
+                        if count == 0 {
+                            "· shortlist cleared — routing weighs every model pi offers".to_string()
+                        } else {
+                            format!(
+                                "· shortlist saved: {count} model{}",
+                                if count == 1 { "" } else { "s" }
+                            )
+                        },
+                        false,
+                    );
+                    self.reload_routing_status().await;
+                }
+                Effect::AnswerModelQuestion { id, model } => {
+                    let name = self
+                        .model_questions
+                        .iter()
+                        .find(|q| q.id == id)
+                        .map(|q| q.name.clone())
+                        .unwrap_or_default();
+                    crate::route::answer_question(
+                        &self.fleet,
+                        &id,
+                        &crate::route::ModelAnswer {
+                            model: model.clone(),
+                        },
+                    )?;
+                    self.model_questions.retain(|q| q.id != id);
+                    self.toast(
+                        match model {
+                            Some(model) => format!("· {name} will run on {model}"),
+                            None => format!("· {name} keeps the configured model"),
+                        },
+                        false,
+                    );
                 }
                 Effect::RefreshCapabilities => {
                     self.append_orchestrator(&OrchestratorCommand::RefreshCapabilities)?;

@@ -123,6 +123,13 @@ impl FleetPaths {
         self.root.join("console.lock")
     }
 
+    /// `routing/` — model choices a spawn is waiting on the human for:
+    /// `<id>.json` asked by the spawn, `<id>.answer.json` written back by the
+    /// console. Created lazily.
+    pub fn routing_dir(&self) -> PathBuf {
+        self.root.join("routing")
+    }
+
     /// `orchestrators/` — the per-session parent.
     pub fn orchestrators_dir(&self) -> PathBuf {
         self.root.join("orchestrators")
@@ -519,8 +526,27 @@ pub fn load_user_config(user_dir: Option<&Path>) -> anyhow::Result<UserConfig> {
     Ok(config)
 }
 
-/// Switch `[routing] enabled` in `<user_dir>/config.toml`, creating the file
-/// and the section when they are missing.
+/// A console lock whose heartbeat is older than this is a crashed console,
+/// not a live one.
+pub const CONSOLE_LOCK_STALE_MS: i64 = 15_000;
+
+/// The pid holding `lock` (a fleet's `console.lock`), while its heartbeat is
+/// fresh: `None` for a missing, malformed or stale lock. Whose pid it is,
+/// the caller decides — the console refuses a second instance, a spawn only
+/// wants to know whether anyone is there to ask.
+#[must_use]
+pub fn console_holder(lock: &Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(lock).ok()?;
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let pid = value.get("pid")?.as_u64()?;
+    let ts = value.get("ts")?.as_str()?;
+    let age = crate::util::now_ms().saturating_sub(crate::util::parse_ts_ms(ts).unwrap_or(0));
+    (age <= CONSOLE_LOCK_STALE_MS).then_some(pid)
+}
+
+/// Set one `[routing]` key in `<user_dir>/config.toml` — `enabled`,
+/// `confidence_threshold`, `models` — creating the file and the section when
+/// they are missing.
 ///
 /// Edits the document rather than re-serialising it, so a file the user
 /// wrote by hand keeps its comments, its order and every key this code does
@@ -532,7 +558,7 @@ pub fn load_user_config(user_dir: Option<&Path>) -> anyhow::Result<UserConfig> {
 ///
 /// Returns an error when the file cannot be read, does not parse, or cannot
 /// be written.
-pub fn set_routing_enabled(user_dir: &Path, enabled: bool) -> anyhow::Result<()> {
+pub fn set_routing(user_dir: &Path, key: &str, value: toml_edit::Item) -> anyhow::Result<()> {
     use anyhow::Context as _;
     let path = user_dir.join("config.toml");
     let raw = match std::fs::read_to_string(&path) {
@@ -549,7 +575,7 @@ pub fn set_routing_enabled(user_dir: &Path, enabled: bool) -> anyhow::Result<()>
     let Some(table) = routing.as_table_like_mut() else {
         anyhow::bail!("user config {}: `routing` is not a table", path.display());
     };
-    table.insert("enabled", toml_edit::value(enabled));
+    table.insert(key, value);
     std::fs::create_dir_all(user_dir)
         .with_context(|| format!("creating {}", user_dir.display()))?;
     std::fs::write(&path, doc.to_string())
@@ -881,7 +907,7 @@ mod tests {
         )
         .unwrap();
 
-        set_routing_enabled(tmp.path(), true).unwrap();
+        set_routing(tmp.path(), "enabled", toml_edit::value(true)).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("# my settings"), "{raw}");
         assert!(raw.contains("# the good one"), "{raw}");
@@ -890,21 +916,35 @@ mod tests {
         assert_eq!(config.routing.model, "jev-latest");
         assert_eq!(config.worker.model.as_deref(), Some("claude-opus-5"));
 
-        set_routing_enabled(tmp.path(), false).unwrap();
+        set_routing(tmp.path(), "enabled", toml_edit::value(false)).unwrap();
         assert!(!load_user_config(Some(tmp.path())).unwrap().routing.enabled);
+
+        set_routing(tmp.path(), "confidence_threshold", toml_edit::value(0.45)).unwrap();
+        let models = ["anthropic:claude-opus-5", "opencode-go:deepseek-v4-flash"];
+        set_routing(
+            tmp.path(),
+            "models",
+            toml_edit::value(models.iter().copied().collect::<toml_edit::Array>()),
+        )
+        .unwrap();
+        let config = load_user_config(Some(tmp.path())).unwrap();
+        assert!((config.routing.confidence_threshold() - 0.45).abs() < 1e-9);
+        assert_eq!(config.routing.models, models);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# the good one"), "{raw}");
     }
 
     #[test]
     fn switching_routing_creates_the_file_and_refuses_a_broken_one() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("fresh");
-        set_routing_enabled(&home, true).unwrap();
+        set_routing(&home, "enabled", toml_edit::value(true)).unwrap();
         assert!(load_user_config(Some(&home)).unwrap().routing.enabled);
 
         let broken = tmp.path().join("broken");
         std::fs::create_dir_all(&broken).unwrap();
         std::fs::write(broken.join("config.toml"), "[routing\nenabled = ").unwrap();
-        assert!(set_routing_enabled(&broken, true).is_err());
+        assert!(set_routing(&broken, "enabled", toml_edit::value(true)).is_err());
         assert_eq!(
             std::fs::read_to_string(broken.join("config.toml")).unwrap(),
             "[routing\nenabled = ",

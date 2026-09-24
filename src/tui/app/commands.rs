@@ -298,14 +298,30 @@ impl Console {
         }));
     }
 
+    /// Put the oldest waiting model question up, its first option — Jev's
+    /// leaning — highlighted.
+    pub(super) fn open_model_choice(&mut self) {
+        let Some(question) = self.model_questions.first() else {
+            return;
+        };
+        self.overlay = Some(Overlay::ModelChoice(super::ModelChoiceState {
+            id: question.id.clone(),
+            selected: 0,
+        }));
+    }
+
     pub(super) fn answer_selected(&mut self) -> Vec<Effect> {
         match self.selected_target() {
             SessionTarget::Orchestrator(_) => {
-                if self.orch.pending_requests.is_empty() {
+                // a spawn waiting on a model choice is the orchestrator
+                // waiting too, so both answer from its row
+                if !self.orch.pending_requests.is_empty() {
+                    self.open_permission_overlay();
+                } else if !self.model_questions.is_empty() {
+                    self.open_model_choice();
+                } else {
                     self.toast("! the orchestrator has nothing waiting for an answer", true);
-                    return Vec::new();
                 }
-                self.open_permission_overlay();
                 Vec::new()
             }
             SessionTarget::Worker { run_id } => {

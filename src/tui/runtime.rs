@@ -37,7 +37,7 @@ use crate::tui::app::{Console, Effect, RunEntry, TuiOptions};
 use crate::tui::completions::list_repo_files;
 use crate::tui::theme::Palette;
 use crate::tui::view::{self, Feeds};
-use crate::util::{now_iso, now_ms, parse_ts_ms, read_new_lines};
+use crate::util::{now_iso, now_ms, read_new_lines};
 
 /// The repo the console is opened on: the fleet dir's parent (`.parl` lives
 /// at the repo root).
@@ -149,9 +149,6 @@ pub fn install_panic_hook() {
 // ---------------------------------------------------------------------------
 // The single-instance lock (`console.lock`, same shape the TypeScript wrote)
 
-/// A lock older than this is a crashed console, not a live one.
-const LOCK_STALE_MS: i64 = 15_000;
-
 /// The console's hold on the fleet: one live console per `.parl`.
 pub struct ConsoleLock {
     path: PathBuf,
@@ -195,15 +192,7 @@ impl Drop for ConsoleLock {
 
 /// Another live console's pid, or none (missing, malformed, stale, or ours).
 fn active_lock(path: &Path) -> Option<u64> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let value = serde_json::from_str::<Value>(&raw).ok()?;
-    let pid = value.get("pid")?.as_u64()?;
-    let ts = value.get("ts")?.as_str()?;
-    let age = now_ms().saturating_sub(parse_ts_ms(ts).unwrap_or(0));
-    if age > LOCK_STALE_MS {
-        return None;
-    }
-    (pid != u64::from(process_id())).then_some(pid)
+    crate::paths::console_holder(path).filter(|pid| *pid != u64::from(process_id()))
 }
 
 fn write_lock(path: &Path) -> std::io::Result<()> {
@@ -817,6 +806,7 @@ pub async fn run_console(
                 console.set_runs(poll.runs.clone());
                 console.set_orchestrator_state(poll.orch.clone());
                 console.set_capabilities(poll.caps.clone());
+                console.set_model_questions(crate::route::pending_questions(&fleet));
                 poll.tail_events(&mut console);
                 poll.forward_fleet_events(&mut console).await;
                 poll.refresh_diff_stats(&mut console).await;

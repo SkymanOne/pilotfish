@@ -19,8 +19,9 @@ use crate::tui::palette::{PaletteAction, PaletteScope};
 use crate::secrets::Secret;
 
 use super::{
-    AskQuestion, BriefState, ConfirmAction, ConfirmState, Console, Effect, KeyState, Overlay,
-    PaletteState, PermissionOverlay, RoutingPanel, SearchState, SessionTarget, questions_of,
+    AskQuestion, BriefState, ConfirmAction, ConfirmState, Console, Effect, KeyState,
+    ModelChoiceState, Overlay, PaletteState, PermissionOverlay, RoutingPanel, SearchState,
+    SessionTarget, ShortlistEditor, questions_of,
 };
 
 impl Console {
@@ -43,7 +44,76 @@ impl Console {
             Overlay::Search(state) => self.handle_search(state, action),
             Overlay::Brief(state) => self.handle_brief(state, action),
             Overlay::Routing(panel) => self.handle_routing(panel, action),
+            Overlay::ModelChoice(state) => self.handle_model_choice(state, action),
         }
+    }
+
+    /// The model-choice prompt: move with `j`/`k`, choose with `enter` or a
+    /// digit, keep the configured model with `d`, and `esc` to answer later
+    /// — the spawn keeps waiting, and `a` on the orchestrator's row brings
+    /// the prompt back.
+    fn handle_model_choice(
+        &mut self,
+        mut state: ModelChoiceState,
+        action: KeyAction,
+    ) -> Vec<Effect> {
+        let Some(question) = self
+            .model_questions
+            .iter()
+            .find(|q| q.id == state.id)
+            .cloned()
+        else {
+            self.overlay = None;
+            return Vec::new();
+        };
+        // raised a moment ago: a key this soon was typed at the composer
+        if self.within_raise_grace() && !matches!(action, KeyAction::Escape) {
+            self.overlay = Some(Overlay::ModelChoice(state));
+            return Vec::new();
+        }
+        let count = question.options.len();
+        let choose = |index: usize| -> Vec<Effect> {
+            question.options.get(index).map_or_else(Vec::new, |option| {
+                vec![Effect::AnswerModelQuestion {
+                    id: question.id.clone(),
+                    model: Some(option.key.clone()),
+                }]
+            })
+        };
+        match action {
+            KeyAction::Move(delta) => {
+                if count > 0 {
+                    let at = i64::try_from(state.selected).unwrap_or(0) + i64::from(delta);
+                    state.selected =
+                        usize::try_from(at.rem_euclid(i64::try_from(count).unwrap_or(1)))
+                            .unwrap_or(0);
+                }
+            }
+            KeyAction::First => state.selected = 0,
+            KeyAction::Last => state.selected = count.saturating_sub(1),
+            KeyAction::Open | KeyAction::Send => {
+                self.overlay = None;
+                return choose(state.selected);
+            }
+            KeyAction::JumpTo(index) if index < count => {
+                self.overlay = None;
+                return choose(index);
+            }
+            KeyAction::InsertChar('d' | 'D') => {
+                self.overlay = None;
+                return vec![Effect::AnswerModelQuestion {
+                    id: question.id,
+                    model: None,
+                }];
+            }
+            KeyAction::Escape => {
+                self.overlay = None;
+                return Vec::new();
+            }
+            _ => {}
+        }
+        self.overlay = Some(Overlay::ModelChoice(state));
+        Vec::new()
     }
 
     fn handle_confirm(&mut self, state: ConfirmState, action: KeyAction) -> Vec<Effect> {
@@ -410,6 +480,9 @@ impl Console {
     /// while a key is being entered, every key is part of it except enter
     /// (save) and esc (cancel).
     fn handle_routing(&mut self, mut panel: RoutingPanel, action: KeyAction) -> Vec<Effect> {
+        if let Some(mut editor) = panel.shortlist.take() {
+            return self.handle_shortlist(panel, &mut editor, action);
+        }
         if let Some(key) = panel.entering.as_mut() {
             match action {
                 KeyAction::InsertChar(ch) => key.push(ch),
@@ -465,8 +538,106 @@ impl Console {
                 }
                 Vec::new()
             }
+            // the confidence limit, in steps of 0.05: 1 always asks, 0 never
+            KeyAction::InsertChar(ch @ ('+' | '=' | '-' | '_')) => {
+                let Some(status) = &panel.status else {
+                    return Vec::new();
+                };
+                let step = if matches!(ch, '+' | '=') { 0.05 } else { -0.05 };
+                let limit = ((status.threshold + step).clamp(0.0, 1.0) * 100.0).round() / 100.0;
+                if (limit - status.threshold).abs() < f64::EPSILON {
+                    return Vec::new();
+                }
+                vec![Effect::SetRoutingThreshold(limit)]
+            }
+            KeyAction::InsertChar('m') => {
+                let Some(status) = &panel.status else {
+                    return Vec::new();
+                };
+                let catalogue = crate::fleet::run::read_pi_cache(self.fleet.root())
+                    .map(|cache| cache.available_models)
+                    .unwrap_or_default();
+                if catalogue.is_empty() {
+                    self.toast(
+                        "! no pi catalogue yet — it is written when a worker first starts",
+                        true,
+                    );
+                    return Vec::new();
+                }
+                panel.shortlist = Some(ShortlistEditor::new(catalogue, &status.models));
+                self.overlay = Some(Overlay::Routing(panel));
+                Vec::new()
+            }
             _ => Vec::new(),
         }
+    }
+
+    /// The shortlist editor, a text field: typing filters, `↑`/`↓` move,
+    /// `enter` ticks or unticks the row, `esc` saves and closes. At the 255
+    /// entries one judgment can weigh, ticking another is refused.
+    fn handle_shortlist(
+        &mut self,
+        mut panel: RoutingPanel,
+        editor: &mut ShortlistEditor,
+        action: KeyAction,
+    ) -> Vec<Effect> {
+        let rows = editor.visible.len();
+        let mut effects = Vec::new();
+        match action {
+            KeyAction::InsertChar(ch) => {
+                editor.query.push(ch);
+                editor.refilter();
+            }
+            KeyAction::InsertBackspace => {
+                editor.query.pop();
+                editor.refilter();
+            }
+            KeyAction::CompletionNext if rows > 0 => editor.selected = (editor.selected + 1) % rows,
+            KeyAction::CompletionPrev if rows > 0 => {
+                editor.selected = (editor.selected + rows - 1) % rows;
+            }
+            KeyAction::ScrollPageDown | KeyAction::ScrollHalfDown => {
+                editor.selected = (editor.selected + 10).min(rows.saturating_sub(1));
+            }
+            KeyAction::ScrollPageUp | KeyAction::ScrollHalfUp => {
+                editor.selected = editor.selected.saturating_sub(10);
+            }
+            KeyAction::Send | KeyAction::AcceptCompletion => {
+                if let Some(model) = editor
+                    .visible
+                    .get(editor.selected)
+                    .and_then(|i| editor.catalogue.get(*i))
+                {
+                    let key = model.key();
+                    if editor.chosen.contains(&key) {
+                        editor.chosen.remove(&key);
+                        editor.changed = true;
+                    } else if editor.count() >= crate::route::MAX_CHOICES {
+                        self.toast(
+                            format!(
+                                "! {} is the most one judgment can weigh — untick one first",
+                                crate::route::MAX_CHOICES
+                            ),
+                            true,
+                        );
+                    } else {
+                        editor.chosen.insert(key);
+                        editor.changed = true;
+                    }
+                }
+            }
+            KeyAction::Escape => {
+                if editor.changed {
+                    effects.push(Effect::SetRoutingModels(editor.models()));
+                }
+                self.overlay = Some(Overlay::Routing(panel));
+                return effects;
+            }
+            _ => {}
+        }
+        panel.shortlist = Some(std::mem::take(editor));
+        self.overlay = Some(Overlay::Routing(panel));
+        effects
     }
 
     /// `b`: pop the selected session's full brief; the composer keeps its
