@@ -598,6 +598,24 @@ fn is_interrupt(key: &KeyEvent) -> bool {
 // ---------------------------------------------------------------------------
 // Anchoring the console on a session
 
+/// The watcher that tells `key`'s orchestrator about its workers: only the
+/// runs it owns, the same predicate the rail filters by, so another session's
+/// worker never lands in this orchestrator's inbox.
+fn session_watcher(
+    fleet: &FleetPaths,
+    key: &SessionKey,
+    cursors: HashMap<String, crate::orch::session::RunCursor>,
+    progress_events: bool,
+) -> FleetWatcher {
+    FleetWatcher::new(FleetWatcherOptions {
+        fleet_dir: fleet.root().to_path_buf(),
+        owner: Some(key.uuid),
+        cursors,
+        progress_events,
+        ..FleetWatcherOptions::default()
+    })
+}
+
 /// Point the console and its poll at `key` and bring that session's facts
 /// in: its runs (by ownership, so the rail shows only this session's
 /// workers), its orchestrator state and transcripts, a watcher anchored on
@@ -621,12 +639,7 @@ async fn anchor_console(
     let mut poll = Poll::new(
         fleet.clone(),
         key.clone(),
-        FleetWatcher::new(FleetWatcherOptions {
-            fleet_dir: fleet.root().to_path_buf(),
-            cursors,
-            progress_events: options.progress_events,
-            ..FleetWatcherOptions::default()
-        }),
+        session_watcher(fleet, &key, cursors, options.progress_events),
     );
     // the old session's texts and selections do not bleed into the new one
     console.begin_session(&key);
@@ -1119,11 +1132,7 @@ mod tests {
         Poll::new(
             fleet.clone(),
             key.clone(),
-            FleetWatcher::new(FleetWatcherOptions {
-                fleet_dir: fleet.root().to_path_buf(),
-                cursors,
-                ..FleetWatcherOptions::default()
-            }),
+            session_watcher(fleet, key, cursors, false),
         )
     }
 
@@ -1253,6 +1262,25 @@ mod tests {
             poll.forward_fleet_events(&mut console).await;
             assert_eq!(count_kind(&fleet, &key, "question"), 1);
             assert_eq!(count_kind(&fleet, &key, "settled"), 1);
+        }
+        {
+            // another session's worker settling is that session's news
+            let (_tmp, fleet, run_id, key) = fleet_with_run("web");
+            let run_dir = fleet.root().join("runs").join(&run_id);
+            let mut state = crate::fleet::run::load_state(&run_dir).unwrap();
+            state.orchestrator_id = Some(uuid::Uuid::new_v4());
+            crate::fleet::run::save_state(&run_dir, &state).unwrap();
+            let mut console = Console::new(fleet.clone());
+            console.orch_key = key.clone();
+            let mut poll = poll_for(&fleet, &key, HashMap::new());
+            poll.watcher.start(false);
+            settle(
+                &fleet,
+                &run_id,
+                &json!({"type":"worker_question","questionId":"q_1","question":"css or tailwind?"}),
+            );
+            poll.forward_fleet_events(&mut console).await;
+            assert!(inbox_lines(&fleet, &key).is_empty());
         }
     }
 

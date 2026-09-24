@@ -2002,6 +2002,7 @@ impl Console {
             .root()
             .parent()
             .map_or_else(|| self.fleet.root().to_path_buf(), Path::to_path_buf);
+        let fleet_dir = self.fleet.root().to_str().map(str::to_string);
         let result: anyhow::Result<()> = async {
             match effect {
                 Effect::SendToOrchestrator(text) => {
@@ -2160,39 +2161,64 @@ impl Console {
                 Effect::RemoveSession(key) => {
                     let result =
                         crate::ops::session::remove_session(self.fleet.root(), &key).await?;
-                    for line in result.out {
-                        self.notice(format!("· {line}"), false);
-                    }
-                    for line in result.err {
-                        self.notice(format!("! {line}"), true);
-                    }
+                    self.report(result.out, result.err);
                 }
                 Effect::SwitchSession(_) => {
                     // the runtime's event loop watches for it: nothing to
                     // carry out here (it re-anchors the polls, watcher and
                     // monitor, which live in `runtime.rs`)
                 }
+                // The `_core` forms: signed by the console (so the watcher
+                // reports `console_steer` / `answered_by_console`), pinned to
+                // this console's fleet, and printing nothing — a refusal
+                // comes back as a notice instead of text under the screen.
                 Effect::WorkerSteer { run_id, message } => {
-                    crate::ops::steer::send(&run_id, Some(&repo_root), &message).await?;
+                    let result = crate::ops::steer::send_core_with_env(
+                        &run_id,
+                        Some(&repo_root),
+                        &message,
+                        Party::Console,
+                        fleet_dir.as_deref(),
+                    )
+                    .await?;
+                    self.report_refusal(result.err);
                 }
                 Effect::WorkerFollowUp { run_id, message } => {
-                    crate::ops::steer::followup(&run_id, Some(&repo_root), &message).await?;
+                    let result = crate::ops::steer::followup_core_with_env(
+                        &run_id,
+                        Some(&repo_root),
+                        &message,
+                        Party::Console,
+                        fleet_dir.as_deref(),
+                    )
+                    .await?;
+                    self.report_refusal(result.err);
                 }
                 Effect::WorkerAnswer {
                     run_id,
                     question_id,
                     message,
                 } => {
-                    crate::ops::steer::answer(
+                    let result = crate::ops::steer::answer_core_with_env(
                         &run_id,
                         Some(&repo_root),
                         question_id.as_deref(),
                         &message,
+                        Party::Console,
+                        fleet_dir.as_deref(),
                     )
                     .await?;
+                    self.report_refusal(result.err);
                 }
                 Effect::WorkerAbort { run_id } => {
-                    crate::ops::steer::stop(&run_id, Some(&repo_root)).await?;
+                    let result = crate::ops::steer::stop_core_with_env(
+                        &run_id,
+                        Some(&repo_root),
+                        Party::Console,
+                        fleet_dir.as_deref(),
+                    )
+                    .await?;
+                    self.report_refusal(result.err);
                 }
                 Effect::WorkerThinking { run_id, level } => {
                     append_envelope(
@@ -2222,7 +2248,10 @@ impl Console {
                     )?;
                 }
                 Effect::RemoveWorker { run_id, force } => {
-                    crate::ops::integrate::cleanup(&run_id, Some(&repo_root), force).await?;
+                    let result =
+                        crate::ops::integrate::cleanup_runs(self.fleet.root(), &run_id, force)
+                            .await?;
+                    self.report(result.out, result.err);
                 }
                 Effect::SavePrefs => self.save_prefs(),
                 Effect::SetMouseCapture(_) | Effect::Quit => {}
@@ -2232,6 +2261,22 @@ impl Console {
         .await;
         if let Err(err) = result {
             self.notice(format!("! {err:#}"), true);
+        }
+    }
+
+    /// An op's own words: what it did as notices, what it refused as errors.
+    fn report(&mut self, out: Vec<String>, err: Vec<String>) {
+        for line in out {
+            self.notice(format!("· {line}"), false);
+        }
+        self.report_refusal(err);
+    }
+
+    /// A steer that went through shows up in the worker's own transcript;
+    /// only a refusal needs saying.
+    fn report_refusal(&mut self, err: Vec<String>) {
+        for line in err {
+            self.notice(format!("! {line}"), true);
         }
     }
 

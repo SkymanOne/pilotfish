@@ -2479,3 +2479,38 @@ fn unconfirmed_thinking_lapses() {
         Some("high")
     );
 }
+
+#[tokio::test]
+async fn console_worker_ops() {
+    let mut c = test_console();
+    write_run(&c, "db-20260829120000", "db", Uuid::new_v4());
+    let inbox = c.fleet.run_inbox("db-20260829120000");
+
+    // a steer is signed by the console, so the watcher tells it apart
+    c.execute_all(vec![Effect::WorkerSteer {
+        run_id: "db-20260829120000".into(),
+        message: "use argon2".into(),
+    }])
+    .await;
+    let lines = std::fs::read_to_string(&inbox).unwrap();
+    let envelope: crate::fleet::envelope::Envelope =
+        serde_json::from_str(lines.lines().last().unwrap()).unwrap();
+    assert_eq!(envelope.from, Party::Console);
+    assert_eq!(envelope.kind, "steer");
+
+    // a refusal is a notice, not text printed under the screen
+    let dir = c.fleet.run_dir("db-20260829120000");
+    let mut state = crate::fleet::run::load_state(&dir).unwrap();
+    state.status = RunStatus::Settled;
+    crate::fleet::run::save_state(&dir, &state).unwrap();
+    c.execute_all(vec![Effect::WorkerAbort {
+        run_id: "db-20260829120000".into(),
+    }])
+    .await;
+    let flash = c.chrome_flash().unwrap();
+    assert!(
+        flash.error && flash.text.contains("is settled"),
+        "{flash:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&inbox).unwrap(), lines);
+}
